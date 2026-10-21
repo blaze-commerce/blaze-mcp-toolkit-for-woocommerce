@@ -11,6 +11,8 @@ namespace Blaze\McpToolkit;
 
 use Blaze\McpToolkit\Abilities\Registrar;
 use Blaze\McpToolkit\Audit\AuditLog;
+use Blaze\McpToolkit\Events\EventRecorder;
+use Blaze\McpToolkit\Events\EventStore;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -27,6 +29,10 @@ final class Plugin {
 
 		// Daily retention. Other modules add their own callbacks to the same hook.
 		add_action( Installer::CLEANUP_HOOK, array( AuditLog::class, 'purge' ), 10, 0 );
+		add_action( Installer::CLEANUP_HOOK, array( EventStore::class, 'purge' ), 10, 0 );
+
+		// Change recorder. These hooks only fire in admin, cron and CLI upgrades, never on the front end.
+		EventRecorder::register();
 
 		Registrar::init();
 	}

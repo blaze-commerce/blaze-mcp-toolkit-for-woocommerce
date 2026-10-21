@@ -13,7 +13,6 @@ use Blaze\McpToolkit\Diagnostics\ErrorGrouper;
 use Blaze\McpToolkit\Diagnostics\JobsHealth;
 use Blaze\McpToolkit\Diagnostics\LogSources;
 use Blaze\McpToolkit\Diagnostics\UpdatesHealth;
-use Blaze\McpToolkit\Installer;
 use Blaze\McpToolkit\Settings;
 
 defined( 'ABSPATH' ) || exit;
@@ -270,8 +269,7 @@ final class HealthSummary extends AbstractAbility {
 	 * Administrators (blzmcp_view_diagnostics), or Shop Managers when the setting allows.
 	 */
 	protected static function can(): bool {
-		return current_user_can( Installer::CAPABILITY )
-			|| ( Settings::shop_manager_diagnostics() && current_user_can( 'manage_woocommerce' ) );
+		return Settings::can_view_diagnostics();
 	}
 
 	/**

@@ -25,6 +25,7 @@ final class Registrar {
 	 */
 	public const ABILITIES = array(
 		HealthSummary::class,
+		UpdateHistory::class,
 	);
 
 	/**

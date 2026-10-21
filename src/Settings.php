@@ -60,4 +60,13 @@ final class Settings {
 	public static function shop_manager_diagnostics(): bool {
 		return (bool) self::get()['shop_manager_diagnostics'];
 	}
+
+	/**
+	 * Whether the current user may use the diagnostics tools (health summary, update history):
+	 * Administrators, or Shop Managers when the setting allows.
+	 */
+	public static function can_view_diagnostics(): bool {
+		return current_user_can( Installer::CAPABILITY )
+			|| ( self::shop_manager_diagnostics() && current_user_can( 'manage_woocommerce' ) );
+	}
 }
