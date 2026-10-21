@@ -98,6 +98,23 @@ if ( Commerce::is_standing_aside() ) {
 		}
 	}
 	wp_set_current_user( $admins[0]->ID );
+
+	// Analytics off while standing aside: every workflow still runs the Analytics check itself.
+	$saved_enabled = get_option( 'woocommerce_analytics_enabled', 'yes' );
+	update_option( 'woocommerce_analytics_enabled', 'no' );
+	$expected_head = '[ANALYTICS_UNAVAILABLE] ' . \Blaze\McpToolkit\Bundled\AnalyticsGuard::message( 'analytics_disabled' );
+	foreach ( array_keys( $workflows ) as $name ) {
+		$ability = wp_get_ability( $name );
+		$result  = null === $ability ? null : $ability->execute();
+		$text    = is_array( $result ) ? $result['instructions'] : '';
+		blzmcp_it_assert( str_starts_with( $text, $expected_head ), "standaside analytics off {$name}: instructions start with the analytics-unavailable message" );
+		blzmcp_it_assert( str_contains( substr( $text, 0, 800 ), 'stop' ), "standaside analytics off {$name}: tells the AI to explain and stop" );
+		$analytics_steps = array_filter( $tools_of( $result ), static fn( $t ) => str_starts_with( (string) $t, 'wc-analytics/' ) );
+		blzmcp_it_assert( is_array( $result ) && array() === $analytics_steps, "standaside analytics off {$name}: no wc-analytics steps" );
+		blzmcp_it_assert( ! str_contains( $text, '- wc-analytics/' ), "standaside analytics off {$name}: analytics steps not listed as skipped" );
+	}
+	update_option( 'woocommerce_analytics_enabled', $saved_enabled );
+
 	require_once ABSPATH . 'wp-admin/includes/user.php';
 	wp_delete_user( $sm_user );
 	Settings::update( $settings );
@@ -224,7 +241,10 @@ if ( null !== $gateway && isset( $samples['blaze-mcp-toolkit/weekly-store-review
 			'parameters'   => json_decode( (string) wp_json_encode( $first['arguments'] ), true ),
 		)
 	);
+	$off = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute();
 	update_option( 'woocommerce_analytics_enabled', $saved_enabled );
+	blzmcp_it_assert( is_array( $off ) && str_starts_with( $off['instructions'], '[ANALYTICS_UNAVAILABLE] ' ), 'analytics off: workflow instructions lead with the analytics-unavailable message' );
+	blzmcp_it_assert( is_array( $off ) && ! in_array( 'wc-analytics/totals', $tools_of( $off ), true ), 'analytics off: workflow drops the analytics steps' );
 	blzmcp_it_assert( is_array( $out ) && false === ( $out['success'] ?? null ), 'tripped guard: gateway reports failure' );
 	blzmcp_it_assert( is_array( $out ) && str_starts_with( (string) ( $out['error'] ?? '' ), '[ANALYTICS_UNAVAILABLE] ' ), 'tripped guard: gateway error text starts with the token' );
 }

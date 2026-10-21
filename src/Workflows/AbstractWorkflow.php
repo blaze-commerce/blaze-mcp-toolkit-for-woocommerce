@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace Blaze\McpToolkit\Workflows;
 
 use Blaze\McpToolkit\Abilities\AbstractAbility;
+use Blaze\McpToolkit\Bundled\AnalyticsGuard;
 use Blaze\McpToolkit\Abilities\Store\StoreProfile;
 
 defined( 'ABSPATH' ) || exit;
@@ -155,11 +156,18 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	protected static function run( array $input ): array|\WP_Error {
 		$period = isset( $input['period'] ) && in_array( $input['period'], self::PERIODS, true ) ? $input['period'] : static::DEFAULT_PERIOD;
 
+		// Checked here, in both modes: while standing aside the analytics tools are WooCommerce for
+		// Claude's, which carry no such guard. Read-only and cached; never touches those tools.
+		$analytics_reason = AnalyticsGuard::unavailable_reason();
+
 		$steps       = array();
 		$missing     = array();
 		$denied      = array();
 		$has_profile = false;
 		foreach ( static::plan( $period ) as $step ) {
+			if ( null !== $analytics_reason && str_starts_with( $step['tool'], 'wc-analytics/' ) ) {
+				continue;
+			}
 			$status = static::step_status( $step['tool'], $step['arguments'] );
 			if ( self::STEP_OK === $status ) {
 				$has_profile = $has_profile || StoreProfile::NAME === $step['tool'];
@@ -173,10 +181,17 @@ abstract class AbstractWorkflow extends AbstractAbility {
 			}
 		}
 
+		$instructions = self::preamble( $missing, $denied, $has_profile ) . "\n\n" . static::guidance( $period );
+		if ( null !== $analytics_reason ) {
+			$instructions = AnalyticsGuard::MESSAGE_TOKEN . ' ' . AnalyticsGuard::message( $analytics_reason )
+				. "\n\nSTOP: WooCommerce Analytics data is not complete on this store, so the analytics steps were left out. Explain the message above to the merchant in plain words, say the figures would be incomplete until it is fixed, and stop: do not run the steps below, report any numbers or write the review.\n\n"
+				. $instructions;
+		}
+
 		return array(
 			'workflow'     => static::NAME,
 			'period'       => $period,
-			'instructions' => self::preamble( $missing, $denied, $has_profile ) . "\n\n" . static::guidance( $period ),
+			'instructions' => $instructions,
 			'steps'        => $steps,
 		);
 	}
