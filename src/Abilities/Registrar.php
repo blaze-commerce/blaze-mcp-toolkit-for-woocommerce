@@ -9,6 +9,8 @@ declare( strict_types=1 );
 
 namespace Blaze\McpToolkit\Abilities;
 
+use Blaze\McpToolkit\Workflows\FailedOrderTriage;
+use Blaze\McpToolkit\Workflows\RefundTriage;
 use Blaze\McpToolkit\Workflows\RevenueDropTriage;
 use Blaze\McpToolkit\Workflows\WeeklyStoreReview;
 
@@ -32,6 +34,8 @@ final class Registrar {
 		AccessCheck::class,
 		WeeklyStoreReview::class,
 		RevenueDropTriage::class,
+		FailedOrderTriage::class,
+		RefundTriage::class,
 	);
 
 	/**

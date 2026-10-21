@@ -21,6 +21,8 @@ global $wpdb;
 $workflows = array(
 	'blaze-mcp-toolkit/weekly-store-review' => 'last_7_days',
 	'blaze-mcp-toolkit/revenue-drop-triage' => 'last_30_days',
+	'blaze-mcp-toolkit/failed-order-triage' => 'last_30_days',
+	'blaze-mcp-toolkit/refund-triage'       => 'last_30_days',
 );
 $periods   = array( 'today', 'yesterday', 'last_7_days', 'last_30_days', 'this_month', 'last_month', 'this_quarter', 'this_year' );
 $health    = 'blaze-mcp-toolkit/health-summary';
@@ -103,6 +105,16 @@ foreach ( $workflows as $name => $default_period ) {
 			$valid = rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $step['arguments'] ), true ) ?? array(), $target->get_input_schema(), 'arguments' );
 			blzmcp_it_assert( true === $valid, "{$name} step {$i} ({$step['tool']}) arguments validate" . ( is_wp_error( $valid ) ? ': ' . $valid->get_error_message() : '' ) );
 		}
+	}
+
+	// As admin every step actually runs (analytics data is complete in wp-env).
+	foreach ( $result['steps'] as $i => $step ) {
+		$target = wp_get_ability( $step['tool'] );
+		if ( null === $target ) {
+			continue;
+		}
+		$out = $target->execute( json_decode( (string) wp_json_encode( $step['arguments'] ), true ) );
+		blzmcp_it_assert( ! is_wp_error( $out ), "{$name} step {$i} ({$step['tool']}) executes" . ( is_wp_error( $out ) ? ': ' . $out->get_error_code() . ' ' . $out->get_error_message() : '' ) );
 	}
 
 	// Every period produces valid steps.
@@ -197,7 +209,7 @@ foreach ( array_keys( $workflows ) as $name ) {
 	$tools = $tools_of( $sm );
 	blzmcp_it_assert( ! in_array( $health, $tools, true ) && ! in_array( $history, $tools, true ), "{$name} as shop_manager has no diagnostics steps" );
 	blzmcp_it_assert( in_array( 'wc-analytics/totals', $tools, true ), "{$name} as shop_manager keeps analytics steps" );
-	if ( 'blaze-mcp-toolkit/weekly-store-review' === $name || 'blaze-mcp-toolkit/revenue-drop-triage' === $name ) {
+	if ( in_array( $name, array( 'blaze-mcp-toolkit/weekly-store-review', 'blaze-mcp-toolkit/revenue-drop-triage' ), true ) ) {
 		blzmcp_it_assert( str_contains( $sm['instructions'], 'not available for your role' ), "{$name} as shop_manager says steps are not available for your role" );
 		blzmcp_it_assert( str_contains( $sm['instructions'], $health ), "{$name} as shop_manager names the dropped health tool" );
 	}
