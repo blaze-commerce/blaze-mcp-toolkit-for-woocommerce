@@ -60,6 +60,14 @@ final class EventRecorder {
 	public static function targets( array $extra ): array {
 		$out  = array();
 		$type = (string) ( $extra['type'] ?? '' );
+		if ( '' === $type ) {
+			// Bulk pre_install (WP-CLI, "update selected") sends only the item key.
+			if ( isset( $extra['plugin'] ) || isset( $extra['plugins'] ) ) {
+				$type = 'plugin';
+			} elseif ( isset( $extra['theme'] ) || isset( $extra['themes'] ) ) {
+				$type = 'theme';
+			}
+		}
 		if ( 'plugin' === $type ) {
 			$list = isset( $extra['plugins'] ) ? (array) $extra['plugins'] : ( isset( $extra['plugin'] ) ? array( $extra['plugin'] ) : array() );
 		} elseif ( 'theme' === $type ) {
@@ -147,11 +155,15 @@ final class EventRecorder {
 			$key     = $kind . ':' . $item;
 			$subject = 'plugin' === $kind ? self::plugin_slug( $item ) : $item;
 			$to      = $after[ $key ] ?? '';
-			if ( $install ) {
+			$from = $before[ $key ] ?? '';
+			if ( $install && '' === $from ) {
 				$events[] = array( $kind . '_installed', $subject, null, '' === $to ? null : $to );
 				continue;
 			}
-			$from     = $before[ $key ] ?? '';
+			// Bulk updates list every requested item; skip ones whose version did not change.
+			if ( '' !== $from && '' !== $to && $from === $to ) {
+				continue;
+			}
 			$events[] = array( $kind . '_updated', $subject, '' === $from ? null : $from, '' === $to ? null : $to );
 		}
 		return $events;
@@ -202,6 +214,9 @@ final class EventRecorder {
 			}
 			foreach ( self::build_events( $targets, self::$before, $after, $install ) as list( $event, $subject, $from, $to ) ) {
 				EventStore::add( $event, $subject, $from, $to );
+			}
+			foreach ( $targets as list( $kind, $item ) ) {
+				unset( self::$before[ $kind . ':' . $item ] ); // Long-lived WP-CLI processes.
 			}
 		} catch ( \Throwable $e ) {
 			unset( $e );
@@ -275,6 +290,7 @@ final class EventRecorder {
 			}
 			$from = self::$before['core'] ?? ( isset( $GLOBALS['wp_version'] ) && is_string( $GLOBALS['wp_version'] ) ? $GLOBALS['wp_version'] : '' );
 			EventStore::add( 'core_updated', self::CORE_SUBJECT, '' === $from ? null : $from, $new_version );
+			unset( self::$before['core'] );
 		} catch ( \Throwable $e ) {
 			unset( $e );
 		}

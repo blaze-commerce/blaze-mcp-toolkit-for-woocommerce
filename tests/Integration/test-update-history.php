@@ -146,6 +146,13 @@ wp_update_user(
 		'display_name' => $orig_display,
 	)
 );
+/*
+ * MANUAL live check (needs network; not run automatically): lower the Version header in
+ * wp-content/plugins/hello-dolly/hello.php (or hello.php), run `wp plugin update hello-dolly`
+ * (or `wp plugin update hello`), then call the ability. Expect plugin_updated with
+ * from_version = the lowered version and to_version = the current one (bulk path, no "type" in pre_install).
+ */
+
 // Clean up so reruns start clean.
 $wpdb->query( $wpdb->prepare( 'DELETE FROM %i', EventStore::table() ) );
 $clear_cache();
