@@ -211,7 +211,20 @@ delete_transient( $anon_flag );
 
 // Throwing run(): generic WP_Error, error row, no exception text.
 wp_set_current_user( $admins[0]->ID );
+$logged     = array();
+$log_filter = static function ( $message, $level, $context ) use ( &$logged ) {
+	if ( 'blzmcp' === ( $context['source'] ?? '' ) ) {
+		$logged[] = array( $level, (string) $message );
+	}
+	return $message;
+};
+add_filter( 'woocommerce_logger_log_message', $log_filter, 10, 3 );
 $thrown = wp_get_ability( Blzmcp_Test_Throw_Ability::NAME )->execute( array() );
+remove_filter( 'woocommerce_logger_log_message', $log_filter, 10 );
+$trace = implode( "\n", array_column( $logged, 1 ) );
+blzmcp_it_assert( array() !== $logged && 'error' === $logged[0][0], 'throwing run() logs an error to the blzmcp WooCommerce log source' );
+blzmcp_it_assert( str_contains( $trace, 'RuntimeException' ) && str_contains( $trace, Blzmcp_Test_Throw_Ability::NAME ) && 1 === preg_match( '/:\d+/', $trace ), 'log entry names the ability, exception class and file:line' );
+blzmcp_it_assert( ! str_contains( $trace, 'wp-config' ) && ! str_contains( $trace, 'secret path' ) && ! str_contains( $trace, ABSPATH ), 'log entry has no exception message and no absolute ABSPATH' );
 blzmcp_it_assert( is_wp_error( $thrown ), 'throwing run() returns a WP_Error' );
 blzmcp_it_assert( is_wp_error( $thrown ) && false === strpos( $thrown->get_error_message(), 'wp-config' ), 'error message does not leak exception text' );
 blzmcp_it_equals( 1, $count( Blzmcp_Test_Throw_Ability::NAME, 'error' ), 'throwing run() writes one error row' );

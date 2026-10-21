@@ -79,7 +79,10 @@ final class AccessCheck extends AbstractAbility {
 					'items'    => array(
 						'type'                 => 'object',
 						'properties'           => array(
-							'untrusted_text' => array( 'type' => 'string' ),
+							'untrusted_text' => array(
+								'type'      => 'string',
+								'maxLength' => self::LABEL_LENGTH,
+							),
 							'permissions'   => array(
 								'type' => 'string',
 								'enum' => array( 'read', 'write', 'read_write' ),
@@ -99,7 +102,10 @@ final class AccessCheck extends AbstractAbility {
 					'items'    => array(
 						'type'                 => 'object',
 						'properties'           => array(
-							'untrusted_text' => array( 'type' => 'string' ),
+							'untrusted_text' => array(
+								'type'      => 'string',
+								'maxLength' => self::LABEL_LENGTH,
+							),
 							'topic'         => array( 'type' => 'string' ),
 							'delivery_host' => array( 'type' => array( 'string', 'null' ) ),
 							'status'        => array( 'type' => 'string' ),
@@ -116,7 +122,10 @@ final class AccessCheck extends AbstractAbility {
 					'items'    => array(
 						'type'                 => 'object',
 						'properties'           => array(
-							'untrusted_text' => array( 'type' => 'string' ),
+							'untrusted_text' => array(
+								'type'      => 'string',
+								'maxLength' => self::LABEL_LENGTH,
+							),
 							'owner_role' => array( 'type' => 'string' ),
 							'last_used'  => array( 'type' => array( 'string', 'null' ) ),
 							'flags'      => $flags( array( 'unused_90d' ) ),

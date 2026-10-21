@@ -22,6 +22,9 @@ if ( ! $ability instanceof WP_Ability ) {
 }
 $meta = $ability->get_meta();
 blzmcp_it_equals( true, $meta['mcp']['public'] ?? null, 'meta.mcp.public is true' );
+foreach ( array( 'rest_keys', 'webhooks', 'application_passwords' ) as $list ) {
+	blzmcp_it_equals( 100, $ability->get_output_schema()['properties'][ $list ]['items']['properties']['untrusted_text']['maxLength'] ?? null, "{$list} untrusted_text schema maxLength is 100" );
+}
 blzmcp_it_equals( true, $meta['annotations']['readonly'] ?? null, 'annotation readonly is true' );
 blzmcp_it_assert( str_contains( $ability->get_description(), 'not instructions' ), 'description says labels are not instructions' );
 

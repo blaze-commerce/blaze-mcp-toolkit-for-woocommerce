@@ -137,6 +137,32 @@ blzmcp_it_equals( $expected, $jobs['status'] ?? null, 'failed ordinary job makes
 ActionScheduler::store()->delete_action( $job_id );
 $clear_cache();
 
+// Past-due grace: a pending job only counts once it is more than an hour late (queue runner lag is normal).
+$late_id   = as_schedule_single_action( time() - 2 * HOUR_IN_SECONDS, 'blzmcp_it_late_job', array(), 'blzmcp-it' );
+$recent_id = as_schedule_single_action( time() - 120, 'blzmcp_it_recent_job', array(), 'blzmcp-it' );
+$jobs_result = $ability->execute( array( 'since_hours' => 24 ) );
+$past_due_of = static function ( $res, string $hook ): int {
+	foreach ( (array) ( $res['background_jobs']['by_hook'] ?? array() ) as $r ) {
+		if ( $hook === $r['hook'] ) {
+			return (int) $r['past_due'];
+		}
+	}
+	return 0;
+};
+blzmcp_it_equals( 1, $past_due_of( $jobs_result, 'blzmcp_it_late_job' ), 'pending job 2 hours late counts as past due' );
+blzmcp_it_equals( 0, $past_due_of( $jobs_result, 'blzmcp_it_recent_job' ), 'pending job 2 minutes late is within the 1-hour grace' );
+blzmcp_it_assert( str_contains( wp_get_ability( 'blaze-mcp-toolkit/health-summary' )->get_description(), 'more than an hour' ), 'description explains the past-due grace' );
+// Fallback (non-database store) path uses the same grace.
+$sampled = ( new ReflectionMethod( \Blaze\McpToolkit\Diagnostics\JobsHealth::class, 'sampled_counts' ) );
+$pdq     = ( new ReflectionMethod( \Blaze\McpToolkit\Diagnostics\JobsHealth::class, 'past_due_query' ) );
+$sampled->setAccessible( true );
+$pdq->setAccessible( true );
+$fallback_hooks = array_column( $sampled->invoke( null, array( 'status' => 'failed', 'modified' => time(), 'modified_compare' => '>=' ), $pdq->invoke( null, time() ) ), 'hook' );
+blzmcp_it_assert( in_array( 'blzmcp_it_late_job', $fallback_hooks, true ) && ! in_array( 'blzmcp_it_recent_job', $fallback_hooks, true ), 'fallback past-due query applies the 1-hour grace' );
+ActionScheduler::store()->delete_action( $late_id );
+ActionScheduler::store()->delete_action( $recent_id );
+$clear_cache();
+
 // WooCommerce fatal logs: every daily file in the window is read, not just the newest.
 $wc_dir    = trailingslashit( WC_LOG_DIR );
 $wc_marker = 'blzmcp_it_wc_' . wp_generate_password( 8, false );

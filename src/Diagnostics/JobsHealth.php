@@ -29,6 +29,9 @@ final class JobsHealth {
 	/** Max characters of a hook name. */
 	private const MAX_HOOK_CHARS = 191;
 
+	/** A pending job only counts as past due once it is this late (normal queue-runner lag). */
+	public const PAST_DUE_GRACE = HOUR_IN_SECONDS;
+
 	/**
 	 * Whether a hook name counts as money-related.
 	 *
@@ -39,7 +42,7 @@ final class JobsHealth {
 	}
 
 	/**
-	 * Failed jobs in the last $days and pending jobs whose scheduled time has passed.
+	 * Failed jobs in the last $days and pending jobs more than an hour past their scheduled time.
 	 *
 	 * With the default database store, per-hook figures come from one grouped query and
 	 * are exact. Otherwise they come from the newest SAMPLE actions per status and
@@ -69,13 +72,9 @@ final class JobsHealth {
 			'modified'         => $since,
 			'modified_compare' => '>=',
 		);
-		$past_due_query = array(
-			'status'       => 'pending',
-			'date'         => $now,
-			'date_compare' => '<',
-		);
+		$past_due_query = self::past_due_query( $now );
 
-		$rows  = self::grouped_counts( $since, $now );
+		$rows  = self::grouped_counts( $since, $now - self::PAST_DUE_GRACE );
 		$exact = null !== $rows;
 		if ( null === $rows ) {
 			$rows = self::sampled_counts( $failed_query, $past_due_query );
@@ -130,11 +129,11 @@ final class JobsHealth {
 	 * Exact per-hook counts from the Action Scheduler table, or null when the
 	 * database store is not in use.
 	 *
-	 * @param int $since Failed since (Unix time).
-	 * @param int $now   Now (Unix time).
+	 * @param int $since  Failed since (Unix time).
+	 * @param int $cutoff Pending jobs scheduled before this are past due (Unix time).
 	 * @return array<int,array{hook:string,key:string,count:int}>|null
 	 */
-	private static function grouped_counts( int $since, int $now ): ?array {
+	private static function grouped_counts( int $since, int $cutoff ): ?array {
 		global $wpdb;
 		if ( ! class_exists( '\ActionScheduler_DBStore' ) || ! method_exists( '\ActionScheduler', 'store' ) || ! ( \ActionScheduler::store() instanceof \ActionScheduler_DBStore ) ) {
 			return null;
@@ -152,7 +151,7 @@ final class JobsHealth {
 				'failed',
 				gmdate( 'Y-m-d H:i:s', $since ),
 				'pending',
-				gmdate( 'Y-m-d H:i:s', $now )
+				gmdate( 'Y-m-d H:i:s', $cutoff )
 			),
 			ARRAY_A
 		);
@@ -168,6 +167,20 @@ final class JobsHealth {
 			);
 		}
 		return $rows;
+	}
+
+	/**
+	 * Pending jobs scheduled more than PAST_DUE_GRACE before now.
+	 *
+	 * @param int $now Now (Unix time).
+	 * @return array<string,mixed>
+	 */
+	private static function past_due_query( int $now ): array {
+		return array(
+			'status'       => 'pending',
+			'date'         => $now - self::PAST_DUE_GRACE,
+			'date_compare' => '<',
+		);
 	}
 
 	/**

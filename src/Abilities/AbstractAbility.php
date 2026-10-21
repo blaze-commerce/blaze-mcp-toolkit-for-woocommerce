@@ -159,6 +159,31 @@ abstract class AbstractAbility {
 	}
 
 	/**
+	 * Leave a server-side trace of a failed run: ability, exception class and file:line (relative to
+	 * ABSPATH, or the file name alone outside it). Never the message, which may hold data or paths.
+	 * Goes to the WooCommerce log, source "blzmcp", when WooCommerce is loaded.
+	 *
+	 * @param \Throwable $e Exception thrown by run().
+	 */
+	private static function log_exception( \Throwable $e ): void {
+		if ( ! function_exists( 'wc_get_logger' ) ) {
+			return;
+		}
+		$file = wp_normalize_path( $e->getFile() );
+		$root = wp_normalize_path( ABSPATH );
+		$file = str_starts_with( $file, $root ) ? substr( $file, strlen( $root ) ) : wp_basename( $file );
+		try {
+			wc_get_logger()->error(
+				sprintf( '%1$s failed: %2$s at %3$s:%4$d', static::NAME, get_class( $e ), $file, $e->getLine() ),
+				array( 'source' => 'blzmcp' )
+			);
+		} catch ( \Throwable $ignored ) {
+			// Logging must never turn a handled failure into a fatal.
+			unset( $ignored );
+		}
+	}
+
+	/**
 	 * Execute callback: cache, time, audit. Never throws.
 	 *
 	 * @param mixed $input Ability input.
@@ -182,6 +207,7 @@ abstract class AbstractAbility {
 		try {
 			$result = static::run( $input );
 		} catch ( \Throwable $e ) {
+			self::log_exception( $e );
 			AuditLog::record( $user_id, static::NAME, $input, 0, self::elapsed_ms( $start ), 'error' );
 			return new \WP_Error(
 				'blzmcp_ability_failed',
