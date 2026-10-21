@@ -4,8 +4,35 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "b868617b509ed28d91e5a9c5d7d573a6",
-    "packages": [],
+    "content-hash": "1ed53df0b50710c165543dfa43dff4f4",
+    "packages": [
+        {
+            "name": "woocommerce/commerce-abilities",
+            "version": "0.4.5",
+            "dist": {
+                "type": "path",
+                "url": "vendor-src/commerce-abilities",
+                "reference": "d83e3764d043ade41227d14b201cc6c795108077"
+            },
+            "require": {
+                "php": ">=7.4"
+            },
+            "type": "library",
+            "autoload": {
+                "classmap": [
+                    "src/"
+                ]
+            },
+            "license": [
+                "GPL-3.0-or-later"
+            ],
+            "description": "Shared commerce abilities, analytics, store knowledge, and readiness scoring for WooCommerce AI products.",
+            "transport-options": {
+                "symlink": false,
+                "relative": true
+            }
+        }
+    ],
     "packages-dev": [
         {
             "name": "dealerdirect/phpcodesniffer-composer-installer",

@@ -17,7 +17,7 @@ tests
 scripts
 docs
 tools
-vendor-src/**/tests
+vendor-src
 package.json
 package-lock.json
 composer.lock

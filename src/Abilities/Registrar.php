@@ -30,6 +30,33 @@ final class Registrar {
 	);
 
 	/**
+	 * Ability classes added at runtime (the bundled store tools, unless standing aside).
+	 *
+	 * @var array<int, class-string<AbstractAbility>>
+	 */
+	private static array $extra = array();
+
+	/**
+	 * Add an ability class to register alongside ABILITIES. Must run before wp_abilities_api_init.
+	 *
+	 * @param class-string<AbstractAbility> $class_name Ability class.
+	 */
+	public static function add( string $class_name ): void {
+		if ( ! in_array( $class_name, self::$extra, true ) ) {
+			self::$extra[] = $class_name;
+		}
+	}
+
+	/**
+	 * Every ability class this request will register.
+	 *
+	 * @return array<int, class-string<AbstractAbility>>
+	 */
+	public static function abilities(): array {
+		return array_merge( self::ABILITIES, self::$extra );
+	}
+
+	/**
 	 * Hook into the Abilities API.
 	 */
 	public static function init(): void {
@@ -77,7 +104,7 @@ final class Registrar {
 		if ( ! function_exists( 'wp_register_ability' ) ) {
 			return;
 		}
-		foreach ( self::ABILITIES as $class ) {
+		foreach ( self::abilities() as $class ) {
 			if ( is_subclass_of( $class, AbstractAbility::class ) ) {
 				$class::register();
 			}

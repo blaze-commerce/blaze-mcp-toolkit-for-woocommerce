@@ -9,8 +9,10 @@ declare( strict_types=1 );
 
 namespace Blaze\McpToolkit;
 
+use Blaze\McpToolkit\Abilities\McpExposure;
 use Blaze\McpToolkit\Abilities\Registrar;
 use Blaze\McpToolkit\Audit\AuditLog;
+use Blaze\McpToolkit\Bundled\Commerce;
 use Blaze\McpToolkit\Events\EventRecorder;
 use Blaze\McpToolkit\Events\EventStore;
 
@@ -35,5 +37,11 @@ final class Plugin {
 		EventRecorder::register();
 
 		Registrar::init();
+
+		// wc-analytics/* public over MCP, whether our bundled copy or WooCommerce for Claude registers them.
+		McpExposure::register();
+
+		// Bundled commerce-abilities and store tools, or stand aside for WooCommerce for Claude (plugins_loaded 20).
+		Commerce::register();
 	}
 }

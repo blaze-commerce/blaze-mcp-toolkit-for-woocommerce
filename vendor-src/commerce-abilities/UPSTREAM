@@ -1,0 +1,22 @@
+Package:   woocommerce/commerce-abilities (namespace WooCommerce\CommerceAbilities)
+Upstream:  https://github.com/woocommerce/woocommerce-claude
+Path:      php-packages/commerce-abilities
+Tag:       v0.4.5 (WooCommerce for Claude 0.4.5)
+Commit:    cdab921aab8d07ef813121ff78b3558af28f39fa
+Commit date: 2026-10-15T11:07:57+01:00
+Copied:    2026-10-21
+Licence:   GPL-3.0-or-later (LICENSE in this folder is the upstream repository's LICENSE file)
+Copyright: Automattic Inc. and the WooCommerce for Claude contributors
+
+Status: copied unmodified. Every file under src/, plus composer.json, composer.lock and
+package.json, is byte-identical to the upstream path at the commit above. LICENSE is the
+upstream repository root LICENSE, copied unmodified. Only this UPSTREAM file was added.
+
+Credit (for the readme changelog):
+  Bundles the commerce-abilities package from WooCommerce for Claude by Automattic
+  (https://github.com/woocommerce/woocommerce-claude, GPL-3.0-or-later), tag v0.4.5,
+  commit cdab921aab8d07ef813121ff78b3558af28f39fa, unmodified.
+
+To update: copy php-packages/commerce-abilities from a newer release tag over this folder,
+update Tag/Commit/Commit date/Copied above, run composer update woocommerce/commerce-abilities,
+and re-run tests/Integration/test-bundled.php (including the stand-aside run).

@@ -16,6 +16,7 @@ $wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $wpdb->prefix . 'blzmcp
 
 delete_option( 'blzmcp_settings' );
 delete_transient( 'blzmcp_schedule_pending' );
+delete_metadata( 'user', 0, 'blzmcp_wcfc_notice_dismissed', '', true );
 
 foreach ( wp_roles()->role_objects as $blzmcp_role ) {
 	$blzmcp_role->remove_cap( 'blzmcp_view_diagnostics' );
