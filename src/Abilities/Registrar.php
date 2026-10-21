@@ -23,7 +23,9 @@ final class Registrar {
 	 *
 	 * @var array<int, class-string<AbstractAbility>>
 	 */
-	public const ABILITIES = array();
+	public const ABILITIES = array(
+		HealthSummary::class,
+	);
 
 	/**
 	 * Hook into the Abilities API.
