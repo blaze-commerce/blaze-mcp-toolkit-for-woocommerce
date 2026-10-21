@@ -36,14 +36,25 @@ final class SetupChecks {
 	);
 
 	/**
-	 * Name parts (after the namespace) that mark an un-annotated ability as read-only.
+	 * Name parts (after the namespace) that mark an un-annotated ability as read-only: a get, list
+	 * or search verb, optionally after one vendor segment (wc-get-orders, yoast-get-seo).
 	 */
-	private const READ_PREFIXES = array( 'get-', 'list-', 'search-' );
+	private const READ_PATTERN = '/^([a-z0-9]+-)?(get|list|search)-/';
 
 	/**
 	 * Name endings that mark an un-annotated ability as read-only.
 	 */
 	private const READ_SUFFIXES = array( '-query', '-info' );
+
+	/**
+	 * Read-only abilities whose names fit no pattern (stats and reports).
+	 */
+	private const READ_NAMES = array( 'site-stats' );
+
+	/**
+	 * Names that look like searches but change content.
+	 */
+	private const WRITE_NAMES = array( 'search-replace', 'buscar-reemplazar' );
 
 	/**
 	 * Run every check.
@@ -394,10 +405,11 @@ final class SetupChecks {
 		}
 
 		$part = false !== strpos( $name, '/' ) ? substr( $name, (int) strpos( $name, '/' ) + 1 ) : $name;
-		foreach ( self::READ_PREFIXES as $prefix ) {
-			if ( str_starts_with( $part, $prefix ) ) {
-				return false;
-			}
+		if ( in_array( $part, self::WRITE_NAMES, true ) ) {
+			return true;
+		}
+		if ( in_array( $part, self::READ_NAMES, true ) || 1 === preg_match( self::READ_PATTERN, $part ) ) {
+			return false;
 		}
 		foreach ( self::READ_SUFFIXES as $suffix ) {
 			if ( str_ends_with( $part, $suffix ) ) {

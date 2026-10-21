@@ -78,7 +78,13 @@ try {
 	blzmcp_it_equals( false, SetupChecks::is_write( 'x/search-things', array() ), 'un-annotated search-* is not write' );
 	blzmcp_it_equals( false, SetupChecks::is_write( 'woocommerce/orders-query', array() ), 'un-annotated *-query is not write' );
 	blzmcp_it_equals( false, SetupChecks::is_write( 'core/get-site-info', array() ), 'un-annotated *-info is not write' );
-	blzmcp_it_equals( true, SetupChecks::is_write( 'ewpa/update-thing', array() ), 'un-annotated update-* is write' );
+	foreach ( array( 'ewpa/wc-get-products', 'ewpa/wc-get-product', 'ewpa/wc-get-orders', 'ewpa/wc-get-order', 'ewpa/wc-get-customers', 'ewpa/yoast-get-seo', 'ewpa/yoast-get-sitemap-index', 'ewpa/site-stats' ) as $read_name ) {
+	blzmcp_it_equals( false, SetupChecks::is_write( $read_name, array() ), "{$read_name} is not write" );
+}
+foreach ( array( 'ewpa/wc-update-product', 'ewpa/wc-update-order-status', 'ewpa/search-replace', 'ewpa/buscar-reemplazar' ) as $write_name ) {
+	blzmcp_it_equals( true, SetupChecks::is_write( $write_name, array() ), "{$write_name} is write" );
+}
+blzmcp_it_equals( true, SetupChecks::is_write( 'ewpa/update-thing', array() ), 'un-annotated update-* is write' );
 	blzmcp_it_equals( true, SetupChecks::is_write( 'x/frobnicate', array() ), 'un-annotated unknown verb is write' );
 	blzmcp_it_equals( true, SetupChecks::is_write( 'x/get-thing', array( 'readonly' => false ) ), 'readonly=false is write even if named get-*' );
 	blzmcp_it_equals( true, SetupChecks::is_write( 'x/get-thing', array( 'readonly' => true, 'destructive' => true ) ), 'readonly=true + destructive=true is write' );
@@ -112,7 +118,7 @@ try {
 	blzmcp_it_equals( 'warn', $by['tools_visible']['status'], 'tools_visible warns when wc-analytics/totals is denylisted' );
 	blzmcp_it_assert( str_contains( $by['tools_visible']['fix'], 'wc-analytics/totals' ), 'tools_visible names the denylisted analytics tool' );
 	update_option( 'ewpa_thirdparty_disabled', array() );
-	blzmcp_it_assert( ! str_contains( SetupChecks::run()[4]['fix'], 'Claude does not need' ), 'no unverified Claude claim' );
+	blzmcp_it_assert( ! str_contains( array_column( SetupChecks::run(), null, 'id' )['chatgpt_connector']['fix'], 'Claude does not need' ), 'no unverified Claude claim' );
 
 	// Settings save.
 	$admins = get_users( array( 'role' => 'administrator', 'number' => 1 ) );
