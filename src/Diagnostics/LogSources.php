@@ -21,6 +21,9 @@ final class LogSources {
 	/** Hard ceiling for any tail read: 5 MB. */
 	public const MAX_TAIL_BYTES = 5242880;
 
+	/** Max WooCommerce fatal-errors files read for one window. */
+	public const MAX_WC_FILES = 7;
+
 	/**
 	 * The three log sources as configured on this site.
 	 *
@@ -99,6 +102,73 @@ final class LogSources {
 		} finally {
 			restore_error_handler();
 		}
+	}
+
+	/**
+	 * WooCommerce fatal-errors-*.log files modified since $since_ts, newest first, at most MAX_WC_FILES.
+	 *
+	 * Each file is realpath-resolved and must sit inside the resolved log directory and be a
+	 * readable regular file (same rules as sources()). Never throws or warns.
+	 *
+	 * @param int         $since_ts   Unix time; older files are skipped.
+	 * @param string|null $wc_log_dir Log directory; null means WC_LOG_DIR. Injectable for tests.
+	 * @return string[] Resolved paths.
+	 */
+	public static function wc_fatal_files( int $since_ts, ?string $wc_log_dir = null ): array {
+		if ( null === $wc_log_dir ) {
+			$wc_log_dir = defined( 'WC_LOG_DIR' ) && is_string( WC_LOG_DIR ) ? WC_LOG_DIR : '';
+		}
+		if ( '' === $wc_log_dir ) {
+			return array();
+		}
+		set_error_handler( static fn(): bool => true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler
+		try {
+			$real_dir = realpath( $wc_log_dir );
+			if ( false === $real_dir || ! is_dir( $real_dir ) ) {
+				return array();
+			}
+			$files = glob( rtrim( $real_dir, '/\\' ) . '/fatal-errors-*.log' );
+			if ( ! is_array( $files ) ) {
+				return array();
+			}
+			$found = array();
+			foreach ( $files as $file ) {
+				$mtime = is_file( $file ) ? filemtime( $file ) : false;
+				if ( false === $mtime || $mtime < $since_ts ) {
+					continue;
+				}
+				$state = self::check_quiet( $file, $real_dir );
+				if ( $state['readable'] && null !== $state['path'] ) {
+					$found[ $state['path'] ] = $mtime;
+				}
+			}
+			arsort( $found );
+			return array_slice( array_keys( $found ), 0, self::MAX_WC_FILES );
+		} finally {
+			restore_error_handler();
+		}
+	}
+
+	/**
+	 * Tail lines of every file from wc_fatal_files(), oldest file first. The byte budget
+	 * (at most 5 MB) is split evenly across the files.
+	 *
+	 * @param int         $since_ts   Unix time; older files are skipped.
+	 * @param string|null $wc_log_dir Log directory; null means WC_LOG_DIR. Injectable for tests.
+	 * @param int         $budget     Total bytes to read across all files.
+	 * @return string[]
+	 */
+	public static function wc_fatal_lines( int $since_ts, ?string $wc_log_dir = null, int $budget = self::MAX_TAIL_BYTES ): array {
+		$files = self::wc_fatal_files( $since_ts, $wc_log_dir );
+		if ( array() === $files ) {
+			return array();
+		}
+		$per_file = intdiv( min( $budget, self::MAX_TAIL_BYTES ), count( $files ) );
+		$lines    = array();
+		foreach ( array_reverse( $files ) as $file ) {
+			$lines = array_merge( $lines, self::tail( $file, $per_file, $files ) );
+		}
+		return $lines;
 	}
 
 	/**

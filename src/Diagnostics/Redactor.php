@@ -336,6 +336,9 @@ final class Redactor {
 			$text
 		);
 
+		// Stream-wrapper URLs to absolute files (phar:///usr/local/bin/wp/..., file:///etc/...).
+		$text = self::sub( '#\b(phar|file|compress\.zlib|compress\.bzip2|zip|glob)://(?:/|[A-Za-z]:[\\\\/])[^\s\'"()<>|]*#i', '$1://[path]', $text );
+
 		// Remaining absolute paths (Windows, then Unix). Short URL-like paths are left alone.
 		$text = self::sub( '#(?<![\w:/.\\\\])[A-Za-z]:\\\\(?:[^\s\\\\/\'"()<>|:*?]+\\\\?)+#', '[path]', $text );
 		return self::subcb(

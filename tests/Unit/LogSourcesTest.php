@@ -159,6 +159,59 @@ final class LogSourcesTest extends TestCase {
 		$this->assertFalse( $empty['readable'] );
 	}
 
+	public function test_wc_fatal_files_within_window_newest_first(): void {
+		$dir   = $this->tmp_dir();
+		$older = $dir . '/fatal-errors-2026-10-18-aaa.log';
+		$newer = $dir . '/fatal-errors-2026-10-21-bbb.log';
+		$stale = $dir . '/fatal-errors-2026-09-01-ccc.log';
+		file_put_contents( $older, "2026-10-18T10:00:00+00:00 CRITICAL older fatal\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $newer, "2026-10-21T10:00:00+00:00 CRITICAL newer fatal\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $stale, "2026-09-01T10:00:00+00:00 CRITICAL stale fatal\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $dir . '/other-2026-10-21.log', "not a fatal log\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		touch( $older, time() - 3 * 86400 );
+		touch( $newer, time() - 60 );
+		touch( $stale, time() - 40 * 86400 );
+
+		$since = time() - 7 * 86400;
+		$this->assertSame( array( realpath( $newer ), realpath( $older ) ), LogSources::wc_fatal_files( $since, $dir ) );
+		$this->assertSame( array( realpath( $newer ) ), LogSources::wc_fatal_files( time() - 86400, $dir ) );
+
+		// Lines come back oldest file first, and never include files outside the window.
+		$lines = LogSources::wc_fatal_lines( $since, $dir );
+		$this->assertSame(
+			array( '2026-10-18T10:00:00+00:00 CRITICAL older fatal', '2026-10-21T10:00:00+00:00 CRITICAL newer fatal' ),
+			$lines
+		);
+		$this->assertSame( array(), LogSources::wc_fatal_files( $since, null ) );
+		$this->assertSame( array(), LogSources::wc_fatal_lines( $since, $dir . '/missing' ) );
+	}
+
+	public function test_wc_fatal_files_capped_at_seven_and_budget_split(): void {
+		$dir = $this->tmp_dir();
+		for ( $i = 1; $i <= 9; $i++ ) {
+			$f = sprintf( '%s/fatal-errors-2026-10-%02d-x.log', $dir, $i );
+			file_put_contents( $f, str_repeat( "2026-10-21T10:00:00+00:00 CRITICAL line {$i}\n", 3 ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+			touch( $f, time() - ( 10 - $i ) * 60 );
+		}
+		$files = LogSources::wc_fatal_files( time() - 86400, $dir );
+		$this->assertCount( 7, $files );
+		$this->assertSame( realpath( $dir . '/fatal-errors-2026-10-09-x.log' ), $files[0] );
+
+		// 7 files share the budget: 7 * 50 bytes = 350 total, so each file gets 50 bytes (about one line).
+		$lines = LogSources::wc_fatal_lines( time() - 86400, $dir, 350 );
+		$this->assertLessThanOrEqual( 7, count( $lines ) );
+		$this->assertGreaterThanOrEqual( 1, count( $lines ) );
+	}
+
+	public function test_wc_fatal_files_reject_symlink_escape(): void {
+		$dir    = $this->tmp_dir();
+		$target = $this->tmp_file( "2026-10-21T10:00:00+00:00 CRITICAL secret\n" );
+		symlink( $target, $dir . '/fatal-errors-2026-10-21-x.log' );
+		$this->cleanup[] = $dir . '/fatal-errors-2026-10-21-x.log';
+		$this->assertSame( array(), LogSources::wc_fatal_files( time() - 86400, $dir ) );
+		$this->assertSame( array(), LogSources::wc_fatal_lines( time() - 86400, $dir ) );
+	}
+
 	public function test_symlink_escaping_log_dir_is_rejected(): void {
 		$dir = $this->tmp_dir();
 		$target = $this->tmp_file( "secret\n" );

@@ -41,28 +41,32 @@ final class JobsHealth {
 	/**
 	 * Failed jobs in the last $days and pending jobs whose scheduled time has passed.
 	 *
+	 * With the default database store, per-hook figures come from one grouped query and
+	 * are exact. Otherwise they come from the newest SAMPLE actions per status and
+	 * by_hook_exact is false.
+	 *
 	 * @param int $days Look-back window for failures.
-	 * @return array{available:bool,failed:int,past_due:int,money_related_failed:int,by_hook:array<int,array{hook:string,failed:int,past_due:int,money_related:bool}>,by_hook_complete:bool}
+	 * @return array{available:bool,failed:int,past_due:int,money_related_failed:int,by_hook:array<int,array{hook:string,failed:int,past_due:int,money_related:bool}>,by_hook_exact:bool}
 	 */
 	public static function summary( int $days = 7 ): array {
-		$empty = array(
-			'available'            => false,
-			'failed'               => 0,
-			'past_due'             => 0,
-			'money_related_failed' => 0,
-			'by_hook'              => array(),
-			'by_hook_complete'     => true,
-		);
 		if ( ! self::available() ) {
-			return $empty;
+			return array(
+				'available'            => false,
+				'failed'               => 0,
+				'past_due'             => 0,
+				'money_related_failed' => 0,
+				'by_hook'              => array(),
+				'by_hook_exact'        => true,
+			);
 		}
 
-		$days = max( 1, $days );
-		$now  = time();
+		$days  = max( 1, $days );
+		$now   = time();
+		$since = $now - $days * DAY_IN_SECONDS;
 
 		$failed_query   = array(
 			'status'           => 'failed',
-			'modified'         => $now - $days * DAY_IN_SECONDS,
+			'modified'         => $since,
 			'modified_compare' => '>=',
 		);
 		$past_due_query = array(
@@ -71,33 +75,35 @@ final class JobsHealth {
 			'date_compare' => '<',
 		);
 
-		$failed_actions   = self::sample( $failed_query );
-		$past_due_actions = self::sample( $past_due_query );
-		$failed_total     = self::count( $failed_query, count( $failed_actions ) );
-		$past_due_total   = self::count( $past_due_query, count( $past_due_actions ) );
+		$rows  = self::grouped_counts( $since, $now );
+		$exact = null !== $rows;
+		if ( null === $rows ) {
+			$rows = self::sampled_counts( $failed_query, $past_due_query );
+		}
 
 		$hooks = array();
-		foreach ( array( 'failed' => $failed_actions, 'past_due' => $past_due_actions ) as $key => $actions ) {
-			foreach ( $actions as $action ) {
-				$hook = is_object( $action ) && method_exists( $action, 'get_hook' ) ? (string) $action->get_hook() : '';
-				if ( '' === $hook ) {
-					continue;
-				}
-				$hook = substr( $hook, 0, self::MAX_HOOK_CHARS );
-				if ( ! isset( $hooks[ $hook ] ) ) {
-					$hooks[ $hook ] = array(
-						'hook'          => $hook,
-						'failed'        => 0,
-						'past_due'      => 0,
-						'money_related' => self::is_money_related( $hook ),
-					);
-				}
-				++$hooks[ $hook ][ $key ];
+		foreach ( $rows as $row ) {
+			$hook = substr( $row['hook'], 0, self::MAX_HOOK_CHARS );
+			if ( '' === $hook ) {
+				continue;
 			}
+			if ( ! isset( $hooks[ $hook ] ) ) {
+				$hooks[ $hook ] = array(
+					'hook'          => $hook,
+					'failed'        => 0,
+					'past_due'      => 0,
+					'money_related' => self::is_money_related( $hook ),
+				);
+			}
+			$hooks[ $hook ][ $row['key'] ] += $row['count'];
 		}
 
 		$money_failed = 0;
+		$failed_sum   = 0;
+		$past_due_sum = 0;
 		foreach ( $hooks as $row ) {
+			$failed_sum   += $row['failed'];
+			$past_due_sum += $row['past_due'];
 			if ( $row['money_related'] ) {
 				$money_failed += $row['failed'];
 			}
@@ -106,18 +112,87 @@ final class JobsHealth {
 		$hooks = array_values( $hooks );
 		usort(
 			$hooks,
-			static fn( array $a, array $b ): int => array( (int) ( $b['money_related'] && $b['failed'] > 0 ), $b['failed'], $b['past_due'], $a['hook'] )
-				<=> array( (int) ( $a['money_related'] && $a['failed'] > 0 ), $a['failed'], $a['past_due'], $b['hook'] )
+			static fn( array $a, array $b ): int => array( (int) ( $b['money_related'] && $b['failed'] > 0 ), (int) $b['money_related'], $b['failed'] + $b['past_due'], $a['hook'] )
+				<=> array( (int) ( $a['money_related'] && $a['failed'] > 0 ), (int) $a['money_related'], $a['failed'] + $a['past_due'], $b['hook'] )
 		);
 
 		return array(
 			'available'            => true,
-			'failed'               => $failed_total,
-			'past_due'             => $past_due_total,
+			'failed'               => $exact ? $failed_sum : self::count( $failed_query, $failed_sum ),
+			'past_due'             => $exact ? $past_due_sum : self::count( $past_due_query, $past_due_sum ),
 			'money_related_failed' => $money_failed,
 			'by_hook'              => array_slice( $hooks, 0, self::MAX_HOOKS ),
-			'by_hook_complete'     => count( $failed_actions ) >= $failed_total && count( $past_due_actions ) >= $past_due_total && count( $hooks ) <= self::MAX_HOOKS,
+			'by_hook_exact'        => $exact,
 		);
+	}
+
+	/**
+	 * Exact per-hook counts from the Action Scheduler table, or null when the
+	 * database store is not in use.
+	 *
+	 * @param int $since Failed since (Unix time).
+	 * @param int $now   Now (Unix time).
+	 * @return array<int,array{hook:string,key:string,count:int}>|null
+	 */
+	private static function grouped_counts( int $since, int $now ): ?array {
+		global $wpdb;
+		if ( ! class_exists( '\ActionScheduler_DBStore' ) || ! method_exists( '\ActionScheduler', 'store' ) || ! ( \ActionScheduler::store() instanceof \ActionScheduler_DBStore ) ) {
+			return null;
+		}
+		$table = $wpdb->prefix . 'actionscheduler_actions';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Read-only existence check; result is cached by the ability.
+		if ( $table !== $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) ) {
+			return null;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- One grouped read; the ability caches its result.
+		$results = $wpdb->get_results(
+			$wpdb->prepare(
+				'SELECT hook, status, COUNT(*) AS c FROM %i WHERE (status = %s AND last_attempt_gmt >= %s) OR (status = %s AND scheduled_date_gmt < %s) GROUP BY hook, status',
+				$table,
+				'failed',
+				gmdate( 'Y-m-d H:i:s', $since ),
+				'pending',
+				gmdate( 'Y-m-d H:i:s', $now )
+			),
+			ARRAY_A
+		);
+		if ( ! is_array( $results ) ) {
+			return null;
+		}
+		$rows = array();
+		foreach ( $results as $r ) {
+			$rows[] = array(
+				'hook'  => (string) $r['hook'],
+				'key'   => 'failed' === $r['status'] ? 'failed' : 'past_due',
+				'count' => (int) $r['c'],
+			);
+		}
+		return $rows;
+	}
+
+	/**
+	 * Per-hook counts from the newest SAMPLE actions per status (non-database stores).
+	 *
+	 * @param array<string,mixed> $failed_query   Failed query.
+	 * @param array<string,mixed> $past_due_query Past-due query.
+	 * @return array<int,array{hook:string,key:string,count:int}>
+	 */
+	private static function sampled_counts( array $failed_query, array $past_due_query ): array {
+		$rows = array();
+		foreach ( array(
+			'failed'   => $failed_query,
+			'past_due' => $past_due_query,
+		) as $key => $query ) {
+			foreach ( self::sample( $query ) as $action ) {
+				$hook = is_object( $action ) && method_exists( $action, 'get_hook' ) ? (string) $action->get_hook() : '';
+				$rows[] = array(
+					'hook'  => $hook,
+					'key'   => $key,
+					'count' => 1,
+				);
+			}
+		}
+		return $rows;
 	}
 
 	/**

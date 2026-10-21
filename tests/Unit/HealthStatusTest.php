@@ -86,6 +86,16 @@ final class HealthStatusTest extends TestCase {
 		$this->assertSame( 'green', HealthSummary::status_for( self::php( array( self::source( true ) ), array( self::group( 'error', 10 ), self::group( 'warning', 10 ) ) ) ) );
 	}
 
+	public function test_health_uses_exact_counts_over_capped_groups(): void {
+		$section           = self::php( array( self::source( true ) ), array( self::group( 'error', 2 ) ) );
+		$section['counts'] = array( 'fatal' => 0, 'error' => 15, 'warning' => 6, 'notice' => 0, 'deprecated' => 0 );
+		$this->assertSame( 'amber', HealthSummary::status_for( $section ) );
+		$section['counts'] = array( 'fatal' => 1, 'error' => 0, 'warning' => 0, 'notice' => 0, 'deprecated' => 0 );
+		$this->assertSame( 'red', HealthSummary::status_for( $section ) );
+		$section['counts'] = array( 'fatal' => 0, 'error' => 10, 'warning' => 10, 'notice' => 99, 'deprecated' => 0 );
+		$this->assertSame( 'green', HealthSummary::status_for( $section ) );
+	}
+
 	public function test_jobs_money_related_failure_is_red(): void {
 		$by_hook = array(
 			array( 'hook' => 'woocommerce_deliver_webhook_async', 'failed' => 1, 'past_due' => 0, 'money_related' => true ),
@@ -115,16 +125,22 @@ final class HealthStatusTest extends TestCase {
 		}
 	}
 
-	public function test_updates_unknown_is_amber(): void {
-		$this->assertSame( 'amber', HealthSummary::status_for( self::updates( array( 'plugins_unknown' => 1 ) ) ) );
-		$this->assertSame( 'amber', HealthSummary::status_for( self::updates( array(), '6.9.1', null, 'unknown' ) ) );
+	public function test_updates_unknown_plugins_and_themes_stay_green(): void {
+		// Ruling: unknown plugin/theme update status adds a note only (custom plugins are always unknown).
+		$this->assertSame( 'green', HealthSummary::status_for( self::updates( array( 'plugins_unknown' => 3, 'themes_unknown' => 2 ) ) ) );
 		$this->assertSame( 'green', HealthSummary::status_for( self::updates( array( 'plugin_updates' => 10 ) ) ) );
 	}
 
-	public function test_updates_many_plugins_or_major_core_is_amber(): void {
+	public function test_updates_unknown_core_is_amber(): void {
+		$this->assertSame( 'amber', HealthSummary::status_for( self::updates( array(), '6.9.1', null, 'unknown' ) ) );
+	}
+
+	public function test_updates_many_plugins_or_any_core_update_is_amber(): void {
 		$this->assertSame( 'amber', HealthSummary::status_for( self::updates( array( 'plugin_updates' => 11 ) ) ) );
 		$this->assertSame( 'amber', HealthSummary::status_for( self::updates( array(), '6.9.1', '7.0', 'available' ) ) );
-		$this->assertSame( 'green', HealthSummary::status_for( self::updates( array(), '6.9.1', '6.9.2', 'available' ) ) );
+		// Minor releases carry WordPress security fixes, so any core update is amber.
+		$this->assertSame( 'amber', HealthSummary::status_for( self::updates( array(), '6.9.1', '6.9.2', 'available' ) ) );
+		$this->assertSame( 'green', HealthSummary::status_for( self::updates( array(), '6.9.2', null, 'current' ) ) );
 	}
 
 	public function test_overall_is_worst(): void {
@@ -132,12 +148,5 @@ final class HealthStatusTest extends TestCase {
 		$this->assertSame( 'amber', HealthSummary::status_for( array( 'kind' => 'overall', 'statuses' => array( 'green', 'amber', 'green' ) ) ) );
 		$this->assertSame( 'green', HealthSummary::status_for( array( 'kind' => 'overall', 'statuses' => array( 'green', 'green', 'green' ) ) ) );
 		$this->assertSame( 'amber', HealthSummary::status_for( array( 'kind' => 'overall', 'statuses' => array() ) ) );
-	}
-
-	public function test_is_major_core_update(): void {
-		$this->assertTrue( HealthSummary::is_major_core_update( '6.9.1', '7.0' ) );
-		$this->assertTrue( HealthSummary::is_major_core_update( '6.8', '6.9' ) );
-		$this->assertFalse( HealthSummary::is_major_core_update( '6.9', '6.9.1' ) );
-		$this->assertFalse( HealthSummary::is_major_core_update( '6.9.1', null ) );
 	}
 }

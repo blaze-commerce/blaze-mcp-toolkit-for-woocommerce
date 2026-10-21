@@ -31,13 +31,15 @@ blzmcp_it_equals( true, $meta['mcp']['public'] ?? null, 'meta.mcp.public is true
 blzmcp_it_equals( true, $meta['annotations']['readonly'] ?? null, 'annotation readonly is true' );
 blzmcp_it_assert( str_contains( $ability->get_description(), 'untrusted_text' ), 'description warns about untrusted_text' );
 blzmcp_it_assert( str_contains( strtolower( $ability->get_description() ), 'unknown, not healthy' ), 'description says unreadable means unknown, not healthy' );
+blzmcp_it_assert( str_contains( $ability->get_description(), 'hook names and plugin and theme names also come from the site' ), 'description warns hook/plugin/theme names are site data' );
 
 // Append a fatal line (with an email in it) to wp-content/debug.log; restore the file afterwards.
 $log      = WP_CONTENT_DIR . '/debug.log';
 $existed  = file_exists( $log );
 $old_size = $existed ? (int) filesize( $log ) : 0;
 $marker   = 'blzmcp_it_' . wp_generate_password( 8, false );
-$line     = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Fatal error:  Uncaught Exception: ' . $marker . ' payment failed for jane.doe@example.com in /var/www/html/wp-content/plugins/fake-gateway/gateway.php:42' . "\n";
+$line     = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Fatal error:  Uncaught Exception: ' . $marker . ' payment failed for jane.doe@example.com in /var/www/html/wp-content/plugins/fake-gateway/gateway.php:42' . "\n"
+	. '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Fatal error:  Uncaught Error: ' . $marker . '_phar in phar:///usr/local/bin/wp/vendor/wp-cli/eval-command/src/EvalFile_Command.php(85) : eval()\'d code:21' . "\n";
 file_put_contents( $log, $line, FILE_APPEND );
 
 $admins = get_users( array( 'role' => 'administrator', 'number' => 1 ) );
@@ -76,6 +78,14 @@ $json = (string) wp_json_encode( $result );
 blzmcp_it_equals( 0, preg_match( '/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i', $json ), 'output JSON has no email address' );
 blzmcp_it_assert( ! str_contains( $json, '"path"' ), 'output JSON has no path key' );
 blzmcp_it_assert( ! str_contains( $json, '/var/www' ) && ! str_contains( $json, '\/var\/www' ), 'output JSON has no absolute filesystem path' );
+blzmcp_it_assert( ! str_contains( $json, 'usr\/local' ) && ! str_contains( $json, 'usr/local' ), 'phar:// absolute path is masked' );
+$sev_ok = true;
+foreach ( (array) ( $result['php_errors']['groups'] ?? array() ) as $group ) {
+	$sev_ok = $sev_ok && in_array( $group['severity'], array( 'fatal', 'error', 'warning', 'notice', 'deprecated' ), true );
+}
+blzmcp_it_assert( $sev_ok, 'every severity is in the enum' );
+$c = $result['php_errors']['counts'] ?? array();
+blzmcp_it_assert( ( $c['fatal'] ?? 0 ) >= 2, 'counts.fatal covers the appended fatals' );
 
 // Sections are deduplicated: wp_debug and php_error_log both point at debug.log here.
 $ids = array_column( (array) ( $result['php_errors']['sources'] ?? array() ), 'id' );
@@ -86,7 +96,7 @@ foreach ( (array) ( $result['php_errors']['groups'] ?? array() ) as $group ) {
 		$marker_groups += (int) $group['count'];
 	}
 }
-blzmcp_it_equals( 1, $marker_groups, 'the same file is read once (fatal counted once)' );
+blzmcp_it_equals( 2, $marker_groups, 'the same file is read once (each appended fatal counted once)' );
 
 blzmcp_it_assert( in_array( $result['background_jobs']['status'] ?? null, array( 'red', 'amber', 'green' ), true ), 'background_jobs has a status' );
 blzmcp_it_assert( is_int( $result['background_jobs']['failed'] ?? null ) && is_int( $result['background_jobs']['past_due'] ?? null ), 'background_jobs has counts' );
@@ -110,6 +120,11 @@ blzmcp_it_equals( 'red', $jobs['status'] ?? null, 'failed money-related job make
 blzmcp_it_assert( ( $jobs['failed'] ?? 0 ) >= 1 && ( $jobs['money_related_failed'] ?? 0 ) >= 1, 'failed job is counted as money-related' );
 $hook_row = array_values( array_filter( (array) ( $jobs['by_hook'] ?? array() ), static fn( $r ) => 'blzmcp_it_stock_sync' === $r['hook'] ) );
 blzmcp_it_assert( isset( $hook_row[0] ) && 1 === $hook_row[0]['failed'] && true === $hook_row[0]['money_related'], 'by_hook lists the failed hook' );
+if ( ActionScheduler::store() instanceof ActionScheduler_DBStore ) {
+	blzmcp_it_assert( ! preg_grep( '/not using its database store/', (array) ( $jobs_result['notes'] ?? array() ) ), 'database store: per-hook counts are exact (no sample note)' );
+} else {
+	blzmcp_it_assert( (bool) preg_grep( '/not using its database store/', (array) ( $jobs_result['notes'] ?? array() ) ), 'non-database store: sample note is shown' );
+}
 ActionScheduler::store()->delete_action( $job_id );
 
 $job_id = as_schedule_single_action( time() - 120, 'blzmcp_it_plain_job', array(), 'blzmcp-it' );
@@ -120,6 +135,83 @@ $jobs        = is_array( $jobs_result ) ? $jobs_result['background_jobs'] : arra
 $expected    = ( $jobs['money_related_failed'] ?? 0 ) > 0 ? 'red' : 'amber';
 blzmcp_it_equals( $expected, $jobs['status'] ?? null, 'failed ordinary job makes background_jobs amber (unless other money jobs failed)' );
 ActionScheduler::store()->delete_action( $job_id );
+$clear_cache();
+
+// WooCommerce fatal logs: every daily file in the window is read, not just the newest.
+$wc_dir    = trailingslashit( WC_LOG_DIR );
+$wc_marker = 'blzmcp_it_wc_' . wp_generate_password( 8, false );
+$wc_old    = $wc_dir . 'fatal-errors-' . gmdate( 'Y-m-d', time() - 3 * DAY_IN_SECONDS ) . '-blzmcpit.log';
+$wc_new    = $wc_dir . 'fatal-errors-' . gmdate( 'Y-m-d' ) . '-blzmcpit.log';
+file_put_contents( $wc_old, gmdate( 'Y-m-d\TH:i:s+00:00', time() - 3 * DAY_IN_SECONDS ) . ' CRITICAL Uncaught Error: ' . $wc_marker . " old\n" );
+file_put_contents( $wc_new, gmdate( 'Y-m-d\TH:i:s+00:00' ) . ' CRITICAL Uncaught Error: ' . $wc_marker . " new\n" );
+touch( $wc_old, time() - 3 * DAY_IN_SECONDS );
+$wc_hits = static function ( $res ) use ( $wc_marker ): array {
+	$hits = array();
+	foreach ( (array) ( $res['php_errors']['groups'] ?? array() ) as $g ) {
+		if ( str_contains( (string) $g['untrusted_text'], $wc_marker ) && 'wc_fatal' === $g['source'] ) {
+			$hits[] = substr( (string) $g['untrusted_text'], -3 );
+		}
+	}
+	sort( $hits );
+	return $hits;
+};
+$clear_cache();
+$week = $ability->execute( array( 'since_hours' => 168 ) );
+blzmcp_it_equals( array( 'new', 'old' ), $wc_hits( $week ), 'since_hours 168 reads older WooCommerce fatal files too' );
+$clear_cache();
+$day = $ability->execute( array( 'since_hours' => 24 ) );
+blzmcp_it_equals( array( 'new' ), $wc_hits( $day ), 'since_hours 24 skips the 3-day-old WooCommerce file' );
+blzmcp_it_assert( is_array( $day ) && (bool) preg_grep( '/may be counted once from the PHP log and once from the WooCommerce log/', $day['notes'] ), 'duplicate-fatal note when WooCommerce and PHP logs are both readable' );
+unlink( $wc_old );
+unlink( $wc_new );
+
+// Core updates: any available core update (even a minor one) is amber; unknown plugins/themes alone are not.
+$saved_core = get_site_transient( 'update_core' );
+$wp_version = get_bloginfo( 'version' );
+$offer      = static function ( string $response, string $version ) {
+	return (object) array(
+		'response' => $response,
+		'download' => 'https://example.invalid/wordpress.zip',
+		'locale'   => 'en_US',
+		'current'  => $version,
+		'version'  => $version,
+		'packages' => (object) array(),
+	);
+};
+set_site_transient(
+	'update_core',
+	(object) array(
+		'updates'         => array( $offer( 'latest', $wp_version ) ),
+		'last_checked'    => time(),
+		'version_checked' => $wp_version,
+	)
+);
+$clear_cache();
+$latest = $ability->execute( array( 'since_hours' => 24 ) );
+blzmcp_it_equals( 'current', $latest['updates']['core']['update_status'] ?? null, 'core is current with a latest offer' );
+blzmcp_it_assert( ( $latest['updates']['totals']['plugins_unknown'] ?? 0 ) + ( $latest['updates']['totals']['themes_unknown'] ?? 0 ) > 0, 'there are unknown plugins/themes in wp-env' );
+blzmcp_it_equals( 'green', $latest['updates']['status'] ?? null, 'unknown plugins/themes alone keep updates green' );
+blzmcp_it_assert( (bool) preg_grep( '/does not change the updates status/', (array) ( $latest['notes'] ?? array() ) ), 'unknown plugins/themes add a note' );
+
+$parts = explode( '.', $wp_version );
+$minor = $parts[0] . '.' . ( $parts[1] ?? '0' ) . '.' . ( (int) ( $parts[2] ?? 0 ) + 1 );
+set_site_transient(
+	'update_core',
+	(object) array(
+		'updates'         => array( $offer( 'upgrade', $minor ) ),
+		'last_checked'    => time(),
+		'version_checked' => $wp_version,
+	)
+);
+$clear_cache();
+$upgrade = $ability->execute( array( 'since_hours' => 24 ) );
+blzmcp_it_equals( $minor, $upgrade['updates']['core']['available'] ?? null, 'minor core update is reported' );
+blzmcp_it_equals( 'amber', $upgrade['updates']['status'] ?? null, 'minor core update makes updates amber' );
+if ( false === $saved_core ) {
+	delete_site_transient( 'update_core' );
+} else {
+	set_site_transient( 'update_core', $saved_core );
+}
 $clear_cache();
 
 // Shop manager with the setting off: WP_Error.

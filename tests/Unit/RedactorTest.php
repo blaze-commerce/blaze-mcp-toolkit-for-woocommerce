@@ -63,6 +63,7 @@ final class RedactorTest extends TestCase {
 			'github'           => '/ghp_\w{10,}/',
 			'slack'            => '/xox[bap]-\d/',
 			'private key'      => '/BEGIN [A-Z ]*PRIVATE KEY-----\S/',
+			'stream path'      => '#(?:phar|file)://(?:/|[A-Za-z]:)#i',
 			'abs path'         => '/(?<![\w:\/.])\/(?:home|www|Users)\//',
 			'windows path'     => '/[A-Z]:\\\\Users/',
 			'wc cs key'        => '/cs_[a-f0-9]{40}/',
@@ -123,6 +124,15 @@ final class RedactorTest extends TestCase {
 	public function test_paths_outside_wp_content_masked(): void {
 		$this->assertSame( '[path]', $this->redact( '/home/user/secret.txt' ) );
 		$this->assertSame( 'open [path]: failed', $this->redact( 'open /var/lib/mysql/data.sock: failed' ) );
+	}
+
+	public function test_stream_wrapper_paths_masked(): void {
+		$this->assertSame(
+			"in phar://[path](85) : eval()'d code:21",
+			$this->redact( "in phar:///usr/local/bin/wp/vendor/wp-cli/eval-command/src/EvalFile_Command.php(85) : eval()'d code:21" )
+		);
+		$this->assertSame( 'read file://[path] failed', $this->redact( 'read file:///etc/passwd failed' ) );
+		$this->assertSame( 'x PHAR://[path] y', $this->redact( 'x PHAR://C:/tools/wp.phar/a.php y' ) );
 	}
 
 	public function test_windows_paths(): void {
