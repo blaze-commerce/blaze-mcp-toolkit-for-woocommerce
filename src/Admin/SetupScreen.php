@@ -145,7 +145,7 @@ final class SetupScreen {
 	 */
 	private static function render_connector(): void {
 		echo '<h2>' . esc_html__( 'Connector URL', 'blaze-mcp-toolkit-for-woocommerce' ) . '</h2>';
-		printf( '<p><input type="text" class="large-text code" readonly="readonly" onfocus="this.select()" aria-label="%1$s" value="%2$s" /></p>', esc_attr__( 'Connector URL', 'blaze-mcp-toolkit-for-woocommerce' ), esc_attr( rest_url( 'mcp/mcp-oauth-server' ) ) );
+		printf( '<p><input type="text" class="large-text code" readonly="readonly" aria-label="%1$s" value="%2$s" /></p>', esc_attr__( 'Connector URL', 'blaze-mcp-toolkit-for-woocommerce' ), esc_attr( rest_url( 'mcp/mcp-oauth-server' ) ) );
 		echo '<ul class="ul-disc">';
 		echo '<li>' . esc_html__( 'Claude: Customize > Connectors > Add > Add custom connector, then paste the URL.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
 		echo '<li>' . esc_html__( 'ChatGPT: Plugins > Add > Add custom MCP server, then paste the URL. This worked on a Free account.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';

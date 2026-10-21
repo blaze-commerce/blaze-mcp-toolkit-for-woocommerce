@@ -30,15 +30,20 @@ final class SetupChecks {
 		'ewpa/wc-get-order',
 		'ewpa/wc-get-orders',
 		'ewpa/get-users',
+		'ewpa/get-comments',
 		'ewpa/obtener-usuarios',
 		'woocommerce/orders-query',
 	);
 
 	/**
-	 * Verbs that mark an ability as one that changes the site, used when the ability declares no
-	 * (or an unhelpful) readonly annotation.
+	 * Name parts (after the namespace) that mark an un-annotated ability as read-only.
 	 */
-	private const WRITE_VERB_PATTERN = '/(^|[\/_-])(create|update|delete|moderate|search-replace|buscar-reemplazar|clear-cache|set|add|remove|duplicate|upload|reply|assign|link|enroll|unenroll|bind|actualizar|crear|eliminar|subir|responder|moderar)([_-]|$)/';
+	private const READ_PREFIXES = array( 'get-', 'list-', 'search-' );
+
+	/**
+	 * Name endings that mark an un-annotated ability as read-only.
+	 */
+	private const READ_SUFFIXES = array( '-query', '-info' );
 
 	/**
 	 * Run every check.
@@ -144,7 +149,7 @@ final class SetupChecks {
 		if ( (bool) get_option( 'ewpa_oauth_connectors_enabled', false ) ) {
 			return self::result( 'chatgpt_connector', 'pass', __( 'ChatGPT and other OAuth connectors are on in Enable Abilities', 'blaze-mcp-toolkit-for-woocommerce' ) );
 		}
-		return self::result( 'chatgpt_connector', 'warn', __( 'ChatGPT and other OAuth connectors are off in Enable Abilities', 'blaze-mcp-toolkit-for-woocommerce' ), __( 'Open Settings > WP Abilities and turn on "ChatGPT & Other OAuth Connectors" if you want to connect ChatGPT. Claude does not need it.', 'blaze-mcp-toolkit-for-woocommerce' ) );
+		return self::result( 'chatgpt_connector', 'warn', __( 'ChatGPT and other OAuth connectors are off in Enable Abilities', 'blaze-mcp-toolkit-for-woocommerce' ), __( 'Open Settings > WP Abilities and turn on "ChatGPT & Other OAuth Connectors". Needed for ChatGPT and other OAuth clients.', 'blaze-mcp-toolkit-for-woocommerce' ) );
 	}
 
 	/**
@@ -163,6 +168,13 @@ final class SetupChecks {
 				$missing[] = $name;
 			} elseif ( in_array( $name, $denylist, true ) ) {
 				$disabled[] = $name;
+			}
+		}
+
+		// The workflows depend on the analytics tools, whoever registers them.
+		foreach ( $denylist as $denied ) {
+			if ( str_starts_with( $denied, 'wc-analytics/' ) ) {
+				$disabled[] = $denied;
 			}
 		}
 
@@ -244,7 +256,7 @@ final class SetupChecks {
 	private static function pii_tools(): array {
 		$found = array();
 		foreach ( self::exposed_abilities() as $name => $ability ) {
-			if ( in_array( $name, self::PII_ABILITIES, true ) ) {
+			if ( self::is_pii_name( $name ) ) {
 				$found[] = $name;
 			}
 		}
@@ -272,7 +284,7 @@ final class SetupChecks {
 	private static function write_tools(): array {
 		$found = array();
 		foreach ( self::exposed_abilities() as $name => $ability ) {
-			if ( self::is_write_ability( $name, $ability ) ) {
+			if ( self::is_write( $name, $ability->get_meta()['annotations'] ?? array() ) ) {
 				$found[] = $name;
 			}
 		}
@@ -350,22 +362,48 @@ final class SetupChecks {
 	}
 
 	/**
-	 * Whether an ability can change the store or site. Uses the ability's own annotations first;
-	 * when it does not declare itself read-only, falls back to the verb in its name.
+	 * Whether an ability returns customer personal data.
 	 *
-	 * @param string       $name    Ability name.
-	 * @param \WP_Ability $ability The ability.
+	 * @param string $name Ability name.
 	 */
-	private static function is_write_ability( string $name, \WP_Ability $ability ): bool {
-		$annotations = $ability->get_meta()['annotations'] ?? array();
+	public static function is_pii_name( string $name ): bool {
+		return in_array( $name, self::PII_ABILITIES, true );
+	}
+
+	/**
+	 * Whether an ability can change the store or site. Our own tools and the wc-analytics tools are
+	 * never flagged. Otherwise the ability's annotations decide; with no readonly annotation it is
+	 * treated as write-capable unless its name says it only reads.
+	 *
+	 * @param string               $name        Ability name.
+	 * @param array<string, mixed> $annotations The ability's meta.annotations.
+	 */
+	public static function is_write( string $name, array $annotations ): bool {
+		if ( str_starts_with( $name, Registrar::CATEGORY . '/' ) || str_starts_with( $name, 'mcp-adapter/' ) || str_starts_with( $name, 'wc-analytics/' ) ) {
+			return false;
+		}
+
 		$readonly    = $annotations['readonly'] ?? null;
+		$destructive = true === ( $annotations['destructive'] ?? false );
 
 		if ( true === $readonly ) {
-			return true === ( $annotations['destructive'] ?? false );
+			return $destructive;
 		}
-		if ( false === $readonly || true === ( $annotations['destructive'] ?? false ) ) {
+		if ( false === $readonly || $destructive ) {
 			return true;
 		}
-		return 1 === preg_match( self::WRITE_VERB_PATTERN, $name );
+
+		$part = false !== strpos( $name, '/' ) ? substr( $name, (int) strpos( $name, '/' ) + 1 ) : $name;
+		foreach ( self::READ_PREFIXES as $prefix ) {
+			if ( str_starts_with( $part, $prefix ) ) {
+				return false;
+			}
+		}
+		foreach ( self::READ_SUFFIXES as $suffix ) {
+			if ( str_ends_with( $part, $suffix ) ) {
+				return false;
+			}
+		}
+		return true;
 	}
 }
