@@ -34,6 +34,11 @@ final class SearchProducts extends AbstractStoreAbility {
 	public const ABILITY_NAME = self::NAME;
 
 	/**
+	 * Most products returned per call.
+	 */
+	public const MAX_PER_PAGE = 50;
+
+	/**
 	 * Execute callback: AbstractAbility's audited execute, not the trait's. Not a useless override:
 	 * without it the trait's execute() would replace the inherited one and skip audit and cache.
 	 *
@@ -64,7 +69,11 @@ final class SearchProducts extends AbstractStoreAbility {
 	 * @return array<string, mixed>
 	 */
 	protected static function input_schema(): array {
-		return self::upstream_input_schema();
+		$schema = self::upstream_input_schema();
+		// Our row cap is 50 (upstream allows 100).
+		$schema['properties']['per_page']['maximum'] = self::MAX_PER_PAGE;
+		$schema['properties']['per_page']['description'] = 'Products per page (max 50).';
+		return $schema;
 	}
 
 	/**
@@ -90,6 +99,9 @@ final class SearchProducts extends AbstractStoreAbility {
 	 * @return array|\WP_Error
 	 */
 	protected static function run( array $input ): array|\WP_Error {
+		if ( isset( $input['per_page'] ) ) {
+			$input['per_page'] = max( 1, min( self::MAX_PER_PAGE, (int) $input['per_page'] ) );
+		}
 		return self::normalise( self::upstream_execute( $input ) );
 	}
 }

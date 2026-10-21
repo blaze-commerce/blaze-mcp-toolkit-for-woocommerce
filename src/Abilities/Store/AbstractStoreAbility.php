@@ -29,9 +29,10 @@ abstract class AbstractStoreAbility extends AbstractAbility {
 	 */
 	protected static function empty_input_schema(): array {
 		return array(
-			'type'       => 'object',
-			'properties' => new \stdClass(),
-			'default'    => new \stdClass(),
+			'type'                 => 'object',
+			'properties'           => new \stdClass(),
+			'additionalProperties' => false,
+			'default'              => new \stdClass(),
 		);
 	}
 

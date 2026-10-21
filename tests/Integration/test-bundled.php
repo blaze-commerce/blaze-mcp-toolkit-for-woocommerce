@@ -19,6 +19,7 @@
 require_once __DIR__ . '/assert.php';
 
 use Blaze\McpToolkit\Abilities\McpExposure;
+use Blaze\McpToolkit\Bundled\AnalyticsGuard;
 use Blaze\McpToolkit\Bundled\Commerce;
 
 $analytics_names = array(
@@ -68,6 +69,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 
 	blzmcp_it_equals( false, Commerce::is_standing_aside(), 'not standing aside without WooCommerce for Claude' );
 	blzmcp_it_equals( 20, has_action( 'plugins_loaded', array( Commerce::class, 'load' ) ), 'Commerce::load runs on plugins_loaded priority 20' );
+	blzmcp_it_equals( 10, has_filter( 'wp_pre_execute_ability', array( AnalyticsGuard::class, 'pre_execute' ) ), 'analytics guard registered when bundled' );
 
 	// bundled_tools_registered.
 	foreach ( array_merge( $analytics_names, $store_names ) as $name ) {
@@ -146,39 +148,97 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		'period'  => 'last_7_days',
 		'compare' => false,
 	);
-	$totals       = wp_get_ability( 'wc-analytics/totals' );
+	$totals = wp_get_ability( 'wc-analytics/totals' );
+	$before = get_option( 'woocommerce_analytics_enabled', null );
+	update_option( 'woocommerce_analytics_enabled', 'yes' );
+	delete_transient( AnalyticsGuard::GAP_TRANSIENT );
+	blzmcp_it_equals( null, AnalyticsGuard::unavailable_reason(), 'normal store: analytics guard finds nothing wrong' );
 	$clear_upstream_cache();
 	$result = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
 	blzmcp_it_assert( is_array( $result ) && ! is_wp_error( $result ), 'analytics_totals_runs: wc-analytics/totals returns data, not WP_Error' . ( is_wp_error( $result ) ? ' (' . $result->get_error_code() . ')' : '' ) );
 	$synced_count = is_array( $result ) ? (int) ( $result['metrics']['orders_count'] ?? 0 ) : 0;
 	blzmcp_it_assert( $synced_count >= 3, "analytics_totals_runs: the three paid orders are counted (orders_count {$synced_count})" );
 
-	// analytics_import_incomplete_is_reported: Analytics switched off. WooCommerce then never starts
-	// ReportsSync (FeaturePlugin::is_analytics_enabled_during_bootstrap), so new orders never reach
-	// wc_order_stats. Simulate that for our three orders by removing their stats rows.
-	$before = get_option( 'woocommerce_analytics_enabled', null );
+	$error_code = static function ( $value ): string {
+		return is_wp_error( $value ) ? $value->get_error_code() : 'none';
+	};
+
+	// analytics_import_incomplete_is_reported (1): Analytics switched off. WooCommerce then never
+	// starts ReportsSync, so new orders never reach wc_order_stats.
 	update_option( 'woocommerce_analytics_enabled', 'no' );
-	$stats_table = $wpdb->prefix . 'wc_order_stats';
-	foreach ( $order_ids as $order_id ) {
-		$wpdb->delete( $stats_table, array( 'order_id' => $order_id ) );
-	}
 	$clear_upstream_cache();
 	$disabled = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
-	$encoded  = is_wp_error( $disabled ) ? $disabled->get_error_message() : (string) wp_json_encode( $disabled );
-	$reported = is_wp_error( $disabled ) || (bool) preg_match( '/analytics[^"]{0,80}(disabled|not available|unavailable|turned off|incomplete|import)/i', $encoded );
-	$missing  = $synced_count - ( is_array( $disabled ) ? (int) ( $disabled['metrics']['orders_count'] ?? 0 ) : 0 );
-	echo 'Observed with woocommerce_analytics_enabled=no and unsynced orders: orders_count drops by ' . $missing . '; note: ' . ( is_array( $disabled ) ? wp_json_encode( $disabled['note'] ?? null ) : $encoded ) . "\n";
-	// KNOWN GAP (raised for a controller ruling, vendored code left unmodified): upstream does not
-	// check the Analytics toggle or import status, so the unsynced orders silently disappear from
-	// the totals and no error or not-available message is returned. This assertion records that
-	// behaviour; flip it to blzmcp_it_assert( $reported, ... ) once a fix is ruled on.
-	blzmcp_it_assert( ! $reported && 3 === $missing, 'analytics_import_incomplete_is_reported: KNOWN GAP, upstream silently omits unsynced orders (no error, no not-available message)' );
+	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $disabled ), 'analytics_import_incomplete_is_reported: Analytics off returns blzmcp_analytics_unavailable' );
+	blzmcp_it_assert( is_wp_error( $disabled ) && str_contains( $disabled->get_error_message(), 'turned off' ), 'analytics off: plain message for the owner' );
+	blzmcp_it_equals( 'analytics_disabled', is_wp_error( $disabled ) ? ( $disabled->get_error_data()['reason'] ?? null ) : null, 'analytics off: reason analytics_disabled' );
+	foreach ( array( 'wc-analytics/breakdown', 'wc-analytics/series', 'wc-analytics/rows' ) as $name ) {
+		$ability = wp_get_ability( $name );
+		$out     = $ability instanceof WP_Ability ? $ability->execute( array() ) : null;
+		blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $out ), "analytics off: {$name} is blocked too" );
+	}
+	$confirm = wp_get_ability( 'wc-analytics/confirm-large-range' );
+	$out     = $confirm instanceof WP_Ability ? $confirm->execute( array( 'date_start' => '2026-01-01', 'date_end' => '2026-01-02', 'type' => 'x' ) ) : null;
+	blzmcp_it_assert( AnalyticsGuard::ERROR_CODE !== $error_code( $out ), 'analytics off: confirm-large-range (reads no data) is not blocked' );
+
+	// The guard runs before core's permission check, so it must not answer unauthorised callers.
+	$sub_id = wp_insert_user(
+		array(
+			'user_login' => 'blzmcp_sub_' . wp_generate_password( 6, false ),
+			'user_pass'  => wp_generate_password(),
+			'role'       => 'subscriber',
+		)
+	);
+	wp_set_current_user( $sub_id );
+	$denied = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
+	blzmcp_it_assert( is_wp_error( $denied ) && AnalyticsGuard::ERROR_CODE !== $denied->get_error_code(), 'analytics off: subscriber gets the permission error, not the analytics status (' . $error_code( $denied ) . ')' );
+	wp_delete_user( $sub_id );
+	wp_set_current_user( $admins[0]->ID );
+
+	// analytics_import_incomplete_is_reported (2): Analytics on, but an older paid order never made
+	// it into wc_order_stats (historical import not run).
+	update_option( 'woocommerce_analytics_enabled', 'yes' );
+	$old_order = wc_get_order( $order_ids[0] );
+	$old_order->set_date_created( time() - 2 * DAY_IN_SECONDS );
+	$old_order->save();
+	$wpdb->delete( $wpdb->prefix . 'wc_order_stats', array( 'order_id' => $order_ids[0] ) );
+	delete_transient( AnalyticsGuard::GAP_TRANSIENT );
+	$clear_upstream_cache();
+	$incomplete = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
+	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $incomplete ), 'analytics_import_incomplete_is_reported: unimported order returns blzmcp_analytics_unavailable' );
+	blzmcp_it_equals( 'orders_not_imported', is_wp_error( $incomplete ) ? ( $incomplete->get_error_data()['reason'] ?? null ) : null, 'import incomplete: reason orders_not_imported' );
+
+	// Historical import queued: reported as in progress.
+	as_schedule_single_action( time() + HOUR_IN_SECONDS, 'wc-admin_import_batch_orders', array( 'blzmcp-test' ), 'wc-admin-data' );
+	blzmcp_it_equals( 'import_in_progress', AnalyticsGuard::unavailable_reason(), 'queued historical import batch: reason import_in_progress' );
+	as_unschedule_all_actions( 'wc-admin_import_batch_orders', array( 'blzmcp-test' ), 'wc-admin-data' );
+
+	// Once imported again, numbers come back.
+	\Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler::import( $order_ids[0] );
+	delete_transient( AnalyticsGuard::GAP_TRANSIENT );
+	$clear_upstream_cache();
+	$again = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
+	blzmcp_it_assert( is_array( $again ), 'after import: totals return numbers again (' . $error_code( $again ) . ')' );
+
 	if ( null === $before ) {
 		delete_option( 'woocommerce_analytics_enabled' );
 	} else {
 		update_option( 'woocommerce_analytics_enabled', $before );
 	}
+	delete_transient( AnalyticsGuard::GAP_TRANSIENT );
 	$clear_upstream_cache();
+
+	// Missing-package notice (shown when the bundled Loader class is absent).
+	ob_start();
+	Commerce::missing_package_notice();
+	$missing_html = (string) ob_get_clean();
+	blzmcp_it_assert( str_contains( $missing_html, 'notice-error' ) && str_contains( $missing_html, 'reinstall' ), 'missing-package notice renders for store managers' );
+
+	// Search clamp and strict empty schema.
+	$search_schema = $search instanceof WP_Ability ? $search->get_input_schema() : array();
+	blzmcp_it_equals( 50, $search_schema['properties']['per_page']['maximum'] ?? null, 'search-products per_page maximum is 50' );
+	blzmcp_it_assert( is_wp_error( $search instanceof WP_Ability ? $search->execute( array( 'per_page' => 100 ) ) : null ), 'search-products rejects per_page 100' );
+	$profile_schema = $profile instanceof WP_Ability ? $profile->get_input_schema() : array();
+	blzmcp_it_equals( false, $profile_schema['additionalProperties'] ?? null, 'no-input store tools reject extra properties' );
 
 	foreach ( $order_ids as $order_id ) {
 		$order = wc_get_order( $order_id );
@@ -196,6 +256,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		blzmcp_it_assert( ! wp_has_ability( $name ), "standaside_when_wcfc_active: {$name} is not registered" );
 	}
 	blzmcp_it_assert( wp_has_ability( 'blaze-mcp-toolkit/health-summary' ), 'standaside_when_wcfc_active: our diagnostics still registered' );
+	blzmcp_it_equals( false, has_filter( 'wp_pre_execute_ability', array( AnalyticsGuard::class, 'pre_execute' ) ), 'standaside: analytics guard not registered' );
 
 	if ( $wcfc_plugin ) {
 		// WooCommerce for Claude's own copy registers wc-analytics; McpExposure still marks it public.

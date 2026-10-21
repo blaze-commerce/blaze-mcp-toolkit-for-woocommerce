@@ -92,8 +92,15 @@ final class Commerce {
 		}
 
 		if ( ! class_exists( \WooCommerce\CommerceAbilities\Loader::class ) ) {
+			// Broken install (vendor/ incomplete): say so instead of failing silently.
+			if ( function_exists( 'wc_get_logger' ) ) {
+				wc_get_logger()->error( 'Bundled commerce-abilities package is missing; analytics and store tools are not registered.', array( 'source' => 'blzmcp' ) );
+			}
+			add_action( 'admin_notices', array( self::class, 'missing_package_notice' ) );
 			return;
 		}
+
+		AnalyticsGuard::register();
 
 		\WooCommerce\CommerceAbilities\Loader::init();
 
@@ -126,6 +133,19 @@ final class Commerce {
 			esc_html__( 'Blaze MCP Toolkit: WooCommerce for Claude is active, so the store and analytics tools come from WooCommerce for Claude and this plugin does not add its own copies. Our store health, update history and access check tools still work.', 'blaze-mcp-toolkit-for-woocommerce' ),
 			esc_url( $dismiss_url ),
 			esc_html__( 'Dismiss this notice', 'blaze-mcp-toolkit-for-woocommerce' )
+		);
+	}
+
+	/**
+	 * Notice for store managers when the bundled package is missing from the install.
+	 */
+	public static function missing_package_notice(): void {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return;
+		}
+		printf(
+			'<div class="notice notice-error"><p>%s</p></div>',
+			esc_html__( 'Blaze MCP Toolkit: part of the plugin is missing, so the analytics and store tools are not available. Please reinstall the plugin. Our store health, update history and access check tools still work.', 'blaze-mcp-toolkit-for-woocommerce' )
 		);
 	}
 

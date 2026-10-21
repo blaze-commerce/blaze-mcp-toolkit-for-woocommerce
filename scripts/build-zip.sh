@@ -9,6 +9,8 @@ trap '( cd "$ROOT" && composer install --prefer-dist --no-interaction --quiet )'
 rm -rf "$ROOT/dist"
 mkdir -p "$STAGE"
 
+# Composer does not notice edits inside a path package, so always re-copy the vendored package.
+rm -rf "$ROOT/vendor/woocommerce/commerce-abilities"
 ( cd "$ROOT" && composer install --no-dev --prefer-dist --no-interaction --classmap-authoritative --quiet )
 
 rsync -a --delete --exclude-from="$ROOT/.distignore" "$ROOT/" "$STAGE/"

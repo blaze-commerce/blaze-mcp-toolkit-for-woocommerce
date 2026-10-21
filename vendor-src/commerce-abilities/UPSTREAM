@@ -9,8 +9,9 @@ Licence:   GPL-3.0-or-later (LICENSE in this folder is the upstream repository's
 Copyright: Automattic Inc. and the WooCommerce for Claude contributors
 
 Status: copied unmodified. Every file under src/, plus composer.json, composer.lock and
-package.json, is byte-identical to the upstream path at the commit above. LICENSE is the
-upstream repository root LICENSE, copied unmodified. Only this UPSTREAM file was added.
+package.json, is byte-identical to the upstream path at the commit above. Two files were
+added that are not in the upstream package folder: LICENSE (the upstream repository's root
+LICENSE file, copied unmodified, since the package folder has none) and this UPSTREAM file.
 
 Credit (for the readme changelog):
   Bundles the commerce-abilities package from WooCommerce for Claude by Automattic

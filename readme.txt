@@ -18,3 +18,4 @@ Scaffold only. Full description is written in a later task.
 
 = 1.0.0 =
 * Initial scaffold.
+* Bundles the commerce-abilities package from WooCommerce for Claude by Automattic (https://github.com/woocommerce/woocommerce-claude, GPL-3.0-or-later), version 0.4.5, commit cdab921aab8d07ef813121ff78b3558af28f39fa, unmodified. It provides the wc-analytics tools and the store knowledge tools.
