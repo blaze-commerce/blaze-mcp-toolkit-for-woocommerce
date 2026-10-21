@@ -34,6 +34,11 @@ abstract class AbstractAbility {
 	public const CACHE_PREFIX = 'blzmcp_c_';
 
 	/**
+	 * Transient prefix for the anonymous-denial throttle flag.
+	 */
+	public const ANON_PREFIX = 'blzmcp_anon_';
+
+	/**
 	 * Human-readable label.
 	 */
 	abstract protected static function label(): string;
@@ -109,7 +114,16 @@ abstract class AbstractAbility {
 		}
 
 		if ( ! $allowed ) {
-			AuditLog::record( get_current_user_id(), static::NAME, self::to_array( $input ), 0, 0, 'denied' );
+			$user_id = get_current_user_id();
+			if ( 0 === $user_id ) {
+				// Anonymous denials: at most one row per ability per minute, so floods cannot bloat the log.
+				$flag = self::ANON_PREFIX . md5( static::NAME );
+				if ( false !== get_transient( $flag ) ) {
+					return false;
+				}
+				set_transient( $flag, 1, 60 );
+			}
+			AuditLog::record( $user_id, static::NAME, self::to_array( $input ), 0, 0, 'denied' );
 		}
 
 		return $allowed;

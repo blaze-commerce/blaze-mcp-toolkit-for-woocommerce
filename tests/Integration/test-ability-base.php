@@ -56,6 +56,10 @@ final class Blzmcp_Test_Echo_Ability extends AbstractAbility {
 		return current_user_can( 'manage_options' );
 	}
 
+	public static function key_for( array $input ): string {
+		return static::cache_key( $input );
+	}
+
 	protected static function run( array $input ): array|\WP_Error {
 		++self::$runs;
 		return array(
@@ -187,8 +191,23 @@ blzmcp_it_assert( is_wp_error( $denied ), 'subscriber gets a WP_Error' );
 blzmcp_it_assert( is_wp_error( $denied ) && false === strpos( wp_json_encode( $denied->get_all_error_data() ) . $denied->get_error_message(), $unique ), 'denied response carries no data' );
 blzmcp_it_equals( $runs_before, Blzmcp_Test_Echo_Ability::$runs, 'run() is not called for subscriber (cache not served either)' );
 blzmcp_it_equals( 1, $count( Blzmcp_Test_Echo_Ability::NAME, 'denied' ), 'subscriber call writes one denied row' );
+$ability->execute( array( 'message' => $unique ) );
+blzmcp_it_equals( 2, $count( Blzmcp_Test_Echo_Ability::NAME, 'denied' ), 'logged-in subscriber: two denials write two rows' );
 $denied_row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM %i WHERE ability = %s AND status = %s', $table, Blzmcp_Test_Echo_Ability::NAME, 'denied' ), ARRAY_A );
 blzmcp_it_equals( (int) $sub_id, (int) ( $denied_row['user_id'] ?? 0 ), 'denied row records the subscriber id' );
+
+// Anonymous: two denials within a minute write exactly one row.
+$anon_flag = AbstractAbility::ANON_PREFIX . md5( Blzmcp_Test_Echo_Ability::NAME );
+delete_transient( $anon_flag );
+wp_set_current_user( 0 );
+$denied_before = $count( Blzmcp_Test_Echo_Ability::NAME, 'denied' );
+$anon_1        = $ability->execute( array( 'message' => $unique ) );
+$anon_2        = $ability->execute( array( 'message' => $unique ) );
+blzmcp_it_assert( is_wp_error( $anon_1 ) && is_wp_error( $anon_2 ), 'anonymous calls are both denied' );
+blzmcp_it_equals( $denied_before + 1, $count( Blzmcp_Test_Echo_Ability::NAME, 'denied' ), 'two anonymous denials within a minute write exactly one row' );
+$anon_rows = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE ability = %s AND status = %s AND user_id = 0', $table, Blzmcp_Test_Echo_Ability::NAME, 'denied' ) );
+blzmcp_it_equals( 1, $anon_rows, 'the anonymous denied row has user_id 0' );
+delete_transient( $anon_flag );
 
 // Throwing run(): generic WP_Error, error row, no exception text.
 wp_set_current_user( $admins[0]->ID );
@@ -213,7 +232,34 @@ blzmcp_it_assert( $purged >= 1, 'purge(30) deletes old rows' );
 blzmcp_it_equals( 0, $count( 'blaze-mcp-toolkit/test-old' ), 'old row is gone' );
 blzmcp_it_equals( 3, $count( Blzmcp_Test_Echo_Ability::NAME, 'ok' ), 'recent rows survive purge' );
 
+// Batched purge: more than one batch of old rows is fully removed, fresh rows kept.
+$old_at = gmdate( 'Y-m-d H:i:s', time() - 40 * DAY_IN_SECONDS );
+$values = array();
+for ( $i = 0; $i < 2345; $i++ ) {
+	$values[] = $wpdb->prepare( '(%s, 0, %s, %s, 0, 0, %s)', $old_at, 'blaze-mcp-toolkit/test-bulk', str_repeat( '0', 64 ), 'ok' );
+}
+$wpdb->query( $wpdb->prepare( 'INSERT INTO %i (created_at, user_id, ability, params_hash, row_count, duration_ms, status) VALUES ', $table ) . implode( ',', $values ) );
+$wpdb->insert(
+	$table,
+	array(
+		'created_at'  => gmdate( 'Y-m-d H:i:s' ),
+		'user_id'     => 0,
+		'ability'     => 'blaze-mcp-toolkit/test-fresh',
+		'params_hash' => str_repeat( '0', 64 ),
+		'status'      => 'ok',
+	)
+);
+blzmcp_it_equals( 2345, $count( 'blaze-mcp-toolkit/test-bulk' ), 'bulk old rows inserted' );
+$purged = AuditLog::purge( 30 );
+blzmcp_it_assert( $purged >= 2345, 'batched purge reports all deleted rows (got ' . $purged . ')' );
+blzmcp_it_equals( 0, $count( 'blaze-mcp-toolkit/test-bulk' ), 'batched purge removes every old row' );
+blzmcp_it_equals( 1, $count( 'blaze-mcp-toolkit/test-fresh' ), 'batched purge keeps the fresh row' );
+
 // Cleanup.
+foreach ( array( array( 'message' => $unique ), array( 'extra' => 'x', 'message' => $unique ) ) as $cached_input ) {
+	delete_transient( Blzmcp_Test_Echo_Ability::key_for( $cached_input ) );
+}
+blzmcp_it_assert( false === get_transient( Blzmcp_Test_Echo_Ability::key_for( array( 'message' => $unique ) ) ), 'test cache transients removed' );
 $wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE ability LIKE %s', $table, 'blaze-mcp-toolkit/test-%' ) );
 require_once ABSPATH . 'wp-admin/includes/user.php';
 wp_delete_user( $sub_id );

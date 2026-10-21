@@ -19,6 +19,9 @@ final class AuditLog {
 	public const TABLE    = 'blzmcp_audit';
 	public const STATUSES = array( 'ok', 'error', 'denied' );
 
+	public const PURGE_BATCH       = 1000;
+	public const PURGE_MAX_BATCHES = 50;
+
 	/**
 	 * Write one audit row.
 	 *
@@ -102,11 +105,19 @@ final class AuditLog {
 		global $wpdb;
 
 		$cutoff = gmdate( 'Y-m-d H:i:s', time() - max( 1, $days ) * DAY_IN_SECONDS );
+		$total  = 0;
 
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Own table retention.
-		$deleted = $wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE created_at < %s', self::table(), $cutoff ) );
+		// Batched so a large backlog never holds a long table lock.
+		for ( $i = 0; $i < self::PURGE_MAX_BATCHES; $i++ ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Own table retention.
+			$deleted = (int) $wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE created_at < %s LIMIT %d', self::table(), $cutoff, self::PURGE_BATCH ) );
+			$total  += max( 0, $deleted );
+			if ( $deleted < self::PURGE_BATCH ) {
+				break;
+			}
+		}
 
-		return (int) $deleted;
+		return $total;
 	}
 
 	/**
