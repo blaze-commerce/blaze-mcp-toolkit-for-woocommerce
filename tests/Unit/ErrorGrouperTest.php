@@ -1,0 +1,153 @@
+<?php
+/**
+ * @package Blaze\McpToolkit
+ */
+
+declare( strict_types=1 );
+
+namespace Blaze\McpToolkit\Tests\Unit;
+
+use Blaze\McpToolkit\Diagnostics\ErrorGrouper;
+use PHPUnit\Framework\TestCase;
+
+final class ErrorGrouperTest extends TestCase {
+
+	private const KEYS = array( 'severity', 'message', 'count', 'first_seen', 'last_seen', 'component', 'source' );
+
+	public function test_groups_and_counts_repeated_fatals(): void {
+		$lines = array();
+		for ( $i = 1; $i <= 5; $i++ ) {
+			$lines[] = sprintf( '[21-Oct-2026 10:4%d:00 UTC] PHP Fatal error:  Uncaught Error: Call to undefined function foo() in wp-content/plugins/woo-foo/x.php:%d', $i, 10 + $i );
+		}
+		$groups = ErrorGrouper::group( $lines, 0, 'wp_debug' );
+		$this->assertCount( 1, $groups );
+		$g = $groups[0];
+		$this->assertSame( self::KEYS, array_keys( $g ) );
+		$this->assertSame( 5, $g['count'] );
+		$this->assertSame( 'fatal', $g['severity'] );
+		$this->assertSame( 'wp_debug', $g['source'] );
+		$this->assertSame( gmdate( 'c', strtotime( '2026-10-21 10:41:00 UTC' ) ), $g['first_seen'] );
+		$this->assertSame( gmdate( 'c', strtotime( '2026-10-21 10:45:00 UTC' ) ), $g['last_seen'] );
+		$this->assertSame( 'plugin:woo-foo', $g['component'] );
+		$this->assertStringNotContainsString( 'PHP Fatal error', $g['message'] );
+	}
+
+	public function test_component_attribution(): void {
+		$lines = array(
+			'[21-Oct-2026 10:00:00 UTC] PHP Warning:  bad in wp-content/plugins/woo-foo/x.php on line 3',
+			'[21-Oct-2026 10:00:01 UTC] PHP Warning:  worse in wp-content/themes/blocksy/x.php on line 3',
+			'[21-Oct-2026 10:00:02 UTC] PHP Notice:  mu in wp-content/mu-plugins/loader.php on line 3',
+			'[21-Oct-2026 10:00:03 UTC] PHP Deprecated:  core in wp-includes/class-wp.php on line 3',
+			'[21-Oct-2026 10:00:04 UTC] PHP Deprecated:  admin in wp-admin/edit.php on line 3',
+			'[21-Oct-2026 10:00:05 UTC] PHP Notice:  nowhere at all',
+		);
+		$by = array();
+		foreach ( ErrorGrouper::group( $lines, 0, 'wp_debug' ) as $g ) {
+			$by[ $g['severity'] . '|' . substr( $g['message'], 0, 4 ) ] = $g['component'];
+		}
+		$this->assertSame( 'plugin:woo-foo', $by['warning|bad '] );
+		$this->assertSame( 'theme:blocksy', $by['warning|wors'] );
+		$this->assertSame( 'mu-plugin:loader.php', $by['notice|mu i'] );
+		$this->assertSame( 'core', $by['deprecated|core'] );
+		$this->assertSame( 'core', $by['deprecated|admi'] );
+		$this->assertSame( 'unknown', $by['notice|nowh'] );
+	}
+
+	public function test_since_filter(): void {
+		$lines = array(
+			'[21-Oct-2026 09:00:00 UTC] PHP Warning:  old thing',
+			'    #0 continuation of old',
+			'[21-Oct-2026 11:00:00 UTC] PHP Warning:  new thing',
+		);
+		$since = strtotime( '2026-10-21 10:00:00 UTC' );
+		$g     = ErrorGrouper::group( $lines, $since, 'wp_debug' );
+		$this->assertCount( 1, $g );
+		$this->assertSame( 'new thing', $g[0]['message'] );
+	}
+
+	public function test_severity_map(): void {
+		$lines = array(
+			'[21-Oct-2026 10:00:00 UTC] PHP Fatal error:  a',
+			'[21-Oct-2026 10:00:00 UTC] PHP Parse error:  b',
+			'[21-Oct-2026 10:00:00 UTC] PHP Warning:  c',
+			'[21-Oct-2026 10:00:00 UTC] PHP Notice:  d',
+			'[21-Oct-2026 10:00:00 UTC] PHP Deprecated:  e',
+			'[21-Oct-2026 10:00:00 UTC] WordPress database error Something for query',
+		);
+		$sev = array_column( ErrorGrouper::group( $lines, 0, 'wp_debug' ), 'severity', 'message' );
+		$this->assertSame( 'fatal', $sev['a'] );
+		$this->assertSame( 'fatal', $sev['b'] );
+		$this->assertSame( 'warning', $sev['c'] );
+		$this->assertSame( 'notice', $sev['d'] );
+		$this->assertSame( 'deprecated', $sev['e'] );
+		$this->assertSame( 'error', $sev['WordPress database error Something for query'] );
+	}
+
+	public function test_woocommerce_log_format(): void {
+		$lines = array(
+			'2026-10-21T10:42:00+00:00 CRITICAL Uncaught Error: Call to undefined function bar() in wp-content/plugins/woo-bar/b.php:7',
+			'Stack trace:',
+			'#0 wp-includes/class-wp-hook.php(324): woo_bar()',
+			'2026-10-21T10:43:00+00:00 CRITICAL Uncaught Error: Call to undefined function bar() in wp-content/plugins/woo-bar/b.php:9',
+			'2026-10-21T10:44:00+00:00 ERROR Something failed 123',
+			'2026-10-21T10:45:00+00:00 INFO ignore me',
+			'2026-10-21T10:46:00+00:00 EMERGENCY boom',
+		);
+		$g = ErrorGrouper::group( $lines, 0, 'wc_fatal' );
+		$this->assertCount( 3, $g );
+		$this->assertSame( 2, $g[0]['count'] );
+		$this->assertSame( 'fatal', $g[0]['severity'] );
+		$this->assertSame( 'plugin:woo-bar', $g[0]['component'] );
+		$sev = array_column( $g, 'severity' );
+		sort( $sev );
+		$this->assertSame( array( 'error', 'fatal', 'fatal' ), $sev );
+	}
+
+	public function test_messages_are_redacted_and_capped_with_continuations(): void {
+		$lines = array(
+			'[21-Oct-2026 10:00:00 UTC] PHP Fatal error:  Failed for jane@example.com ' . str_repeat( 'y', 400 ),
+			'#0 contact bob@example.com Authorization: Bearer abcdef1234567890abcdef',
+			'[21-Oct-2026 10:00:01 UTC] PHP Warning:  short',
+			'#1 bob@example.com',
+			'orphan continuation before nothing',
+		);
+		$g = ErrorGrouper::group( $lines, 0, 'wp_debug' );
+		foreach ( $g as $row ) {
+			$this->assertLessThanOrEqual( 300, mb_strlen( $row['message'] ) );
+			$this->assertStringNotContainsString( '@example.com', $row['message'] );
+			$this->assertStringNotContainsString( 'abcdef1234567890', $row['message'] );
+		}
+		$short = array_values( array_filter( $g, fn( $r ) => 'warning' === $r['severity'] ) )[0];
+		$this->assertStringStartsWith( 'short', $short['message'] );
+		$this->assertStringNotContainsString( 'bob@', $short['message'] );
+	}
+
+	public function test_leading_continuation_is_dropped_and_blank_lines_ignored(): void {
+		$this->assertSame( array(), ErrorGrouper::group( array( '', 'stray', '   ' ), 0, 'wp_debug' ) );
+	}
+
+	public function test_limits_to_50_groups_sorted_by_count(): void {
+		$lines = array();
+		for ( $i = 0; $i < 60; $i++ ) {
+			$word    = chr( 97 + intdiv( $i, 26 ) ) . chr( 97 + ( $i % 26 ) );
+			$lines[] = "[21-Oct-2026 10:00:00 UTC] PHP Warning:  unique {$word} word";
+		}
+		$lines[] = '[21-Oct-2026 10:00:00 UTC] PHP Notice:  frequent';
+		$lines[] = '[21-Oct-2026 10:00:01 UTC] PHP Notice:  frequent';
+		$g       = ErrorGrouper::group( $lines, 0, 'wp_debug' );
+		$this->assertCount( 50, $g );
+		$this->assertSame( 'frequent', $g[0]['message'] );
+		$counts = array_column( $g, 'count' );
+		$sorted = $counts;
+		rsort( $sorted );
+		$this->assertSame( $sorted, $counts );
+	}
+
+	public function test_normalisation_groups_numbers_hex_and_quoted_values(): void {
+		$lines = array(
+			'[21-Oct-2026 10:00:00 UTC] PHP Warning:  Undefined array key "foo" in order 123 id 0xdeadbeef',
+			'[21-Oct-2026 10:00:01 UTC] PHP Warning:  Undefined array key "bar" in order 456 id 0xcafebabe',
+		);
+		$this->assertCount( 1, ErrorGrouper::group( $lines, 0, 'wp_debug' ) );
+	}
+}
