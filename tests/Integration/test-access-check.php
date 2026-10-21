@@ -55,9 +55,13 @@ blzmcp_it_assert( is_int( $owner_id ), 'owner user created' );
 // Application password with an email in its name, owned by the editor.
 $app_secret_holder = WP_Application_Passwords::create_new_application_password(
 	$owner_id,
-	array( 'name' => 'Claude for ' . $owner_email )
+	array( 'name' => 'BlzIT app ' . $owner_email )
 );
 $app_plain         = is_array( $app_secret_holder ) ? $app_secret_holder[0] : '';
+
+// Run the whole data setup and assertions under a non-UTC site timezone so the conversion is really tested.
+$tz_filter = static fn() => 'Australia/Melbourne';
+add_filter( 'pre_option_timezone_string', $tz_filter );
 
 // Write key last used 120 days ago, with a fake secret and an email in its description.
 $fake_secret = 'cs_' . bin2hex( random_bytes( 16 ) );
@@ -75,6 +79,20 @@ $wpdb->insert(
 	)
 );
 $key_id = (int) $wpdb->insert_id;
+// A key with an unknown permissions value must fail closed.
+$wpdb->insert(
+	$wpdb->prefix . 'woocommerce_api_keys',
+	array(
+		'user_id'         => $owner_id,
+		'description'     => 'Odd',
+		'permissions'     => 'bogus',
+		'consumer_key'    => wc_api_hash( 'ck_odd' ),
+		'consumer_secret' => 'cs_odd_secret',
+		'truncated_key'   => 'odd_key',
+		'last_access'     => wp_date( 'Y-m-d H:i:s' ),
+	)
+);
+$key3_id = (int) $wpdb->insert_id;
 // A recent read key.
 $wpdb->insert(
 	$wpdb->prefix . 'woocommerce_api_keys',
@@ -99,6 +117,27 @@ $hook->set_status( 'active' );
 $hook->set_user_id( $admin->ID );
 $hook_id = $hook->save();
 
+$extra_hooks = array();
+foreach (
+	array(
+		'Bad1'  => array( 'https://apikey_ABC123#x@host.net/p', 'order.updated' ),
+		'Bad2'  => array( 'https://user:12#ss@host.net/', 'customer.created' ),
+		'Bad3'  => array( 'https://user:pass@host.net/x', 'customer.created' ),
+		'Www'   => array( 'https://www.' . wp_parse_url( home_url(), PHP_URL_HOST ) . '/hook', 'order.created' ),
+		'Email' => array( 'https://ok.example.net/h', 'order.created' ),
+	) as $hname => $spec
+) {
+	$h = new WC_Webhook();
+	$h->set_name( 'IT ' . $hname );
+	$h->set_topic( $spec[1] );
+	$h->set_delivery_url( $spec[0] );
+	$h->set_secret( 'whsec_it' );
+	$h->set_status( 'active' );
+	$h->set_user_id( $admin->ID );
+	$h->save();
+	$extra_hooks[ $hname ] = $h;
+}
+
 $clear_cache();
 wp_set_current_user( $admin->ID );
 $result = $ability->execute( array() );
@@ -109,9 +148,11 @@ $json   = (string) wp_json_encode( $result );
 $keys = array();
 foreach ( $result['rest_keys'] ?? array() as $k ) {
 	$keys[ $k['truncated_key'] ] = $k;
+	blzmcp_it_assert( ! array_key_exists( 'description', $k ) && array_key_exists( 'untrusted_text', $k ), 'key label is under untrusted_text' );
 }
 $mine = $keys[ substr( $fake_key, -7 ) ] ?? array();
 blzmcp_it_equals( 'read_write', $mine['permissions'] ?? null, 'key permissions' );
+blzmcp_it_equals( 'read_write', ( $keys['odd_key'] ?? array() )['permissions'] ?? null, 'unknown permissions fail closed to read_write' );
 blzmcp_it_equals( 'editor', $mine['owner_role'] ?? null, 'owner_role is the role' );
 blzmcp_it_assert( in_array( 'write_unused_90d', $mine['flags'] ?? array(), true ), 'stale write key is flagged' );
 blzmcp_it_assert( isset( $mine['last_access'] ) && 1 === preg_match( '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$/', $mine['last_access'] ), 'last_access is ISO8601 UTC' );
@@ -124,22 +165,38 @@ blzmcp_it_assert( array_key_exists( 'last_access', $other ) && null === $other['
 
 $hooks = array();
 foreach ( $result['webhooks'] ?? array() as $h ) {
-	$hooks[ $h['name'] ] = $h;
+	$hooks[ $h['untrusted_text'] ] = $h;
 }
 $wh = $hooks['Order sync'] ?? array();
 blzmcp_it_equals( 'hooks.example.net', $wh['delivery_host'] ?? null, 'delivery_host is the host only' );
+foreach ( array( 'IT Bad1', 'IT Bad2', 'IT Bad3' ) as $bad ) {
+	blzmcp_it_equals( null, ( $hooks[ $bad ] ?? array( 'delivery_host' => 'missing' ) )['delivery_host'], "$bad: userinfo URL gives null host" );
+	blzmcp_it_assert( in_array( 'malformed_url', $hooks[ $bad ]['flags'] ?? array(), true ), "$bad: flagged malformed_url" );
+}
+blzmcp_it_assert( ! str_contains( $json, 'apikey_ABC123' ) && ! str_contains( $json, 'user:12' ) && ! str_contains( $json, 'user:pass' ), 'no userinfo leaks in output' );
+blzmcp_it_assert( ! in_array( 'malformed_url', $hooks['IT Email']['flags'] ?? array(), true ), 'normal URL not flagged malformed' );
+blzmcp_it_equals( 'order.created', ( $hooks['IT Www'] ?? array() )['topic'] ?? null, 'www webhook listed' );
 blzmcp_it_equals( 'order.created', $wh['topic'] ?? null, 'webhook topic' );
 blzmcp_it_equals( 'active', $wh['status'] ?? null, 'webhook status' );
 blzmcp_it_assert( in_array( 'sends_order_data', $wh['flags'] ?? array(), true ), 'order webhook flagged sends_order_data' );
 
 $summary = $result['summary'] ?? array();
+// External order webhooks: hooks.example.net, ok.example.net, Bad1 is null host (not counted), www.<site> is NOT external.
+blzmcp_it_equals( 2, $summary['order_webhooks_external'] ?? null, 'external order webhooks: www.<site> is internal, malformed is not counted' );
+blzmcp_it_equals( array( 'rest_keys' => false, 'webhooks' => false, 'application_passwords' => false ), $result['truncated'] ?? null, 'nothing truncated for a small store' );
 blzmcp_it_assert( ( $summary['write_keys'] ?? 0 ) >= 1, 'summary counts write keys' );
 blzmcp_it_assert( ( $summary['stale_write_keys'] ?? 0 ) >= 1, 'summary counts stale write keys' );
 blzmcp_it_assert( ( $summary['order_webhooks_external'] ?? 0 ) >= 1, 'summary counts external order webhooks' );
 
 $apps = $result['application_passwords'] ?? array();
 blzmcp_it_assert( count( $apps ) >= 1, 'application password listed' );
-$app = $apps[0] ?? array();
+$app = array();
+foreach ( $apps as $candidate ) {
+	if ( str_starts_with( $candidate['untrusted_text'] ?? '', 'BlzIT app' ) ) {
+		$app = $candidate;
+	}
+}
+blzmcp_it_assert( array() !== $app, 'test application password found by name' );
 blzmcp_it_equals( 'editor', $app['owner_role'] ?? null, 'app password owner_role' );
 blzmcp_it_assert( array_key_exists( 'last_used', $app ) && null === $app['last_used'], 'never used app password has null last_used' );
 blzmcp_it_assert( in_array( 'unused_90d', $app['flags'] ?? array(), true ), 'unused app password flagged' );
@@ -155,6 +212,33 @@ blzmcp_it_assert( ! str_contains( $json, $owner_email ) && ! str_contains( $json
 blzmcp_it_assert( ! str_contains( $json, $owner_login ) && ! str_contains( $json, 'Ownerface' ), 'no owner login or name in output' );
 blzmcp_it_assert( '' === $app_plain || ! str_contains( $json, $app_plain ), 'no application password in output' );
 blzmcp_it_assert( ! str_contains( $json, 'user_id' ), 'no user_id key in output' );
+
+remove_filter( 'pre_option_timezone_string', $tz_filter );
+
+// Truncation: more than 50 keys.
+$bulk_ids = array();
+for ( $i = 0; $i < 52; $i++ ) {
+	$wpdb->insert(
+		$wpdb->prefix . 'woocommerce_api_keys',
+		array(
+			'user_id'         => $owner_id,
+			'description'     => 'bulk',
+			'permissions'     => 'read',
+			'consumer_key'    => wc_api_hash( 'ck_bulk' . $i ),
+			'consumer_secret' => 'cs_bulk',
+			'truncated_key'   => 'bulk' . str_pad( (string) $i, 3, '0', STR_PAD_LEFT ),
+			'last_access'     => null,
+		)
+	);
+	$bulk_ids[] = (int) $wpdb->insert_id;
+}
+$clear_cache();
+$big = $ability->execute( array() );
+blzmcp_it_equals( 50, count( $big['rest_keys'] ?? array() ), 'rest_keys capped at 50' );
+blzmcp_it_equals( true, $big['truncated']['rest_keys'] ?? null, 'rest_keys truncated flag set' );
+foreach ( $bulk_ids as $bid ) {
+	$wpdb->delete( $wpdb->prefix . 'woocommerce_api_keys', array( 'key_id' => $bid ) );
+}
 
 // Permissions.
 $sm = wp_insert_user(
@@ -176,6 +260,10 @@ wp_set_current_user( $admin->ID );
 // Clean up.
 $wpdb->delete( $wpdb->prefix . 'woocommerce_api_keys', array( 'key_id' => $key_id ) );
 $wpdb->delete( $wpdb->prefix . 'woocommerce_api_keys', array( 'key_id' => $key2_id ) );
+$wpdb->delete( $wpdb->prefix . 'woocommerce_api_keys', array( 'key_id' => $key3_id ) );
+foreach ( $extra_hooks as $eh ) {
+	$eh->delete( true );
+}
 $hook->delete( true );
 wp_delete_user( (int) $sm );
 wp_delete_user( (int) $owner_id ); // Also removes its application passwords (user meta).
