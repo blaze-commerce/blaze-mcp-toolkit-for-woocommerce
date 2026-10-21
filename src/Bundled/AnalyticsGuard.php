@@ -49,34 +49,48 @@ final class AnalyticsGuard {
 	private const COUNTED_STATUSES = array( 'wc-processing', 'wc-completed', 'wc-on-hold', 'wc-refunded' );
 
 	/**
-	 * Add the filter (core WordPress 7.1+; on older cores the filter never fires).
+	 * Decorate the wc-analytics/* execute callbacks as they register. Works on every core with the
+	 * Abilities API (6.9+). Core only calls execute_callback from WP_Ability::execute() after input
+	 * validation and the permission check, so the guard never answers an unauthorised caller.
 	 */
 	public static function register(): void {
-		add_filter( 'wp_pre_execute_ability', array( self::class, 'pre_execute' ), 10, 4 );
+		add_filter( 'wp_register_ability_args', array( self::class, 'filter_args' ), 20, 2 );
 	}
 
 	/**
-	 * Short-circuit wc-analytics/* when the figures would be incomplete.
+	 * Wrap the execute callback of data-reading wc-analytics/* abilities.
 	 *
-	 * @param mixed  $pre     Sentinel, or a value from an earlier filter.
-	 * @param string $name    Ability name.
-	 * @param mixed  $input   Raw input.
-	 * @param mixed  $ability The WP_Ability instance.
+	 * @param mixed  $args Ability registration args.
+	 * @param string $name Ability name.
 	 * @return mixed
 	 */
-	public static function pre_execute( $pre, $name = '', $input = null, $ability = null ) {
-		if ( ! is_string( $name ) || ! str_starts_with( $name, 'wc-analytics/' ) || in_array( $name, self::EXEMPT, true ) ) {
-			return $pre;
+	public static function filter_args( $args, $name = '' ) {
+		if ( ! is_array( $args ) || ! is_string( $name ) || ! str_starts_with( $name, 'wc-analytics/' ) || in_array( $name, self::EXEMPT, true ) ) {
+			return $args;
+		}
+		if ( ! isset( $args['execute_callback'] ) || ! is_callable( $args['execute_callback'] ) ) {
+			return $args;
 		}
 
-		// This filter runs before the permission check: never tell an unauthorised caller anything.
-		if ( ! $ability instanceof \WP_Ability || true !== $ability->check_permissions( $input ) ) {
-			return $pre;
-		}
+		$original                 = $args['execute_callback'];
+		$args['execute_callback'] = static function ( ...$call_args ) use ( $original ) {
+			$error = self::unavailable_error();
+			if ( null !== $error ) {
+				return $error;
+			}
+			return call_user_func_array( $original, $call_args );
+		};
 
+		return $args;
+	}
+
+	/**
+	 * The error to return instead of incomplete figures, or null when analytics data is fine.
+	 */
+	public static function unavailable_error(): ?\WP_Error {
 		$reason = self::unavailable_reason();
 		if ( null === $reason ) {
-			return $pre;
+			return null;
 		}
 
 		return new \WP_Error(

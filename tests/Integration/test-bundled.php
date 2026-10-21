@@ -69,7 +69,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 
 	blzmcp_it_equals( false, Commerce::is_standing_aside(), 'not standing aside without WooCommerce for Claude' );
 	blzmcp_it_equals( 20, has_action( 'plugins_loaded', array( Commerce::class, 'load' ) ), 'Commerce::load runs on plugins_loaded priority 20' );
-	blzmcp_it_equals( 10, has_filter( 'wp_pre_execute_ability', array( AnalyticsGuard::class, 'pre_execute' ) ), 'analytics guard registered when bundled' );
+	blzmcp_it_equals( 20, has_filter( 'wp_register_ability_args', array( AnalyticsGuard::class, 'filter_args' ) ), 'analytics guard registered when bundled' );
 
 	// bundled_tools_registered.
 	foreach ( array_merge( $analytics_names, $store_names ) as $name ) {
@@ -171,16 +171,24 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $disabled ), 'analytics_import_incomplete_is_reported: Analytics off returns blzmcp_analytics_unavailable' );
 	blzmcp_it_assert( is_wp_error( $disabled ) && str_contains( $disabled->get_error_message(), 'turned off' ), 'analytics off: plain message for the owner' );
 	blzmcp_it_equals( 'analytics_disabled', is_wp_error( $disabled ) ? ( $disabled->get_error_data()['reason'] ?? null ) : null, 'analytics off: reason analytics_disabled' );
-	foreach ( array( 'wc-analytics/breakdown', 'wc-analytics/series', 'wc-analytics/rows' ) as $name ) {
+	$valid_inputs = array(
+		'wc-analytics/breakdown' => array( 'subject' => 'revenue' ),
+		'wc-analytics/series'    => array(
+			'subject'  => 'customers',
+			'interval' => 'day',
+		),
+		'wc-analytics/rows'      => array(),
+	);
+	foreach ( $valid_inputs as $name => $valid_input ) {
 		$ability = wp_get_ability( $name );
-		$out     = $ability instanceof WP_Ability ? $ability->execute( array() ) : null;
+		$out     = $ability instanceof WP_Ability ? $ability->execute( $valid_input ) : null;
 		blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $out ), "analytics off: {$name} is blocked too" );
 	}
 	$confirm = wp_get_ability( 'wc-analytics/confirm-large-range' );
 	$out     = $confirm instanceof WP_Ability ? $confirm->execute( array( 'date_start' => '2026-01-01', 'date_end' => '2026-01-02', 'type' => 'x' ) ) : null;
 	blzmcp_it_assert( AnalyticsGuard::ERROR_CODE !== $error_code( $out ), 'analytics off: confirm-large-range (reads no data) is not blocked' );
 
-	// The guard runs before core's permission check, so it must not answer unauthorised callers.
+	// Core runs execute_callback only after its permission check, so unauthorised callers never see the analytics status.
 	$sub_id = wp_insert_user(
 		array(
 			'user_login' => 'blzmcp_sub_' . wp_generate_password( 6, false ),
@@ -256,7 +264,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		blzmcp_it_assert( ! wp_has_ability( $name ), "standaside_when_wcfc_active: {$name} is not registered" );
 	}
 	blzmcp_it_assert( wp_has_ability( 'blaze-mcp-toolkit/health-summary' ), 'standaside_when_wcfc_active: our diagnostics still registered' );
-	blzmcp_it_equals( false, has_filter( 'wp_pre_execute_ability', array( AnalyticsGuard::class, 'pre_execute' ) ), 'standaside: analytics guard not registered' );
+	blzmcp_it_equals( false, has_filter( 'wp_register_ability_args', array( AnalyticsGuard::class, 'filter_args' ) ), 'standaside: analytics guard not registered' );
 
 	if ( $wcfc_plugin ) {
 		// WooCommerce for Claude's own copy registers wc-analytics; McpExposure still marks it public.
