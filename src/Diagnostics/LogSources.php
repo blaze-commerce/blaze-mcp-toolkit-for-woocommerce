@@ -47,7 +47,7 @@ final class LogSources {
 	 * @return array<int,array{id:string,label:string,path:?string,readable:bool,reason:?string}>
 	 */
 	public static function resolve( $wp_debug_log, string $ini_error_log, ?string $wc_log_dir, string $content_dir ): array {
-		if ( true === $wp_debug_log ) {
+		if ( true === $wp_debug_log || 1 === $wp_debug_log || '1' === $wp_debug_log || ( is_string( $wp_debug_log ) && 'true' === strtolower( trim( $wp_debug_log ) ) ) ) {
 			$debug = self::check( rtrim( $content_dir, '/\\' ) . '/debug.log' );
 		} elseif ( is_string( $wp_debug_log ) ) {
 			$debug = self::check( $wp_debug_log );
@@ -76,25 +76,54 @@ final class LogSources {
 	 *
 	 * @param string $path      Path obtained from sources(); internal use only.
 	 * @param int    $max_bytes Bytes to read from the end.
+	 * @param string[]|null $allowed Resolved paths that may be read; null means the readable paths from sources().
 	 * @return string[]
 	 */
-	public static function tail( string $path, int $max_bytes = self::MAX_TAIL_BYTES ): array {
+	public static function tail( string $path, int $max_bytes = self::MAX_TAIL_BYTES, ?array $allowed = null ): array {
 		$max_bytes = min( $max_bytes, self::MAX_TAIL_BYTES );
-		if ( $max_bytes <= 0 || '' === $path || self::is_stream( $path ) || ! is_file( $path ) || ! is_readable( $path ) ) {
+		if ( $max_bytes <= 0 || '' === $path || self::is_stream( $path ) ) {
 			return array();
 		}
-		$size = filesize( $path );
+		if ( null === $allowed ) {
+			$allowed = array();
+			foreach ( self::sources() as $source ) {
+				if ( $source['readable'] && null !== $source['path'] ) {
+					$allowed[] = $source['path'];
+				}
+			}
+		}
+
+		set_error_handler( static fn(): bool => true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler
+		try {
+			return self::read_tail( $path, $max_bytes, $allowed );
+		} finally {
+			restore_error_handler();
+		}
+	}
+
+	/**
+	 * Tail read; runs with PHP warnings muted by tail().
+	 *
+	 * @param string   $path      Path.
+	 * @param int      $max_bytes Bytes.
+	 * @param string[] $allowed   Resolved paths that may be read.
+	 * @return string[]
+	 */
+	private static function read_tail( string $path, int $max_bytes, array $allowed ): array {
+		$real = realpath( $path );
+		if ( false === $real || ! in_array( $real, $allowed, true ) || ! is_file( $real ) || ! is_readable( $real ) ) {
+			return array();
+		}
+		$size = filesize( $real );
 		if ( false === $size ) {
 			return array();
 		}
-
-		$handle = fopen( $path, 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$handle = fopen( $real, 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		if ( false === $handle ) {
 			return array();
 		}
 
 		$partial = false;
-		$data    = false;
 		if ( $size > $max_bytes ) {
 			$partial = true;
 			if ( 0 !== fseek( $handle, $size - $max_bytes ) ) {
@@ -174,7 +203,23 @@ final class LogSources {
 	 * @param string $path Candidate.
 	 * @return array{path:?string,readable:bool,reason:?string}
 	 */
-	private static function check( string $path ): array {
+	private static function check( string $path, ?string $root = null ): array {
+		set_error_handler( static fn(): bool => true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler
+		try {
+			return self::check_quiet( $path, $root );
+		} finally {
+			restore_error_handler();
+		}
+	}
+
+	/**
+	 * Validate with warnings muted by check().
+	 *
+	 * @param string      $path Candidate.
+	 * @param string|null $root Resolved directory the real path must sit inside.
+	 * @return array{path:?string,readable:bool,reason:?string}
+	 */
+	private static function check_quiet( string $path, ?string $root ): array {
 		if ( '' === trim( $path ) ) {
 			return self::unavailable( 'No log path is configured' );
 		}
@@ -187,6 +232,9 @@ final class LogSources {
 		}
 		if ( self::is_stream( $real ) ) {
 			return self::unavailable( 'Log goes to a stream or system logger, not a file' );
+		}
+		if ( null !== $root && ! str_starts_with( $real, rtrim( $root, '/\\' ) . DIRECTORY_SEPARATOR ) ) {
+			return self::unavailable( 'Log file resolves outside the log directory' );
 		}
 		if ( ! is_file( $real ) ) {
 			return self::unavailable( 'Log path is not a regular file' );
@@ -208,6 +256,21 @@ final class LogSources {
 	 * @return array{path:?string,readable:bool,reason:?string}
 	 */
 	private static function newest_fatal( string $dir ): array {
+		set_error_handler( static fn(): bool => true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler
+		try {
+			return self::newest_fatal_quiet( $dir );
+		} finally {
+			restore_error_handler();
+		}
+	}
+
+	/**
+	 * Newest-file search with warnings muted by newest_fatal().
+	 *
+	 * @param string $dir WC_LOG_DIR.
+	 * @return array{path:?string,readable:bool,reason:?string}
+	 */
+	private static function newest_fatal_quiet( string $dir ): array {
 		$real_dir = realpath( $dir );
 		if ( false === $real_dir || ! is_dir( $real_dir ) ) {
 			return self::unavailable( 'WooCommerce log directory does not exist' );
@@ -228,6 +291,6 @@ final class LogSources {
 		if ( null === $best ) {
 			return self::unavailable( 'No WooCommerce fatal-errors log found' );
 		}
-		return self::check( $best );
+		return self::check( $best, $real_dir );
 	}
 }

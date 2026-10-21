@@ -66,8 +66,23 @@ final class ErrorGrouper {
 			static fn( array $a, array $b ): int => array( $b['count'], $b['last_ts'] ) <=> array( $a['count'], $a['last_ts'] )
 		);
 
+		// Keep fatals first, then errors, then the rest by count; then show by count.
+		$rank = array(
+			'fatal' => 0,
+			'error' => 1,
+		);
+		usort(
+			$groups,
+			static fn( array $a, array $b ): int => array( $rank[ $a['severity'] ] ?? 2, -$a['count'], -$a['last_ts'] ) <=> array( $rank[ $b['severity'] ] ?? 2, -$b['count'], -$b['last_ts'] )
+		);
+		$groups = array_slice( $groups, 0, self::MAX_GROUPS );
+		usort(
+			$groups,
+			static fn( array $a, array $b ): int => array( $b['count'], $b['last_ts'] ) <=> array( $a['count'], $a['last_ts'] )
+		);
+
 		$out = array();
-		foreach ( array_slice( $groups, 0, self::MAX_GROUPS ) as $g ) {
+		foreach ( $groups as $g ) {
 			$out[] = array(
 				'severity'   => $g['severity'],
 				'message'    => $g['message'],
@@ -92,19 +107,27 @@ final class ErrorGrouper {
 		$entries = array();
 		$current = null; // Index into $entries, or null when the last entry was skipped/none.
 		$cont    = 0;
+		$in_pem  = false;
 
 		foreach ( $lines as $line ) {
 			if ( ! is_string( $line ) || '' === trim( $line ) ) {
 				continue;
 			}
 			$head = self::parse_head( $line );
+			// xdebug trace lines carry a timestamp but continue the previous entry.
+			if ( null !== $head && 1 === preg_match( '/^PHP\s+(?:Stack trace:|\d+\.\s)/', $head['body'] ) ) {
+				$head = null;
+				$line = (string) preg_replace( self::PHP_LINE, '$3', $line );
+			}
 			if ( null !== $head ) {
 				$current = null;
 				$cont    = 0;
+				$in_pem  = false;
 				if ( null === $head['severity'] || $head['ts'] < $since_ts ) {
 					continue;
 				}
-				$body = Redactor::redact( $head['body'] );
+				$in_pem = self::opens_pem( $head['body'] );
+				$body   = Redactor::redact( $head['body'] );
 				$body = (string) preg_replace( self::PHP_LEVEL, '', $body );
 				$body = trim( $body );
 				$entries[] = array(
@@ -117,6 +140,16 @@ final class ErrorGrouper {
 				continue;
 			}
 			// Continuation line: belongs to the previous kept entry, if any.
+			if ( $in_pem ) {
+				// Inside a multi-line private key: drop everything up to and including the END line.
+				if ( str_contains( $line, '-----END' ) ) {
+					$in_pem = false;
+				}
+				continue;
+			}
+			if ( self::opens_pem( $line ) ) {
+				$in_pem = true;
+			}
 			if ( null === $current || $cont >= self::MAX_CONT_LINES ) {
 				continue;
 			}
@@ -128,6 +161,19 @@ final class ErrorGrouper {
 			}
 		}
 		return $entries;
+	}
+
+	/**
+	 * Whether a line starts a private key block that doesn't end on the same line.
+	 *
+	 * @param string $line Raw line.
+	 */
+	private static function opens_pem( string $line ): bool {
+		$pos = strpos( $line, '-----BEGIN ' );
+		if ( false === $pos || false === stripos( $line, 'PRIVATE KEY-----', $pos ) ) {
+			return false;
+		}
+		return ! str_contains( substr( $line, $pos ), '-----END' );
 	}
 
 	/**
@@ -207,9 +253,9 @@ final class ErrorGrouper {
 	 */
 	private static function normalise( string $message ): string {
 		$n = $message;
-		$n = preg_replace( '/"[^"]*"|\'[^\']*\'/', '?', $n ) ?? $n;
-		$n = preg_replace( '/\b0x[0-9a-f]+\b|\b[0-9a-f]{8,}\b/i', '?', $n ) ?? $n;
-		$n = preg_replace( '/\d+/', 'N', $n ) ?? $n;
+		$n = preg_replace( '/(?<!\w)"[^"]*"(?!\w)|(?<!\w)\'[^\']*\'(?!\w)/', '?', $n ) ?? $n;
+		$n = preg_replace( '/\b0x[0-9a-f]+\b|(?<![\w\/.-])[0-9a-f]{8,}(?![\w\/.-])/i', '?', $n ) ?? $n;
+		$n = preg_replace( '/(?<=:)\d+|\bon line \d+|(?<![\w\/.-])\d+(?![\w\/-])(?!\.\w)/', 'N', $n ) ?? $n;
 		return substr( $n, 0, 500 );
 	}
 

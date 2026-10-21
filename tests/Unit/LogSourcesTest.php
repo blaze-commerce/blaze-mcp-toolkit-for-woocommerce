@@ -70,7 +70,7 @@ final class LogSourcesTest extends TestCase {
 		fclose( $h ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		$this->assertGreaterThan( 6000000, filesize( $f ) );
 
-		$lines = LogSources::tail( $f, 1024 );
+		$lines = LogSources::tail( $f, 1024, array( realpath( $f ) ) );
 		$this->assertNotEmpty( $lines );
 		$this->assertSame( 'LAST', end( $lines ) );
 		$this->assertLessThanOrEqual( 1024, strlen( implode( "\n", $lines ) ) );
@@ -79,12 +79,12 @@ final class LogSourcesTest extends TestCase {
 
 	public function test_tail_small_file_keeps_first_line(): void {
 		$f = $this->tmp_file( "one\r\ntwo\nthree" );
-		$this->assertSame( array( 'one', 'two', 'three' ), LogSources::tail( $f ) );
+		$this->assertSame( array( 'one', 'two', 'three' ), LogSources::tail( $f, 5242880, array( realpath( $f ) ) ) );
 	}
 
 	public function test_tail_never_reads_more_than_5mb(): void {
 		$f = $this->tmp_file( str_repeat( "abcdefghi\n", 700000 ) ); // 7 MB.
-		$lines = LogSources::tail( $f, 999999999 );
+		$lines = LogSources::tail( $f, 999999999, array( realpath( $f ) ) );
 		$this->assertLessThanOrEqual( 5242880, strlen( implode( "\n", $lines ) ) );
 	}
 
@@ -92,7 +92,7 @@ final class LogSourcesTest extends TestCase {
 		$this->assertSame( array(), LogSources::tail( '/nonexistent/blzmcp.log' ) );
 		$this->assertSame( array(), LogSources::tail( sys_get_temp_dir() ) );
 		$this->assertSame( array(), LogSources::tail( '' ) );
-		$this->assertSame( array(), LogSources::tail( $this->tmp_file( 'x' ), 0 ) );
+		$this->assertSame( array(), LogSources::tail( $this->tmp_file( 'x' ), 0, null ) );
 	}
 
 	public function test_unreadable_source_is_reported_not_thrown(): void {
@@ -157,5 +157,56 @@ final class LogSourcesTest extends TestCase {
 		$this->assertNotNull( $none['reason'] );
 		$empty = $this->by_id( LogSources::resolve( false, '', $this->tmp_dir(), $dir ), 'wc_fatal' );
 		$this->assertFalse( $empty['readable'] );
+	}
+
+	public function test_symlink_escaping_log_dir_is_rejected(): void {
+		$dir = $this->tmp_dir();
+		$target = $this->tmp_file( "secret\n" );
+		symlink( $target, $dir . '/fatal-errors-2026-10-21-x.log' );
+		$this->cleanup[] = $dir . '/fatal-errors-2026-10-21-x.log';
+		$wc = $this->by_id( LogSources::resolve( false, '', $dir, $dir ), 'wc_fatal' );
+		$this->assertFalse( $wc['readable'] );
+		$this->assertNull( $wc['path'] );
+		$this->assertNotNull( $wc['reason'] );
+	}
+
+	public function test_tail_refuses_paths_not_in_sources(): void {
+		$f = $this->tmp_file( "a\nb\n" );
+		$this->assertSame( array(), LogSources::tail( $f ) );
+		$this->assertSame( array(), LogSources::tail( $f, 100, array( '/somewhere/else' ) ) );
+	}
+
+	public function test_vanished_file_tail_is_quiet(): void {
+		$f    = $this->tmp_file( "a\nb\n" );
+		$real = realpath( $f );
+		unlink( $f ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
+		$this->assertSame( array(), LogSources::tail( $f, 100, array( $real ) ) );
+	}
+
+	public function test_open_basedir_failure_is_quiet(): void {
+		// open_basedir can only be tightened inside a process, so run a child PHP.
+		$root   = dirname( __DIR__, 2 );
+		$file   = $this->tmp_file( 'x' );
+		$script = $this->tmp_file(
+			'<?php define( "ABSPATH", "/x/" ); require ' . var_export( $root . '/vendor/autoload.php', true ) . ';' // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export
+			. '$w = 0; set_error_handler( function () use ( &$w ) { ++$w; return true; } );'
+			. '$f = ' . var_export( $file, true ) . ';' // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export
+			. '$o = Blaze\\McpToolkit\\Diagnostics\\LogSources::resolve( $f, $f, $f, $f );'
+			. '$t = Blaze\\McpToolkit\\Diagnostics\\LogSources::tail( $f, 100, array( $f ) );'
+			. 'echo json_encode( array( $w, count( $o ), array_column( $o, "readable" ), $t ) );'
+		);
+		$cmd = escapeshellarg( PHP_BINARY ) . ' -d display_errors=0 -d open_basedir=' . escapeshellarg( $root ) . ' ' . escapeshellarg( $script ) . ' 2>&1';
+		$out = shell_exec( $cmd ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_shell_exec
+		$this->assertSame( array( 0, 3, array( false, false, false ), array() ), json_decode( (string) $out, true ), (string) $out );
+	}
+
+	public function test_truthy_wp_debug_log_values_mean_debug_log(): void {
+		$dir = $this->tmp_dir();
+		file_put_contents( $dir . '/debug.log', "x\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		$this->cleanup[] = $dir . '/debug.log';
+		foreach ( array( true, 1, '1', 'true', 'TRUE' ) as $v ) {
+			$s = $this->by_id( LogSources::resolve( $v, '', null, $dir ), 'wp_debug' );
+			$this->assertTrue( $s['readable'], var_export( $v, true ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export
+		}
 	}
 }

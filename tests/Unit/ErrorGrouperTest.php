@@ -150,4 +150,65 @@ final class ErrorGrouperTest extends TestCase {
 		);
 		$this->assertCount( 1, ErrorGrouper::group( $lines, 0, 'wp_debug' ) );
 	}
+
+	public function test_contractions_do_not_merge_distinct_messages(): void {
+		$lines = array(
+			"[21-Oct-2026 10:00:00 UTC] PHP Warning:  Can't connect to Stripe; plugin isn't ready",
+			"[21-Oct-2026 10:00:01 UTC] PHP Warning:  Can't load template foo; theme isn't ready",
+		);
+		$this->assertCount( 2, ErrorGrouper::group( $lines, 0, 'wp_debug' ) );
+	}
+
+	public function test_pem_body_in_continuations_is_dropped(): void {
+		$lines = array(
+			'[21-Oct-2026 10:00:00 UTC] PHP Fatal error:  boom in wp-content/plugins/woo-foo/x.php:1',
+			'-----BEGIN RSA PRIVATE KEY-----',
+			'MIIEowIBAAKCAQEAsupersecretkeymaterialAAAA',
+			'bW9yZXNlY3JldGtleW1hdGVyaWFs',
+			'-----END RSA PRIVATE KEY-----',
+			'#0 after key',
+		);
+		$g = ErrorGrouper::group( $lines, 0, 'wp_debug' );
+		$this->assertStringNotContainsString( 'supersecret', $g[0]['message'] );
+		$this->assertStringNotContainsString( 'bW9yZX', $g[0]['message'] );
+		$this->assertStringContainsString( 'after key', $g[0]['message'] );
+	}
+
+	public function test_fatal_survives_group_cap(): void {
+		$lines = array();
+		for ( $i = 0; $i < 60; $i++ ) {
+			$word = chr( 97 + intdiv( $i, 26 ) ) . chr( 97 + ( $i % 26 ) );
+			$lines[] = "[21-Oct-2026 10:00:00 UTC] PHP Deprecated:  old {$word} thing";
+			$lines[] = "[21-Oct-2026 10:00:01 UTC] PHP Deprecated:  old {$word} thing";
+		}
+		$lines[] = '[21-Oct-2026 10:00:02 UTC] PHP Fatal error:  the one fatal';
+		$g       = ErrorGrouper::group( $lines, 0, 'wp_debug' );
+		$this->assertCount( 50, $g );
+		$this->assertContains( 'the one fatal', array_column( $g, 'message' ) );
+		$counts = array_column( $g, 'count' );
+		$sorted = $counts;
+		rsort( $sorted );
+		$this->assertSame( $sorted, $counts );
+	}
+
+	public function test_digits_inside_paths_are_not_normalised(): void {
+		$lines = array();
+		for ( $i = 0; $i < 5; $i++ ) {
+			$lines[] = "[21-Oct-2026 10:00:00 UTC] PHP Warning:  bad in wp-content/plugins/p{$i}/x.php on line 4{$i}";
+			$lines[] = "[21-Oct-2026 10:00:00 UTC] PHP Warning:  bad in wp-content/plugins/q/x{$i}.php:1{$i}";
+		}
+		$g = ErrorGrouper::group( $lines, 0, 'wp_debug' );
+		$this->assertCount( 5 + 5, $g ); // p0..p4 stay apart; q/x0..x4 stay apart.
+	}
+
+	public function test_xdebug_trace_lines_are_continuations(): void {
+		$lines = array(
+			'[21-Oct-2026 10:00:00 UTC] PHP Warning:  boom',
+			'[21-Oct-2026 10:00:00 UTC] PHP Stack trace:',
+			'[21-Oct-2026 10:00:00 UTC] PHP   1. {main}() /www/wp-content/plugins/woo-foo/x.php:0',
+		);
+		$g = ErrorGrouper::group( $lines, 0, 'wp_debug' );
+		$this->assertCount( 1, $g );
+		$this->assertSame( 'warning', $g[0]['severity'] );
+	}
 }
