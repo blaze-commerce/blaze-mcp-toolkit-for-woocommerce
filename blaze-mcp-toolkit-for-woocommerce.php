@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name:       Blaze MCP Toolkit for WooCommerce
- * Description:       Read-only store health tools for Claude and ChatGPT, delivered as WordPress Abilities over MCP. This plugin never changes your store.
+ * Description:       Ask Claude or ChatGPT how your WooCommerce store is doing: sales, errors, failed jobs, updates and API access. Our tools are read-only.
  * Version:           1.0.0
  * Requires at least: 6.9
  * Requires PHP:      8.0

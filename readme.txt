@@ -1,6 +1,6 @@
 === Blaze MCP Toolkit for WooCommerce ===
 Contributors: blazecommerce
-Tags: woocommerce, mcp, ai, claude, store health
+Tags: woocommerce, mcp, ai, analytics, store health
 Requires at least: 6.9
 Tested up to: 7.1
 Requires PHP: 8.0
@@ -14,7 +14,7 @@ Ask Claude or ChatGPT how your WooCommerce store is doing: sales, errors, failed
 
 Blaze MCP Toolkit for WooCommerce connects your WooCommerce store to Claude or ChatGPT so you can ask plain questions and get straight answers: How did we do this week? Why did sales drop on Tuesday? Is anything broken? WooCommerce's own AI connection can look up products and orders. This plugin adds what it can't see: sales totals that match your WooCommerce reports, PHP errors, failed background jobs, recent plugin updates, and who has API access to your store.
 
-Its tools are read-only: this plugin never changes your store, never sends customer names, emails or addresses to the AI, and adds nothing to the pages your customers load. It's a weekly check-up you can run in two minutes, so you spot problems before your customers do.
+It's read-only by default: out of the box it never changes your store, never sends customer names, emails or addresses to the AI, and adds nothing to the pages your customers load. It's a weekly check-up you can run in two minutes, so you spot problems before your customers do.
 
 One thing to know up front: the same connection also carries tools from WooCommerce itself and from Enable Abilities for MCP, and some of those can edit orders and products or return customer details. The plugin's setup screen lists them and shows where to switch them off.
 
@@ -66,20 +66,20 @@ Every tool checks the WordPress role of the person who connected the AI:
 
 = Requires =
 
-WordPress installs these before the plugin can be activated:
+WordPress asks you to install and activate these before the plugin can be activated:
 
 * [WooCommerce](https://wordpress.org/plugins/woocommerce/)
 * [MCP Adapter](https://wordpress.org/plugins/mcp-adapter/): the connection AI assistants talk to.
 * [Enable Abilities for MCP](https://wordpress.org/plugins/enable-abilities-for-mcp/): the sign-in (OAuth) and connector URL for Claude and ChatGPT, and the switches for which tools are on.
 
-This plugin has no sign-in, keys or REST routes of its own. It registers its tools with the WordPress Abilities API and lets those two plugins expose them.
+This plugin has no sign-in or keys, and registers no REST routes of its own. It registers its tools with the WordPress Abilities API and lets those two plugins expose them.
 
 = Setup =
 
-1. Install and activate the plugin. WordPress will ask for WooCommerce, MCP Adapter and Enable Abilities for MCP first.
+1. Install and activate the plugin. WordPress asks you to install and activate WooCommerce, MCP Adapter and Enable Abilities for MCP first.
 2. Open **WooCommerce > Blaze MCP Toolkit** and read the Setup check. Each line is green, amber or red, with the fix in plain words. Copy the connector URL shown there.
 3. Open **Settings > WP Abilities** (Enable Abilities for MCP) and turn on OAuth. For ChatGPT, also turn on "ChatGPT & Other OAuth Connectors". While you are there, switch off the tools from other plugins you don't want the AI to use; the Setup check lists the ones that can change your store or return customer details.
-4. Add the connector URL in your assistant. In Claude: Customize > Connectors > Add custom connector. In ChatGPT: Plugins > Add > Add custom MCP server. Log in to wp-admin in the same browser first, then click Connect and click Allow once.
+4. Add the connector URL in your assistant. In Claude: Customize > Connectors > Add > Add custom connector. In ChatGPT: Plugins > Add > Add custom MCP server. Log in to wp-admin in the same browser first, then click Connect and click Allow once.
 5. Ask: "Run my weekly store review."
 
 = Privacy =
@@ -111,7 +111,7 @@ What is sent depends on the question asked and the tools switched on. Sign-in (O
 
 == Installation ==
 
-1. In wp-admin go to Plugins > Add New, search for "Blaze MCP Toolkit for WooCommerce", then install and activate it. WordPress installs WooCommerce, MCP Adapter and Enable Abilities for MCP first if they are missing.
+1. In wp-admin go to Plugins > Add New, search for "Blaze MCP Toolkit for WooCommerce", then install and activate it. If WooCommerce, MCP Adapter or Enable Abilities for MCP are missing, WordPress asks you to install and activate them first.
 2. Follow the Setup steps in the Description: open WooCommerce > Blaze MCP Toolkit, turn on OAuth in Enable Abilities, and add the connector URL in Claude or ChatGPT.
 
 == Frequently Asked Questions ==
@@ -126,7 +126,7 @@ In ChatGPT, open Plugins > Add > Add custom MCP server, paste the connector URL 
 
 = How do I add it to Claude? =
 
-In claude.ai, open Customize > Connectors > Add custom connector and paste the connector URL. The connector then works in Claude on the web, desktop and mobile. Claude may ask you to approve each tool call the first time; that's Claude's setting for the connector, not a sign that the tool writes anything.
+In claude.ai, open Customize > Connectors > Add > Add custom connector and paste the connector URL. The connector then works in Claude on the web, desktop and mobile. Claude may ask you to approve each tool call the first time; that's Claude's setting for the connector, not a sign that the tool writes anything.
 
 = Connecting fails with a 403 error =
 

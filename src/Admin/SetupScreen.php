@@ -70,8 +70,14 @@ final class SetupScreen {
 	 * admin-post.php handler: save, then go back to the screen.
 	 */
 	public static function handle_post(): void {
-		// Nonce and capability are checked inside save().
-		$saved = self::save( $_POST ); // phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		// Only the two fields the form sends; the nonce and capability are checked inside save().
+		// phpcs:disable WordPress.Security.NonceVerification.Missing -- verified in save() before anything is stored.
+		$fields = array(
+			self::NONCE_FIELD          => isset( $_POST[ self::NONCE_FIELD ] ) ? sanitize_text_field( wp_unslash( $_POST[ self::NONCE_FIELD ] ) ) : '',
+			'shop_manager_diagnostics' => ! empty( $_POST['shop_manager_diagnostics'] ),
+		);
+		// phpcs:enable
+		$saved = self::save( $fields );
 		wp_safe_redirect( add_query_arg( 'blzmcp_saved', $saved ? '1' : '0', admin_url( 'admin.php?page=' . self::SLUG ) ) );
 		exit;
 	}
@@ -148,7 +154,7 @@ final class SetupScreen {
 		printf( '<p><input type="text" class="large-text code" readonly="readonly" aria-label="%1$s" value="%2$s" /></p>', esc_attr__( 'Connector URL', 'blaze-mcp-toolkit-for-woocommerce' ), esc_attr( rest_url( 'mcp/mcp-oauth-server' ) ) );
 		echo '<ul class="ul-disc">';
 		echo '<li>' . esc_html__( 'Claude: Customize > Connectors > Add > Add custom connector, then paste the URL.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
-		echo '<li>' . esc_html__( 'ChatGPT: Plugins > Add > Add custom MCP server, then paste the URL. This worked on a Free account.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
+		echo '<li>' . esc_html__( 'ChatGPT: Plugins > Add > Add custom MCP server, then paste the URL. In our testing this worked on a Free ChatGPT account.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
 		echo '<li>' . esc_html__( 'Log in to wp-admin before you click Connect, and click Allow once.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
 		echo '</ul>';
 	}
