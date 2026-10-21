@@ -39,7 +39,7 @@ final class AuditLog {
 			$status = 'error';
 		}
 
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Own table, write-only log.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Own table, write-only log: an insert has nothing to cache.
 		$wpdb->query(
 			$wpdb->prepare(
 				'INSERT INTO %i (created_at, user_id, ability, params_hash, row_count, duration_ms, status) VALUES (%s, %d, %s, %s, %d, %d, %s)',
