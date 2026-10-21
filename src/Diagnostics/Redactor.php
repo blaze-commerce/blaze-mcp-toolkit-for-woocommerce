@@ -23,31 +23,110 @@ final class Redactor {
 	/** Name fragments that mark a key/value pair as a credential. */
 	private const SECRET_NAMES = '[\w-]*(?:secret|passw(?:or)?d|pwd|token|api[_-]?key|apikey|auth_key|auth_salt|logged_in_key|logged_in_salt|nonce_key|nonce_salt|private_key|access_key|consumer_key|signing_key|encryption_key|client_key)[\w-]*';
 
-	/** Key/value value: quoted string or bare run. Never an existing token. */
-	private const VALUE = '(?!\[(?:secret|card|nonce|pii)\])(?:"[^"]*"|\'[^\']*\'|[^\s"\'&,;})\]]+)';
+	/** PII keys safe to match as key=value, key: value or [key] => value. */
+	private const PII_LOOSE = '(?:billing_|shipping_|customer_)?(?:first_name|last_name|full_name|given_name|family_name|surname|address_1|address_2|address_line_\d|address|street|line1|line2|postcode|postal_code|zip|city|company|phone|ip_address|user_agent|user_login|display_name|nickname|user_nicename|admin_area_\d)';
+
+	/** PII keys too generic for free text: only as a quoted or bracketed key ("name": / [name] =>). */
+	private const PII_STRUCTURED = '(?:billing_|shipping_|customer_)?(?:name|state)';
+
+	/** Longest input redacted; callers pass one line at a time. */
+	private const MAX_BYTES = 4096;
+
+	/** Returned when a regex fails (backtrack/JIT limit). Fails closed and visibly. */
+	public const FAILED = '[redaction failed]';
 
 	/**
-	 * Redact one log line (or a block of lines).
+	 * Redact one log line.
 	 *
-	 * @param string $line        Raw log text.
+	 * Callers must pass one line at a time. Input is truncated to 4096 bytes first. If any
+	 * regex fails (PCRE error), the result is exactly '[redaction failed]', never the
+	 * partly redacted text and never an empty string.
+	 *
+	 * @param string $line        Raw log line.
 	 * @param string $abspath     Filesystem ABSPATH; paths under it become relative.
 	 * @param string $content_dir Filesystem WP_CONTENT_DIR; mapped to "wp-content/".
 	 * @return string
 	 */
 	public static function redact( string $line, string $abspath = ABSPATH, string $content_dir = WP_CONTENT_DIR ): string {
-		$out = $line;
+		try {
+			return self::run( substr( $line, 0, self::MAX_BYTES ), $abspath, $content_dir );
+		} catch ( \RuntimeException $e ) {
+			return self::FAILED;
+		}
+	}
 
-		// 1. Private key blocks, PHP constants holding credentials, DB error users.
-		$out = (string) preg_replace( '/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/s', '[secret]', $out );
-		$out = (string) preg_replace(
+	/**
+	 * Preg replace that throws on a PCRE error instead of returning null.
+	 *
+	 * @param string|array<int,string> $pattern     Pattern(s).
+	 * @param string                   $replacement Replacement.
+	 * @param string                   $subject     Subject.
+	 * @return string
+	 * @throws \RuntimeException On PCRE failure.
+	 */
+	private static function sub( $pattern, string $replacement, string $subject ): string {
+		$result = preg_replace( $pattern, $replacement, $subject );
+		if ( null === $result ) {
+			throw new \RuntimeException( 'pcre' );
+		}
+		return $result;
+	}
+
+	/**
+	 * Preg replace with callback that throws on a PCRE error.
+	 *
+	 * @param string   $pattern  Pattern.
+	 * @param callable $callback Callback.
+	 * @param string   $subject  Subject.
+	 * @return string
+	 * @throws \RuntimeException On PCRE failure.
+	 */
+	private static function subcb( string $pattern, callable $callback, string $subject ): string {
+		$result = preg_replace_callback( $pattern, $callback, $subject );
+		if ( null === $result ) {
+			throw new \RuntimeException( 'pcre' );
+		}
+		return $result;
+	}
+
+	/**
+	 * Replace the value after a key: handles "=>" (print_r, multi-word to the next " [" / ")" / end),
+	 * and ":" / "=" (quoted with escapes, escaped-quote JSON, or a bare run).
+	 *
+	 * @param string $key   Regex for the key including its closing quote/bracket (no separator).
+	 * @param string $token Replacement token.
+	 * @param string $text  Input.
+	 * @return string
+	 */
+	private static function replace_values( string $key, string $token, string $text ): string {
+		$skip   = '(?![{\[])(?!\[(?:secret|card|nonce|pii)\])';
+		$quoted = '(?:\\\\"(?:(?!\\\\").)*\\\\"|"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\')';
+		$text   = self::sub( '/(' . $key . '\s*=>\s*+)' . $skip . '(?:' . $quoted . '|.+?(?=\s+\[|\s*\)|\s*$))/im', '${1}' . $token, $text );
+		return self::sub( '/(' . $key . '\s*[:=](?!>)\s*+)' . $skip . '(?:' . $quoted . '|[^\s"\'&,;})\]]+)/i', '${1}' . $token, $text );
+	}
+
+	/**
+	 * The redaction rules, in order.
+	 *
+	 * @param string $out         Input (already truncated).
+	 * @param string $abspath     ABSPATH.
+	 * @param string $content_dir WP_CONTENT_DIR.
+	 * @return string
+	 * @throws \RuntimeException On PCRE failure.
+	 */
+	private static function run( string $out, string $abspath, string $content_dir ): string {
+		// 1. Private key blocks, PHP constants holding credentials, DB error users, URL credentials.
+		$out = self::sub( '/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/s', '[secret]', $out );
+		$out = self::sub(
 			'/\bdefine\s*\(\s*([\'"])([A-Za-z0-9_]*(?:KEY|SALT|PASSWORD|PASSWD|SECRET|TOKEN)[A-Za-z0-9_]*|DB_USER|DB_HOST|DB_NAME)\1\s*,\s*(?:"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\')/i',
 			"define('$2', [secret]",
 			$out
 		);
-		$out = (string) preg_replace( "/for user '[^']*'@'[^']*'/i", 'for user [secret]', $out );
+		$out = self::sub( "/for user '[^']*'@'[^']*'/i", 'for user [secret]', $out );
+		$out = self::sub( '#\b([a-z][a-z0-9+.-]*://)[^\s/"\']*@#i', '${1}[secret]@', $out );
 
 		// 2. Vendor tokens with a known shape.
-		$out = (string) preg_replace(
+		$out = self::sub(
 			array(
 				'/\b[spr]k_(?:live|test)_\w*/i',
 				'/\bpk_(?:live|test)_\w*/i',
@@ -55,7 +134,7 @@ final class Redactor {
 				'/\bwhsec_\w*/i',
 				'/\bpi_\w+_secret_\w+/',
 				'/\b(?:seti|cs)_\w+_secret_\w+/',
-				'/\b[cs]k_[a-f0-9]{40}\b/',
+				'/\bc[ks]_[a-f0-9]{40}\b/',
 				'/\bwc_order_\w{6,}/',
 				'/\bAKIA[0-9A-Z]{12,}\b/',
 				'/\bAIza[\w-]{30,}/',
@@ -69,26 +148,30 @@ final class Redactor {
 		);
 
 		// 3. JWTs, auth headers, cookies.
-		$out = (string) preg_replace( '/\beyJ[\w-]{8,}\.[\w-]{4,}\.[\w-]*/', '[secret]', $out );
-		$out = (string) preg_replace( '/\b(Authorization|Proxy-Authorization)(\s*[:=]\s*)(?:(?:Bearer|Basic|Token|Digest|OAuth)\s+)?[^\s"\',;]+/i', '$1$2[secret]', $out );
-		$out = (string) preg_replace( '/\bBearer\s+[^\s"\',;]{8,}/', '[secret]', $out );
-		$out = (string) preg_replace( '/\bBasic\s+(?=[A-Za-z0-9+\/]*[\d+\/=])[A-Za-z0-9+\/]{8,}={0,2}/', '[secret]', $out );
-		$out = (string) preg_replace( '/\b(Set-Cookie|Cookie)(\s*:\s*)[^\r\n]*/i', '$1$2[secret]', $out );
-		$out = (string) preg_replace(
+		$out = self::sub( '/\beyJ[\w-]{8,}\.[\w-]{4,}\.[\w-]*/', '[secret]', $out );
+		$out = self::sub( '/\b(Authorization|Proxy-Authorization)(\\\\?["\'\]]*\s*(?:=>|[:=](?!>))\s*)\\\\?["\']?(?:(?:Bearer|Basic|Token|Digest|OAuth)\s+)?(?:\[secret\]|[^\s"\',;\\\\})]+)(?:\\\\?["\'])?/i', '${1}${2}[secret]', $out );
+		$out = self::sub( '/\bBearer\s+[^\s"\',;]{8,}/', '[secret]', $out );
+		$out = self::sub( '/\bBasic\s+(?=[A-Za-z0-9+\/]*[\d+\/=])[A-Za-z0-9+\/]{8,}={0,2}/', '[secret]', $out );
+		$out = self::sub( '/\b(Set-Cookie|Cookie)(\s*:\s*)[^\r\n]*/i', '${1}${2}[secret]', $out );
+		$out = self::sub(
 			'/\b(?:wordpress_[\w-]*|wp_woocommerce_session_[\w-]*|woocommerce_(?:items_in_cart|cart_hash|recently_viewed)|wp-settings(?:-time)?-\d+)=[^;\s"\',]+/',
 			'[secret]',
 			$out
 		);
 
-		// 4. Nonces and credential-named key/value pairs.
-		$out = (string) preg_replace( '/\b((?:_wpnonce|_ajax_nonce|security|[\w-]*nonce))(\s*=\s*)[\w-]+/i', '$1$2[nonce]', $out );
-		$out = (string) preg_replace(
-			'/(' . self::SECRET_NAMES . ')(["\'\]]*\s*(?:=>|[:=](?!>))\s*)' . self::VALUE . '/i',
-			'$1$2[secret]',
+		// 4. Nonces, credential-named pairs, stack-frame arguments.
+		$out = self::sub( '/\b((?:_wpnonce|_ajax_nonce|security|[\w-]*nonce))(\s*=\s*)[\w-]+/i', '${1}${2}[nonce]', $out );
+		$out = self::replace_values( '(?<![\w-])' . self::SECRET_NAMES . '\\\\?["\'\]]*', '[secret]', $out );
+		$out = self::sub( '/(?<=[?&])(key|order_key)(=)[^\s&"\']+/i', '${1}${2}[secret]', $out );
+		// Every string argument in a "#N file(line): call(args)" frame (DB credentials, passwords).
+		$out = self::subcb(
+			'/(#\d+\s+(?:[^\s#][^\r\n]*?\(\d+\)|\[internal function\]): )(.*?)(?=\s#\d+\s|\r?$)/m',
+			static function ( array $m ): string {
+				return $m[1] . (string) preg_replace( '/\'(?:[^\'\\\\]|\\\\.)*\'/', "'[secret]'", $m[2] );
+			},
 			$out
 		);
-		$out = (string) preg_replace( '/(?<=[?&])(key|order_key)(=)[^\s&"\']+/i', '$1$2[secret]', $out );
-		$out = (string) preg_replace_callback(
+		$out = self::subcb(
 			'/\b([\w\\\\:>-]*(?:authenticate|signon|check_password|set_password|password|secret|api_key|token)\w*)\(([^()]+)\)/i',
 			static function ( array $m ): string {
 				$args = trim( $m[2] );
@@ -97,19 +180,15 @@ final class Redactor {
 			$out
 		);
 
-		// 5. Personal data keys in payload dumps.
-		$out = (string) preg_replace(
-			'/(["\']?\b(?:billing_|shipping_|customer_)?(?:first_name|last_name|full_name|address_1|address_2|address|street|postcode|zip|company|phone|ip_address|user_agent)["\'\]]*\s*(?:=>|[:=](?!>))\s*)(?!\[)(?:"[^"]*"|\'[^\']*\'|[^\s,;}\]]+)/i',
-			'$1[pii]',
-			$out
-		);
+		// 5. Personal data keys in payload dumps (WooCommerce, Stripe, PayPal, WP users).
+		$out = self::replace_values( '(?:["\'\[]\s*' . self::PII_STRUCTURED . '\\\\?\s*["\'\]]|["\'\[]?\b' . self::PII_LOOSE . '\b\\\\?["\'\]]*)', '[pii]', $out );
 
 		// 6. Card security codes, then card numbers.
-		$out = (string) preg_replace( '/\b(cvv2?|cvc2?|csc|security_code)(["\']?\s*[:=]\s*["\']?)\d{3,4}\b/i', '$1$2[card]', $out );
+		$out = self::sub( '/\b(cvv2?|cvc2?|csc|security_code)(["\']?\s*[:=]\s*["\']?)\d{3,4}\b/i', '${1}${2}[card]', $out );
 		$out = self::redact_cards( $out );
 
 		// 7. Emails.
-		$out = (string) preg_replace( '/[A-Za-z0-9._%+-]+(?:@|%40|\\\\u0040)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/', '[email]', $out );
+		$out = self::sub( '/[A-Za-z0-9._%+-]+(?:@|%40|\\\\u0040)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/', '[email]', $out );
 
 		// 8. IPs before phones (dotted quads), then phones.
 		$out = self::redact_ips( $out );
@@ -127,8 +206,8 @@ final class Redactor {
 	 * @return string
 	 */
 	private static function redact_cards( string $text ): string {
-		return (string) preg_replace_callback(
-			'/(?<![\w.:\/-])(?:\d{4}([ -])\d{4}\1\d{4}\1\d{1,7}|\d{4}([ -])\d{6}\2\d{4,5}|\d{13,19})(?![\w-]|\.\d)/',
+		return self::subcb(
+			'/(?<![\w.\/-])(?:\d{4}([ .-])\d{4}\1\d{4}\1\d{1,7}|\d{4}([ .-])\d{6}\2\d{4,5}|\d{13,19})(?![\w-]|\.\d)/',
 			static function ( array $m ): string {
 				$digits = preg_replace( '/\D/', '', $m[0] );
 				$len    = strlen( (string) $digits );
@@ -177,7 +256,7 @@ final class Redactor {
 	 * @return string
 	 */
 	private static function redact_ips( string $text ): string {
-		$text = (string) preg_replace_callback(
+		$text = self::subcb(
 			'/(?<![\w:.])(?:[0-9a-fA-F]{0,4}:){2,7}(?:[0-9a-fA-F]{1,4}|(?:\d{1,3}\.){3}\d{1,3})?(?![\w:]|\.\d)/',
 			static function ( array $m ): string {
 				$c      = $m[0];
@@ -194,7 +273,7 @@ final class Redactor {
 			},
 			$text
 		);
-		return (string) preg_replace(
+		return self::sub(
 			'/(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w]|\.\d)/',
 			'[ip]',
 			$text
@@ -208,7 +287,7 @@ final class Redactor {
 	 * @return string
 	 */
 	private static function redact_phones( string $text ): string {
-		$text = (string) preg_replace_callback(
+		$text = self::subcb(
 			'/(?<![\w+])\+\d{1,3}(?:[ .-]?(?:\(\d{1,4}\)|\d{2,4})){2,5}(?![\w])/',
 			static function ( array $m ): string {
 				$n = strlen( (string) preg_replace( '/\D/', '', $m[0] ) );
@@ -216,7 +295,7 @@ final class Redactor {
 			},
 			$text
 		);
-		return (string) preg_replace(
+		return self::sub(
 			array(
 				'/(?<![\w.:\/+-])\(\d{2,4}\)\s?\d{3,4}[ -]\d{3,4}(?![\w-])/',
 				'/(?<![\w.:\/+-])0\d{3}[ -]\d{3}[ -]\d{3}(?![\w-])/',
@@ -248,8 +327,8 @@ final class Redactor {
 		}
 
 		// Any other host path that still passes through a wp-content directory.
-		$text = (string) preg_replace( '#(?<![\w:/.])/(?:[^\s/\'"()<>|]+/)*?wp-content/#', 'wp-content/', $text );
-		$text = (string) preg_replace_callback(
+		$text = self::sub( '#(?<![\w:/.])/(?:[^\s/\'"()<>|]+/)*?wp-content/#', 'wp-content/', $text );
+		$text = self::subcb(
 			'#(?<![\w:/.\\\\])[A-Za-z]:[\\\\/](?:[^\s\\\\/\'"()<>|:*?]+[\\\\/])*?wp-content[\\\\/]([^\s\'"()<>|:*?]*)#',
 			static function ( array $m ): string {
 				return 'wp-content/' . str_replace( '\\', '/', $m[1] );
@@ -258,8 +337,8 @@ final class Redactor {
 		);
 
 		// Remaining absolute paths (Windows, then Unix). Short URL-like paths are left alone.
-		$text = (string) preg_replace( '#(?<![\w:/.\\\\])[A-Za-z]:\\\\(?:[^\s\\\\/\'"()<>|:*?]+\\\\?)+#', '[path]', $text );
-		return (string) preg_replace_callback(
+		$text = self::sub( '#(?<![\w:/.\\\\])[A-Za-z]:\\\\(?:[^\s\\\\/\'"()<>|:*?]+\\\\?)+#', '[path]', $text );
+		return self::subcb(
 			'#(?<![\w:/.<>\[-])/(?:[\w.@+~-]+/)+[\w.@+~-]*|(?<![\w:/.<>\[-])/(?:home|Users|var|www|srv|opt|usr|etc|tmp|mnt|root|dev|proc|data|nas|private|Volumes)/[\w.@+~-]+#',
 			static function ( array $m ): string {
 				$first = explode( '/', ltrim( $m[0], '/' ) )[0];

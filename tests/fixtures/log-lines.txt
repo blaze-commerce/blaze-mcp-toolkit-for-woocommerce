@@ -45,4 +45,11 @@ Stack trace:
 2026-10-21T10:56:00+00:00 ERROR Cannot open C:\Users\jane\Sites\shop\wp-content\plugins\foo\bar.php for reading
 2026-10-21T10:56:01+00:00 ERROR Keys: AKIAIOSFODNN7EXAMPLE ghp_abcdefghijklmnopqrstuvwxyz0123456789 xoxb-123456789012-abcdefghijkl
 -----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEAxxxxxxxxxxxxxxxx-----END RSA PRIVATE KEY-----
+2026-10-21T11:00:00+00:00 ERROR REST key rotated: cs_0123456789abcdef0123456789abcdef01234567
+2026-10-21T11:00:01+00:00 DEBUG Gateway card_number:4111111111111111 {"number":4242424242424242} dotted 4111.1111.1111.1111
+2026-10-21T11:00:02+00:00 DEBUG Stripe {"billing_details":{"address":{"city":"Melbourne","line1":"1 Example St","line2":"Unit 4","postal_code":"3000","state":"VIC"},"name":"Jane Doe"}} PayPal {"given_name":"Jane","surname":"Doe","address_line_1":"1 Example St","admin_area_2":"Melbourne"} user_login=jdoe display_name=JaneD [nickname] => janed [user_nicename] => jane-doe
+2026-10-21T11:00:03+00:00 DEBUG {"password":"abc\"def ghi"} {\"token\":\"abc def\"} [last_name] => Van Der Berg [address_1] => 1 Example Street [password] => correct horse battery staple
+#0 /www/site_123/public/wp-includes/class-wpdb.php(1989): mysqli_real_connect(Object(mysqli), 'localhost', 'wp_user', 'hunter2xyz', NULL, 3306) #1 /www/site_123/public/wp-includes/class-wpdb.php(790): wpdb->__construct('wp_user', 'hunter2xyz', 'wpdb', 'localhost') #2 [internal function]: PDO->__construct('mysql:host=db', 'wp_user', 'hunter2xyz')
+2026-10-21T11:00:05+00:00 DEBUG {"Authorization":"Basic dXNlcjpwYXNz"} [Authorization] => Basic dXNlcjpwYXNz
+2026-10-21T11:00:06+00:00 ERROR Connect failed mysql://wp_user:hunter2xyz@localhost/wp redis://:s3cretPass@127.0.0.1:6379 https://admin:p!ss#w0rd@mail.example.com/x
 2026-10-21T10:57:00+00:00 INFO Safe line: WooCommerce 11.0.1 on PHP 8.2.31, order #1234 total 49.95, 3 items

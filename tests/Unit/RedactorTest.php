@@ -65,6 +65,15 @@ final class RedactorTest extends TestCase {
 			'private key'      => '/BEGIN [A-Z ]*PRIVATE KEY-----\S/',
 			'abs path'         => '/(?<![\w:\/.])\/(?:home|www|Users)\//',
 			'windows path'     => '/[A-Z]:\\\\Users/',
+			'wc cs key'        => '/cs_[a-f0-9]{40}/',
+			'card after colon' => '/\b[2-6]\d{15}\b/',
+			'card dotted'      => '/\d{4}\.\d{4}\.\d{4}\.\d{4}/',
+			'gateway pii'      => '/Melbourne|Jane|Doe\b|jdoe|janed|jane-doe|Example St|Unit 4|"postal_code":"3|"state":"VIC/',
+			'multi-word value' => '/Der Berg|\bBerg\b|horse|battery|staple|Example Street/',
+			'escaped quote'    => '/ ghi"|def ghi|abc def/',
+			'frame db creds'   => "/hunter2xyz|'wp_user'/",
+			'keyed basic'      => '/dXNlcjpwYXNz/',
+			'url credentials'  => '/:\/\/[^\s\/]*:[^\s\/]*@|s3cretPass|p!ss/',
 		);
 	}
 
@@ -191,5 +200,52 @@ final class RedactorTest extends TestCase {
 
 	public function test_defaults_use_constants(): void {
 		$this->assertSame( 'a [email]', Redactor::redact( 'a x@example.com' ) );
+	}
+
+	public function test_print_r_values_consume_to_next_key(): void {
+		$this->assertSame( '[last_name] => [pii] [city] => [pii]', $this->redact( '[last_name] => Van Der Berg [city] => Melbourne' ) );
+		$this->assertSame( '(Array ([password] => [secret]))', $this->redact( '(Array ([password] => correct horse battery staple))' ) );
+		$this->assertSame( '{"password":[secret]}', $this->redact( '{"password":"abc\"def ghi"}' ) );
+	}
+
+	public function test_bare_name_and_state_only_as_keys(): void {
+		$this->assertSame( 'Plugin name loaded; state saved; name=foo', $this->redact( 'Plugin name loaded; state saved; name=foo' ) );
+		$this->assertSame( '{"name":[pii]}', $this->redact( '{"name":"Jane Doe"}' ) );
+	}
+
+	public function test_stack_frame_strings_masked_but_structure_kept(): void {
+		$this->assertSame(
+			"#0 wp-includes/x.php(5): wpdb->__construct('[secret]', '[secret]', 12)",
+			$this->redact( "#0 /www/site_123/public/wp-includes/x.php(5): wpdb->__construct('wp_user', 'hunter2', 12)" )
+		);
+	}
+
+	public function test_url_credentials(): void {
+		$this->assertSame( 'mysql://[secret]@localhost/wp', $this->redact( 'mysql://wp_user:hunter2@localhost/wp' ) );
+		$this->assertSame( 'redis://[secret]@[ip]:6379', $this->redact( 'redis://:s3cret@127.0.0.1:6379' ) );
+		$this->assertSame( 'https://shop.example.com/?a=1', $this->redact( 'https://shop.example.com/?a=1' ) );
+	}
+
+	public function test_oversized_input_is_truncated_and_does_not_leak(): void {
+		$line = 'sk_live_' . str_repeat( 'A', 1048576 );
+		$out  = $this->redact( $line );
+		$this->assertNotSame( '', $out );
+		$this->assertLessThanOrEqual( 4096, strlen( $out ) );
+		$this->assertSame( 0, preg_match( '/sk_live_|AAAA/', $out ) );
+		$this->assertNotSame( '', $this->redact( str_repeat( 'a', 1048576 ) ) );
+	}
+
+	public function test_pcre_failure_fails_closed(): void {
+		$old_limit = ini_get( 'pcre.backtrack_limit' );
+		$old_jit   = ini_get( 'pcre.jit' );
+		ini_set( 'pcre.jit', '0' );
+		ini_set( 'pcre.backtrack_limit', '1' );
+		try {
+			$out = $this->redact( 'Password=hunter2 and sk_live_51Habc and jane@example.com ' . str_repeat( 'x', 500 ) );
+		} finally {
+			ini_set( 'pcre.backtrack_limit', (string) $old_limit );
+			ini_set( 'pcre.jit', (string) $old_jit );
+		}
+		$this->assertSame( '[redaction failed]', $out );
 	}
 }
