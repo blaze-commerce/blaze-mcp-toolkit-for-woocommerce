@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
 final class Redactor {
 
 	/** Name fragments that mark a key/value pair as a credential. */
-	private const SECRET_NAMES = '[\w-]*(?:secret|passw(?:or)?d|pwd|token|api[_-]?key|apikey|auth_key|auth_salt|logged_in_key|logged_in_salt|nonce_key|nonce_salt|private_key|access_key|consumer_key|signing_key|encryption_key|client_key)[\w-]*';
+	private const SECRET_NAMES = '[\w-]*(?:secret|passw(?:or)?d|pwd|token|api[_-]?key|apikey|auth_key|auth_salt|logged_in_key|logged_in_salt|nonce_key|nonce_salt|private_key|access_key|consumer_key|signing_key|encryption_key|client_key|user_pass)[\w-]*';
 
 	/** PII keys safe to match as key=value, key: value or [key] => value. */
 	private const PII_LOOSE = '(?:billing_|shipping_|customer_)?(?:first_name|last_name|full_name|given_name|family_name|surname|address_1|address_2|address_line_\d|address|street|line1|line2|postcode|postal_code|zip|city|company|phone|ip_address|user_agent|user_login|display_name|nickname|user_nicename|admin_area_\d)';
@@ -100,9 +100,9 @@ final class Redactor {
 	 */
 	private static function replace_values( string $key, string $token, string $text ): string {
 		$skip   = '(?![{\[])(?!\[(?:secret|card|nonce|pii)\])';
-		$quoted = '(?:\\\\"(?:(?!\\\\").)*\\\\"|"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\')';
-		$text   = self::sub( '/(' . $key . '\s*=>\s*+)' . $skip . '(?:' . $quoted . '|.+?(?=\s+\[|\s*\)|\s*$))/im', '${1}' . $token, $text );
-		return self::sub( '/(' . $key . '\s*[:=](?!>)\s*+)' . $skip . '(?:' . $quoted . '|[^\s"\'&,;})\]]+)/i', '${1}' . $token, $text );
+		$quoted = '(?:\\\\"(?:(?!\\\\").)*(?:\\\\"|$)|"(?:[^"\\\\]|\\\\.)*(?:"|$)|\'(?:[^\'\\\\]|\\\\.)*(?:\'|$))';
+		$text   = self::sub( '/(' . $key . '\s*=>\s*+(?:[a-z]+\(\d+\)\s++)?+)' . $skip . '(?:' . $quoted . '|.+?(?=\s+\[|\s*\)|\s*$))/im', '${1}' . $token, $text );
+		return self::sub( '/(' . $key . '\s*[:=](?!>)\s*+)' . $skip . '(?:' . $quoted . '|[^\s"\'&,;})\]]+)/im', '${1}' . $token, $text );
 	}
 
 	/**
@@ -123,7 +123,7 @@ final class Redactor {
 			$out
 		);
 		$out = self::sub( "/for user '[^']*'@'[^']*'/i", 'for user [secret]', $out );
-		$out = self::sub( '#\b([a-z][a-z0-9+.-]*://)[^\s/"\']*@#i', '${1}[secret]@', $out );
+		$out = self::sub( '#\b([a-z][a-z0-9+.-]*://)[^\s"\'?]*@#i', '${1}[secret]@', $out );
 
 		// 2. Vendor tokens with a known shape.
 		$out = self::sub(
@@ -134,7 +134,7 @@ final class Redactor {
 				'/\bwhsec_\w*/i',
 				'/\bpi_\w+_secret_\w+/',
 				'/\b(?:seti|cs)_\w+_secret_\w+/',
-				'/\bc[ks]_[a-f0-9]{40}\b/',
+				'/\bc[ks]_[a-f0-9]{8,}/',
 				'/\bwc_order_\w{6,}/',
 				'/\bAKIA[0-9A-Z]{12,}\b/',
 				'/\bAIza[\w-]{30,}/',
@@ -161,7 +161,7 @@ final class Redactor {
 
 		// 4. Nonces, credential-named pairs, stack-frame arguments.
 		$out = self::sub( '/\b((?:_wpnonce|_ajax_nonce|security|[\w-]*nonce))(\s*=\s*)[\w-]+/i', '${1}${2}[nonce]', $out );
-		$out = self::replace_values( '(?<![\w-])' . self::SECRET_NAMES . '\\\\?["\'\]]*', '[secret]', $out );
+		$out = self::replace_values( '(?:["\'\[]+\s*pass[12]?\\\\?\s*["\'\]]+|(?<![\w-])' . self::SECRET_NAMES . '\\\\?["\'\]]*)', '[secret]', $out );
 		$out = self::sub( '/(?<=[?&])(key|order_key)(=)[^\s&"\']+/i', '${1}${2}[secret]', $out );
 		// Every string argument in a "#N file(line): call(args)" frame (DB credentials, passwords).
 		$out = self::subcb(
@@ -181,7 +181,7 @@ final class Redactor {
 		);
 
 		// 5. Personal data keys in payload dumps (WooCommerce, Stripe, PayPal, WP users).
-		$out = self::replace_values( '(?:["\'\[]\s*' . self::PII_STRUCTURED . '\\\\?\s*["\'\]]|["\'\[]?\b' . self::PII_LOOSE . '\b\\\\?["\'\]]*)', '[pii]', $out );
+		$out = self::replace_values( '(?:["\'\[]+\s*' . self::PII_STRUCTURED . '\\\\?\s*["\'\]]+|["\'\[]?\b' . self::PII_LOOSE . '\b\\\\?["\'\]]*)', '[pii]', $out );
 
 		// 6. Card security codes, then card numbers.
 		$out = self::sub( '/\b(cvv2?|cvc2?|csc|security_code)(["\']?\s*[:=]\s*["\']?)\d{3,4}\b/i', '${1}${2}[card]', $out );

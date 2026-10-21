@@ -73,6 +73,9 @@ final class RedactorTest extends TestCase {
 			'escaped quote'    => '/ ghi"|def ghi|abc def/',
 			'frame db creds'   => "/hunter2xyz|'wp_user'/",
 			'keyed basic'      => '/dXNlcjpwYXNz/',
+			'user_pass hash'   => '/\$P\$B/',
+			'var_dump value'   => '/string\(\d+\) "/',
+			'dsn slash'        => '/pa\/ss/',
 			'url credentials'  => '/:\/\/[^\s\/]*:[^\s\/]*@|s3cretPass|p!ss/',
 		);
 	}
@@ -247,5 +250,46 @@ final class RedactorTest extends TestCase {
 			ini_set( 'pcre.jit', (string) $old_jit );
 		}
 		$this->assertSame( '[redaction failed]', $out );
+	}
+
+	/**
+	 * @return array<string,array{0:string,1:string}>
+	 */
+	public static function boundary_cuts(): array {
+		return array(
+			'password'  => array( '"password":"hunter2xyz and more words"', 'hun' ),
+			'last_name' => array( '"last_name":"Van Der Berg"', 'Van' ),
+			'cs key'    => array( 'cs_0123456789abcdef0123456789abcdef01234567', 'cs_0123456789a' ),
+			'single'    => array( "'password' => 'hunter2xyz'", 'hun' ),
+		);
+	}
+
+	/**
+	 * Truncation at 4096 can cut inside a value; the leading part must still be masked.
+	 *
+	 * @dataProvider boundary_cuts
+	 */
+	public function test_value_cut_at_truncation_boundary_is_masked( string $payload, string $leak ): void {
+		$cut  = (int) strpos( $payload, $leak ) + strlen( $leak );
+		$line = str_repeat( ' ', 4096 - $cut ) . $payload . str_repeat( ' tail', 10 );
+		$line = substr( $line, 0, 4096 + 0 );
+		$this->assertSame( 4096, strlen( $line ) );
+		$out = $this->redact( $line . 'ZZZ' );
+		$this->assertStringNotContainsString( $leak, $out );
+	}
+
+	public function test_unterminated_value_masked(): void {
+		$this->assertSame( '{"password":[secret]', $this->redact( '{"password":"hunter2 more words' ) );
+	}
+
+	public function test_user_pass_pass_and_var_dump(): void {
+		$this->assertSame( '[user_pass] => [secret]', $this->redact( '[user_pass] => $P$Babcdefghijk' ) );
+		$this->assertSame( '["last_name"]=> string(12) [pii]', $this->redact( '["last_name"]=> string(12) "Van Der Berg"' ) );
+		$this->assertSame( 'Test pass: ok bypass=1', $this->redact( 'Test pass: ok bypass=1' ) );
+	}
+
+	public function test_dsn_password_with_slash(): void {
+		$this->assertSame( 'mysql://[secret]@h/db', $this->redact( 'mysql://u:pa/ss@h/db' ) );
+		$this->assertSame( 'https://shop.example.com/x?e=[email]', $this->redact( 'https://shop.example.com/x?e=a@b.com' ) );
 	}
 }

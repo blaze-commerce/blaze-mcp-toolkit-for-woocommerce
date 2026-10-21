@@ -52,4 +52,7 @@ Stack trace:
 #0 /www/site_123/public/wp-includes/class-wpdb.php(1989): mysqli_real_connect(Object(mysqli), 'localhost', 'wp_user', 'hunter2xyz', NULL, 3306) #1 /www/site_123/public/wp-includes/class-wpdb.php(790): wpdb->__construct('wp_user', 'hunter2xyz', 'wpdb', 'localhost') #2 [internal function]: PDO->__construct('mysql:host=db', 'wp_user', 'hunter2xyz')
 2026-10-21T11:00:05+00:00 DEBUG {"Authorization":"Basic dXNlcjpwYXNz"} [Authorization] => Basic dXNlcjpwYXNz
 2026-10-21T11:00:06+00:00 ERROR Connect failed mysql://wp_user:hunter2xyz@localhost/wp redis://:s3cretPass@127.0.0.1:6379 https://admin:p!ss#w0rd@mail.example.com/x
+2026-10-21T11:01:00+00:00 DEBUG WP_User dump [user_login] => admin [user_pass] => $P$Babcdefghijk0123456789
+2026-10-21T11:01:01+00:00 DEBUG var_dump ["last_name"]=> string(12) "Van Der Berg" ["pass"]=> string(8) "hunter3x"
+2026-10-21T11:01:02+00:00 ERROR Connect failed mysql://u:pa/ss@h/db
 2026-10-21T10:57:00+00:00 INFO Safe line: WooCommerce 11.0.1 on PHP 8.2.31, order #1234 total 49.95, 3 items
