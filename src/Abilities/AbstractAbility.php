@@ -39,6 +39,14 @@ abstract class AbstractAbility {
 	public const ANON_PREFIX = 'blzmcp_anon_';
 
 	/**
+	 * True while a workflow probes whether a step's tool is permitted. Denials during a probe
+	 * are not real calls, so they are not audited.
+	 *
+	 * @var bool
+	 */
+	private static bool $probing = false;
+
+	/**
 	 * Human-readable label.
 	 */
 	abstract protected static function label(): string;
@@ -113,7 +121,7 @@ abstract class AbstractAbility {
 			$allowed = false; // A broken check denies.
 		}
 
-		if ( ! $allowed ) {
+		if ( ! $allowed && ! self::$probing ) {
 			$user_id = get_current_user_id();
 			if ( 0 === $user_id ) {
 				// Anonymous denials: at most one row per ability per minute, so floods cannot bloat the log.
@@ -127,6 +135,27 @@ abstract class AbstractAbility {
 		}
 
 		return $allowed;
+	}
+
+	/**
+	 * Whether the current user passes an ability's permission check, without auditing a denial
+	 * from our own abilities. Runs the ability's full check (including core's permission filter)
+	 * but never executes it.
+	 *
+	 * @param \WP_Ability          $ability Ability to probe (ours or another plugin's).
+	 * @param array<string, mixed> $input   Input the step would run with.
+	 */
+	public static function probe_permission( \WP_Ability $ability, array $input = array() ): bool {
+		self::$probing = true;
+		try {
+			$result = $ability->check_permissions( $input );
+		} catch ( \Throwable $e ) {
+			$result = false;
+		} finally {
+			self::$probing = false;
+		}
+
+		return true === $result;
 	}
 
 	/**

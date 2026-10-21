@@ -9,6 +9,9 @@ declare( strict_types=1 );
 
 namespace Blaze\McpToolkit\Abilities;
 
+use Blaze\McpToolkit\Workflows\RevenueDropTriage;
+use Blaze\McpToolkit\Workflows\WeeklyStoreReview;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -27,6 +30,8 @@ final class Registrar {
 		HealthSummary::class,
 		UpdateHistory::class,
 		AccessCheck::class,
+		WeeklyStoreReview::class,
+		RevenueDropTriage::class,
 	);
 
 	/**
