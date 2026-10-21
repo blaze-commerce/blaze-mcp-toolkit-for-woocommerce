@@ -64,6 +64,7 @@ final class EventRecorderTest extends TestCase {
 		$before  = array(
 			'plugin:a/a.php' => '1.0',
 			'plugin:b/b.php' => '2.0',
+			'theme:tt'       => '2.9',
 		);
 		$after   = array(
 			'plugin:a/a.php' => '1.1',
@@ -74,7 +75,7 @@ final class EventRecorderTest extends TestCase {
 			array(
 				array( 'plugin_updated', 'a', '1.0', '1.1' ),
 				array( 'plugin_updated', 'b', '2.0', '2.5' ),
-				array( 'theme_updated', 'tt', null, '3.0' ),
+				array( 'theme_updated', 'tt', '2.9', '3.0' ),
 			),
 			EventRecorder::build_events( $targets, $before, $after, false )
 		);
@@ -119,6 +120,20 @@ final class EventRecorderTest extends TestCase {
 		$this->assertSame(
 			array( array( 'plugin_updated', 'a', '1.0', '1.1' ) ),
 			EventRecorder::build_events( array( array( 'plugin', 'a/a.php' ) ), array( 'plugin:a/a.php' => '1.0' ), array( 'plugin:a/a.php' => '1.1' ), true )
+		);
+	}
+
+	public function test_update_without_captured_before_is_skipped(): void {
+		$this->assertSame(
+			array(),
+			EventRecorder::build_events( array( array( 'plugin', 'hello.php' ) ), array(), array( 'plugin:hello.php' => '1.7.2' ), false )
+		);
+	}
+
+	public function test_target_without_resulting_version_is_skipped(): void {
+		$this->assertSame(
+			array(),
+			EventRecorder::build_events( array( array( 'plugin', 'nonexistent/x.php' ) ), array( 'plugin:nonexistent/x.php' => '' ), array( 'plugin:nonexistent/x.php' => '' ), false )
 		);
 	}
 }

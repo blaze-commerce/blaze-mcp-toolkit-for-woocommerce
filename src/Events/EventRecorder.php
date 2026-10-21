@@ -156,11 +156,18 @@ final class EventRecorder {
 			$subject = 'plugin' === $kind ? self::plugin_slug( $item ) : $item;
 			$to      = $after[ $key ] ?? '';
 			$from = $before[ $key ] ?? '';
+			if ( '' === $to ) {
+				continue; // Not installed afterwards: nothing changed.
+			}
 			if ( $install && '' === $from ) {
 				$events[] = array( $kind . '_installed', $subject, null, '' === $to ? null : $to );
 				continue;
 			}
-			// Bulk updates list every requested item; skip ones whose version did not change.
+			// A real update always passed through pre_install; bulk lists also hold skipped items.
+			if ( ! isset( $before[ $key ] ) ) {
+				continue;
+			}
+			// Skip items whose version did not change.
 			if ( '' !== $from && '' !== $to && $from === $to ) {
 				continue;
 			}
