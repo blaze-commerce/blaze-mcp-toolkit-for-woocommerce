@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<ruleset name="Blaze MCP Toolkit for WooCommerce">
+	<description>Coding standards for Blaze MCP Toolkit for WooCommerce.</description>
+
+	<file>./src</file>
+	<file>./blaze-mcp-toolkit-for-woocommerce.php</file>
+	<file>./uninstall.php</file>
+
+	<arg name="extensions" value="php"/>
+	<arg name="colors"/>
+	<arg value="sp"/>
+	<config name="ignore_warnings_on_exit" value="1"/>
+
+	<rule ref="WordPress-Extra">
+		<exclude name="WordPress.Files.FileName.InvalidClassFileName"/>
+		<exclude name="WordPress.Files.FileName.NotHyphenatedLowercase"/>
+		<exclude name="Universal.Arrays.DisallowShortArraySyntax"/>
+		<exclude name="Universal.Operators.DisallowShortTernary"/>
+		<exclude name="Universal.Operators.DisallowStandalonePostIncrementDecrement"/>
+		<exclude name="Generic.Formatting.MultipleStatementAlignment"/>
+		<exclude name="WordPress.Arrays.MultipleStatementAlignment"/>
+		<exclude name="WordPress.Arrays.ArrayDeclarationSpacing"/>
+		<exclude name="PEAR.Functions.FunctionCallSignature"/>
+		<exclude name="Squiz.Strings.DoubleQuoteUsage.NotRequired"/>
+	</rule>
+
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="blzmcp"/>
+				<element value="Blaze\McpToolkit"/>
+			</property>
+		</properties>
+	</rule>
+
+	<rule ref="WordPress.WP.Capabilities">
+		<properties>
+			<property name="custom_capabilities" type="array">
+				<element value="manage_woocommerce"/>
+				<element value="blzmcp_view_diagnostics"/>
+			</property>
+		</properties>
+	</rule>
+
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="blaze-mcp-toolkit-for-woocommerce"/>
+			</property>
+		</properties>
+	</rule>
+
+	<rule ref="PHPCompatibilityWP"/>
+
+	<config name="testVersion" value="8.0-"/>
+	<config name="minimum_supported_wp_version" value="6.9"/>
+</ruleset>

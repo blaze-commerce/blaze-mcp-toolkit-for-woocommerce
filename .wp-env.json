@@ -1,0 +1,19 @@
+{
+	"core": null,
+	"phpVersion": "8.3",
+	"plugins": [
+		"https://downloads.wordpress.org/plugin/woocommerce.zip",
+		"https://downloads.wordpress.org/plugin/mcp-adapter.zip",
+		"https://downloads.wordpress.org/plugin/enable-abilities-for-mcp.zip",
+		"https://downloads.wordpress.org/plugin/plugin-check.zip",
+		"."
+	],
+	"mappings": {
+		"wp-content/plugins/blaze-mcp-toolkit-for-woocommerce": "."
+	},
+	"config": {
+		"WP_DEBUG": true,
+		"WP_DEBUG_LOG": true,
+		"WP_DEBUG_DISPLAY": false
+	}
+}

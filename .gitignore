@@ -4,3 +4,5 @@
 /.superpowers/
 .DS_Store
 .phpunit.result.cache
+.wp-env.override.json
+*.log

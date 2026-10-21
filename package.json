@@ -1,0 +1,9 @@
+{
+	"name": "blaze-mcp-toolkit-for-woocommerce",
+	"version": "1.0.0",
+	"private": true,
+	"description": "Dev tooling for Blaze MCP Toolkit for WooCommerce",
+	"devDependencies": {
+		"@wordpress/env": "^10.39.0"
+	}
+}

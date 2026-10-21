@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, 'feat/**', 'release/**' ]
+  pull_request:
+
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: [ '8.0', '8.3', '8.4' ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer:v2
+          coverage: none
+      - run: composer install --prefer-dist --no-interaction
+      - run: composer phpcs
+      - run: composer test
+      - if: matrix.php == '8.0'
+        run: git ls-files '*.php' | grep -v '^tests/' | xargs -n1 -P4 php -l
+
+  build:
+    runs-on: ubuntu-latest
+    needs: php
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+      - run: ./scripts/build-zip.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-zip
+          path: dist/*.zip
+
+  integration:
+    name: integration (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    needs: php
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [ min, current ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+      - run: composer install --prefer-dist --no-interaction
+      - run: npm install
+      - run: if [ "${{ matrix.env }}" = "min" ]; then cp .wp-env.min.json .wp-env.override.json; fi
+      - run: npx wp-env start
+      - run: npx wp-env run cli wp plugin activate woocommerce mcp-adapter enable-abilities-for-mcp plugin-check blaze-mcp-toolkit-for-woocommerce
+      - name: Integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in tests/Integration/test-*.php; do
+            npx wp-env run cli wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f"
+          done
+      - name: Plugin Check
+        shell: bash
+        run: |
+          set -o pipefail
+          npx wp-env run cli wp plugin check blaze-mcp-toolkit-for-woocommerce --format=table | tee plugin-check.txt
+          TAB="$(printf '\t')"
+          if grep -qE "(^|${TAB})ERROR(${TAB}|\$)" plugin-check.txt; then
+            echo "Plugin Check reported errors"
+            exit 1
+          fi
