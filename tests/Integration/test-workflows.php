@@ -115,6 +115,10 @@ if ( Commerce::is_standing_aside() ) {
 	}
 	update_option( 'woocommerce_analytics_enabled', $saved_enabled );
 
+	// No store-tool class of ours loads while standing aside (WooCommerce for Claude owns the trait).
+	blzmcp_it_assert( ! class_exists( 'Blaze\McpToolkit\Abilities\Store\StoreProfile', false ), 'standaside: running every workflow loads no Store\StoreProfile class' );
+	blzmcp_it_assert( ! class_exists( 'Blaze\McpToolkit\Abilities\Store\AbstractStoreAbility', false ), 'standaside: no Store\AbstractStoreAbility class loaded' );
+
 	require_once ABSPATH . 'wp-admin/includes/user.php';
 	wp_delete_user( $sm_user );
 	Settings::update( $settings );

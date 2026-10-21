@@ -11,7 +11,6 @@ namespace Blaze\McpToolkit\Workflows;
 
 use Blaze\McpToolkit\Abilities\AbstractAbility;
 use Blaze\McpToolkit\Bundled\AnalyticsGuard;
-use Blaze\McpToolkit\Abilities\Store\StoreProfile;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -51,6 +50,13 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * Step status: the tool exists but the current user's role may not use it.
 	 */
 	protected const STEP_DENIED = 'denied';
+
+	/**
+	 * Store profile tool name. A string, not StoreProfile::NAME: referencing that class would load
+	 * it (and the store trait it uses) even while standing aside, when WooCommerce for Claude's own
+	 * copy of that trait may be the one in memory.
+	 */
+	protected const STORE_PROFILE_TOOL = 'blaze-mcp-toolkit/store-profile';
 
 	/**
 	 * Health summary look-back cap (its input maximum).
@@ -170,7 +176,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 			}
 			$status = static::step_status( $step['tool'], $step['arguments'] );
 			if ( self::STEP_OK === $status ) {
-				$has_profile = $has_profile || StoreProfile::NAME === $step['tool'];
+				$has_profile = $has_profile || self::STORE_PROFILE_TOOL === $step['tool'];
 				// An object, so empty arguments encode as {} rather than [].
 				$step['arguments'] = (object) $step['arguments'];
 				$steps[]           = $step;
@@ -267,7 +273,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * @return array{tool: string, arguments: array<string, mixed>, why: string}
 	 */
 	protected static function store_profile_step( string $why ): array {
-		return static::step( StoreProfile::NAME, array(), $why );
+		return static::step( self::STORE_PROFILE_TOOL, array(), $why );
 	}
 
 	/**
