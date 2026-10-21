@@ -1,0 +1,48 @@
+[21-Oct-2026 10:42:00 UTC] PHP Fatal error:  Uncaught Error: Call to undefined function foo_init() in /www/site_123/public/wp-content/plugins/foo/bar.php:45
+Stack trace:
+#0 /www/site_123/public/wp-includes/class-wp-hook.php(324): foo_load()
+#1 /www/site_123/public/wp-settings.php(578): do_action('plugins_loaded')
+#2 {main}
+  thrown in /www/site_123/public/wp-content/plugins/foo/bar.php on line 45
+[21-Oct-2026 10:43:11 UTC] PHP Warning:  Undefined array key "x" in /www/site_123/public/wp-content/themes/blocksy/functions.php on line 123
+[21-Oct-2026 10:44:00 UTC] PHP Warning:  file_get_contents(/home/user/secret.txt): Failed to open stream: No such file or directory
+2026-10-21T10:45:02+00:00 ERROR Stripe API error: Invalid API Key provided: sk_live_51Hxxxxxxxxxxxxxxxxxxxxxxxx {"source":"woocommerce-gateway-stripe"}
+2026-10-21T10:45:03+00:00 DEBUG Stripe settings loaded publishable_key=pk_live_51Hxxxxxxxxxxxxxxxxxxxxxxxx secret_key=sk_live_51Hxxxxxxxxxxxxxxxxxxxxxxxx
+2026-10-21T10:45:04+00:00 ERROR Webhook signature verification failed for whsec_abc123def456ghi789xyz
+2026-10-21T10:45:05+00:00 INFO Keys in use: rk_live_51Hxxxxxxxxxxxxxxxx sk_test_4eC39HqLyjWDarjtT1zdp7dc pk_test_TYooMQauvdEDq54NiTphI7jx rk_test_51Hxxxxxxxxxxxx pk_live_
+2026-10-21T10:45:06+00:00 ERROR Stripe: PaymentIntent pi_3Oabc123XYZ_secret_Q9fHxxxxxxxxxxxxxxxx cannot be confirmed
+2026-10-21T10:46:00+00:00 DEBUG Request headers: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJlc2lnbmF0dXJl
+2026-10-21T10:46:01+00:00 DEBUG Callback payload token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJlc2lnbmF0dXJl rejected
+2026-10-21T10:46:02+00:00 DEBUG Request headers: Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==
+2026-10-21T10:46:03+00:00 DEBUG Retrying with Bearer sk_live_51Hxxxxxxxxxxxxxxxxxxxxxxxx header
+2026-10-21T10:47:00+00:00 DEBUG Cookie: wordpress_logged_in_abc123=admin%7C1729500000%7CtokenHASHvalue; wp_woocommerce_session_abc123=1%7C1729500000%7Chash; wordpress_sec_abc123=xyz
+2026-10-21T10:47:01+00:00 DEBUG Set-Cookie: wp_woocommerce_session_9f8e7d6c=1%7C1729586400%7Cabcdef; path=/; HttpOnly
+2026-10-21T10:47:02+00:00 DEBUG cookies seen: wordpress_logged_in_9f8e7d6c5b4a=jane%7C1729500000%7Cdeadbeef wordpress_test_cookie=WP%20Cookie%20check
+2026-10-21T10:48:00+00:00 ERROR Order payload: {"billing":{"first_name":"Jane","last_name":"Doe","email":"jane@example.com","phone":"0412345678","address_1":"1 Example St","postcode":"3000"}}
+2026-10-21T10:48:01+00:00 INFO Receipt sent to jane.doe+shop@example.co.uk and to bob%40example.org (customer 4521)
+2026-10-21T10:49:00+00:00 ERROR Card declined for 4111111111111111 order #1234
+2026-10-21T10:49:01+00:00 ERROR Card declined for 4111 1111 1111 1111 order #1234
+2026-10-21T10:49:02+00:00 ERROR Card declined for 4111-1111-1111-1111 and amex 3782 822463 10005 cvv=123
+2026-10-21T10:49:03+00:00 DEBUG Gateway request {"card":{"number":"4242424242424242","exp_month":12,"cvc":"314"},"cvv":"987"}
+2026-10-21T10:50:00+00:00 INFO Customer phone +61 412 345 678 or +1 (555) 123-4567 or (03) 9123 4567 or 555-123-4567
+[21-Oct-2026 10:51:00 UTC] WordPress database error Access denied for user 'wp_user'@'10.0.0.5' (using password: YES) for query SELECT 1
+[21-Oct-2026 10:51:01 UTC] PHP Notice: Config dump DB_PASSWORD=hunter2superlong DB_USER=wp_user
+[21-Oct-2026 10:51:02 UTC] PHP Notice: wp-config.php: define('DB_PASSWORD', 'hunter2superlong'); define( "DB_USER", "wp_user" );
+[21-Oct-2026 10:51:03 UTC] PHP Notice: define('AUTH_KEY','put your unique phrase here'); define('SECURE_AUTH_SALT', "x9$%^&*abc");
+[21-Oct-2026 10:51:04 UTC] PHP Notice: DB_PASSWORD: hunter2superlong
+2026-10-21T10:52:00+00:00 ERROR AJAX failed: https://shop.example.com/wp-admin/admin-ajax.php?action=woocommerce_add_to_cart&_wpnonce=abc123def4&security=zz
+2026-10-21T10:52:01+00:00 ERROR REST failed: /wp-json/wc/v3/orders?_wpnonce=abc123def4 _ajax_nonce=0a1b2c3d4e woocommerce-cart-nonce=ff00ee11dd
+2026-10-21T10:53:00+00:00 ERROR PayPal request failed client_secret=EPq9xxxxxxxxxxxxxxxxxxxx&client_id=AYexample
+2026-10-21T10:53:01+00:00 ERROR Remote call https://api.example.com/v1/sync?api_key=abcd1234efgh5678&page=2 returned 401
+2026-10-21T10:53:02+00:00 DEBUG {"client_secret":"EPq9xxxxxxxxxxxxxxxxxxxx","password":"correct horse battery","token":"abc.def"}
+2026-10-21T10:53:03+00:00 DEBUG login attempt password=Sup3rS3cret! token=tok_1234567890abcdef
+2026-10-21T10:53:04+00:00 DEBUG [password] => hunter2 [access_token] => ya29.a0AfH6SMBxxxxxxxx
+#0 /www/site_123/public/wp-includes/user.php(100): wp_authenticate('admin', 'hunter2')
+2026-10-21T10:54:00+00:00 ERROR Request from 203.0.113.42 blocked; forwarded for 198.51.100.7, 10.0.0.1
+2026-10-21T10:54:01+00:00 ERROR Request from 2001:db8:85a3::8a2e:370:7334 and ::1 and fe80::1 and ::ffff:192.0.2.128 failed
+2026-10-21T10:54:02+00:00 ERROR Customer IP {"customer_ip_address":"203.0.113.9","user_agent":"Mozilla/5.0 (Macintosh)"}
+2026-10-21T10:55:00+00:00 ERROR Order lookup failed for key wc_order_AbCdEf123456XyZ
+2026-10-21T10:56:00+00:00 ERROR Cannot open C:\Users\jane\Sites\shop\wp-content\plugins\foo\bar.php for reading
+2026-10-21T10:56:01+00:00 ERROR Keys: AKIAIOSFODNN7EXAMPLE ghp_abcdefghijklmnopqrstuvwxyz0123456789 xoxb-123456789012-abcdefghijkl
+-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEAxxxxxxxxxxxxxxxx-----END RSA PRIVATE KEY-----
+2026-10-21T10:57:00+00:00 INFO Safe line: WooCommerce 11.0.1 on PHP 8.2.31, order #1234 total 49.95, 3 items

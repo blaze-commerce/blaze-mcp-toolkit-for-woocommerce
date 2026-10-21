@@ -9,6 +9,9 @@
 declare( strict_types=1 );
 
 define( 'ABSPATH', __DIR__ . '/' );
+if ( ! defined( 'WP_CONTENT_DIR' ) ) {
+	define( 'WP_CONTENT_DIR', ABSPATH . 'wp-content' );
+}
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
