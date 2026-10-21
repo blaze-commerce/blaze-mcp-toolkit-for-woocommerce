@@ -22,7 +22,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           grep -qE "^Stable tag: ${TAG}$" readme.txt
-          grep -qE "^ \* Version:     ${TAG}$" blaze-mcp-toolkit-for-woocommerce.php
+          grep -qE "^ \* Version:[[:space:]]+${TAG}$" blaze-mcp-toolkit-for-woocommerce.php
       - name: WordPress.org plugin deploy
         uses: 10up/action-wordpress-plugin-deploy@stable
         env:

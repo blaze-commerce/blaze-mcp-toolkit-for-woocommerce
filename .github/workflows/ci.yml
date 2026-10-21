@@ -68,13 +68,27 @@ jobs:
           for f in tests/Integration/test-*.php; do
             npx wp-env run cli wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f"
           done
-      - name: Plugin Check
+      - name: Plugin Check (built zip)
+        if: matrix.env == 'current'
         shell: bash
         run: |
           set -o pipefail
-          npx wp-env run cli wp plugin check blaze-mcp-toolkit-for-woocommerce --format=table | tee plugin-check.txt
-          TAB="$(printf '\t')"
-          if grep -qE "(^|${TAB})ERROR(${TAB}|\$)" plugin-check.txt; then
+          ./scripts/build-zip.sh
+          cat > .wp-env.override.json <<'JSON'
+          {
+            "plugins": [
+              "https://downloads.wordpress.org/plugin/woocommerce.zip",
+              "https://downloads.wordpress.org/plugin/mcp-adapter.zip",
+              "https://downloads.wordpress.org/plugin/enable-abilities-for-mcp.zip",
+              "https://downloads.wordpress.org/plugin/plugin-check.zip",
+              "./dist/blaze-mcp-toolkit-for-woocommerce"
+            ],
+            "mappings": {}
+          }
+          JSON
+          npx wp-env start --update
+          npx wp-env run cli wp plugin check blaze-mcp-toolkit-for-woocommerce --format=json | tee plugin-check.txt
+          if grep -q '"type":"ERROR"' plugin-check.txt; then
             echo "Plugin Check reported errors"
             exit 1
           fi
