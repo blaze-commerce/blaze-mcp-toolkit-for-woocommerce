@@ -11,10 +11,12 @@ namespace Blaze\McpToolkit;
 
 use Blaze\McpToolkit\Abilities\McpExposure;
 use Blaze\McpToolkit\Abilities\Registrar;
+use Blaze\McpToolkit\Admin\SetupScreen;
 use Blaze\McpToolkit\Audit\AuditLog;
 use Blaze\McpToolkit\Bundled\Commerce;
 use Blaze\McpToolkit\Events\EventRecorder;
 use Blaze\McpToolkit\Events\EventStore;
+use Blaze\McpToolkit\Privacy\PolicyText;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -43,5 +45,11 @@ final class Plugin {
 
 		// Bundled commerce-abilities and store tools, or stand aside for WooCommerce for Claude (plugins_loaded 20).
 		Commerce::register();
+
+		// Setup screen and privacy policy text: admin only.
+		if ( is_admin() ) {
+			SetupScreen::register();
+			PolicyText::register();
+		}
 	}
 }
