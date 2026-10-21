@@ -78,6 +78,15 @@ final class RedactorTest extends TestCase {
 			'var_dump value'   => '/string\(\d+\) "/',
 			'dsn slash'        => '/pa\/ss/',
 			'url credentials'  => '/:\/\/[^\s\/]*:[^\s\/]*@|s3cretPass|p!ss/',
+			'square'           => '/EAAA[\w-]{10,}/',
+			'braintree'        => '/access_token\$(?:production|sandbox)\$/',
+			'mollie'           => '/\b(?:live|test)_[A-Za-z0-9]{20,}/',
+			'signature'        => '/signature["\']?\s*[:=]\s*["\']?[^\s"\'\[&,]/i',
+			'card_cvc'         => '/card_cvc\s*=\s*\d/',
+			'cvv spaced'       => '/\b(?:cvv|cvc)\s+\d{3}/i',
+			'pass1 pass2'      => '/\bpass[12]=[^\[]/',
+			'shopify'          => '/shp(?:at|ss)_\w/',
+			'twilio'           => '/\bSK[0-9a-f]{32}/i',
 		);
 	}
 
@@ -179,6 +188,8 @@ final class RedactorTest extends TestCase {
 			'money'               => array( 'Total 1,234,567.89 AUD for 12 items' ),
 			'time only'           => array( 'took 10:42:00 to finish' ),
 			'slash prose'         => array( 'and/or 10/21/2026 read/write failed' ),
+			'live_ and test_ hook' => array( 'do_action live_preview_init then test_mode_enabled_for_checkout and live_site_url' ),
+			'short sk word'       => array( 'SKU SK123 skipped; Task completed' ),
 		);
 	}
 

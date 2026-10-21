@@ -58,3 +58,11 @@ Stack trace:
 2026-10-21T10:57:00+00:00 INFO Safe line: WooCommerce 11.0.1 on PHP 8.2.31, order #1234 total 49.95, 3 items
 [21-Oct-2026 11:02:00 UTC] PHP Fatal error:  Uncaught Error: Class "X" not found in phar:///usr/local/bin/wp/vendor/wp-cli/eval-command/src/EvalFile_Command.php(85) : eval()'d code:21
 2026-10-21T11:02:01+00:00 ERROR include(file:///home/shop/private/config.php): failed to open stream
+2026-10-21T11:03:00+00:00 ERROR Square API 401 with token EAAAEOuLQObrVwJvCvoio9mSb1QTv0EBj6ZA0V7lAlr2PS7Mnb3OVc4NVUj4abcd
+2026-10-21T11:03:01+00:00 DEBUG Braintree auth access_token$production$x8yz2w9vq3$3f1e5c0a9b7d6e4f2a1b0c9d8e7f6a5b
+2026-10-21T11:03:02+00:00 ERROR Mollie key live_dHar4XY7LxsDOtmnkVtjNVWXLSlXsM rejected; fallback test_dHar4XY7LxsDOtmnkVtjNVWXLSlXsM
+2026-10-21T11:03:03+00:00 DEBUG PayPal NVP METHOD=DoDirectPayment&signature=AFcWxV21C7fd0v3bYYYRCpSSRl31A-xyz {"api_signature":"AFcWxV21C7fd0v3bYYYRCpSSRl31A"}
+2026-10-21T11:03:04+00:00 DEBUG Checkout POST card_cvc=123 and note cvv 456
+2026-10-21T11:03:05+00:00 DEBUG Profile update pass1=NewPassw0rd! pass2=NewPassw0rd!
+2026-10-21T11:03:06+00:00 ERROR Shopify sync token shpat_0123456789abcdef0123456789abcdef secret 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
+2026-10-21T11:03:07+00:00 ERROR Twilio SMS auth failed key SK0123456789abcdef0123456789abcdef
