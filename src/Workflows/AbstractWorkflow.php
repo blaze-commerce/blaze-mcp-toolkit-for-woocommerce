@@ -20,8 +20,9 @@ defined( 'ABSPATH' ) || exit;
  * MCP prompt because ChatGPT does not show MCP prompts, and because Enable Abilities' gateway only
  * exposes abilities.
  *
- * Steps whose tool is not registered, or whose permission the current user fails, are dropped and
- * named in the instructions, so the AI never wastes a turn on a call that will be denied.
+ * Steps whose tool is not registered (or not exposed over MCP), or whose permission the current user
+ * fails, are dropped and named in the instructions, each group with its own reason, so the AI never
+ * wastes a turn on a call that will fail and tells the merchant the right reason.
  */
 abstract class AbstractWorkflow extends AbstractAbility {
 
@@ -34,6 +35,21 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * Default period. Overridden per workflow to match upstream.
 	 */
 	protected const DEFAULT_PERIOD = 'last_30_days';
+
+	/**
+	 * Step status: the tool can be run by this user.
+	 */
+	protected const STEP_OK = 'ok';
+
+	/**
+	 * Step status: the tool is not registered on this store, or not exposed over MCP.
+	 */
+	protected const STEP_MISSING = 'missing';
+
+	/**
+	 * Step status: the tool exists but the current user's role may not use it.
+	 */
+	protected const STEP_DENIED = 'denied';
 
 	/**
 	 * Health summary look-back cap (its input maximum).
@@ -139,22 +155,28 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	protected static function run( array $input ): array|\WP_Error {
 		$period = isset( $input['period'] ) && in_array( $input['period'], self::PERIODS, true ) ? $input['period'] : static::DEFAULT_PERIOD;
 
-		$steps   = array();
-		$skipped = array();
+		$steps       = array();
+		$missing     = array();
+		$denied      = array();
+		$has_profile = false;
 		foreach ( static::plan( $period ) as $step ) {
-			if ( static::available( $step['tool'], $step['arguments'] ) ) {
+			$status = static::step_status( $step['tool'], $step['arguments'] );
+			if ( self::STEP_OK === $status ) {
+				$has_profile = $has_profile || StoreProfile::NAME === $step['tool'];
 				// An object, so empty arguments encode as {} rather than [].
 				$step['arguments'] = (object) $step['arguments'];
 				$steps[]           = $step;
+			} elseif ( self::STEP_DENIED === $status ) {
+				$denied[] = $step;
 			} else {
-				$skipped[] = $step;
+				$missing[] = $step;
 			}
 		}
 
 		return array(
 			'workflow'     => static::NAME,
 			'period'       => $period,
-			'instructions' => self::preamble( $skipped ) . "\n\n" . static::guidance( $period ),
+			'instructions' => self::preamble( $missing, $denied, $has_profile ) . "\n\n" . static::guidance( $period ),
 			'steps'        => $steps,
 		);
 	}
@@ -184,15 +206,27 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * @param array<string, mixed> $args Arguments the step would run with.
 	 */
 	protected static function available( string $tool, array $args = array() ): bool {
+		return self::STEP_OK === static::step_status( $tool, $args );
+	}
+
+	/**
+	 * Why a step can or cannot run: STEP_OK, STEP_MISSING (not registered, or not exposed over
+	 * MCP, e.g. while standing aside for WooCommerce for Claude) or STEP_DENIED (the current
+	 * user's role fails its permission check). Never runs the ability; probes are not audited.
+	 *
+	 * @param string               $tool Ability name.
+	 * @param array<string, mixed> $args Arguments the step would run with.
+	 */
+	protected static function step_status( string $tool, array $args = array() ): string {
 		if ( ! function_exists( 'wp_has_ability' ) || ! wp_has_ability( $tool ) ) {
-			return false;
+			return self::STEP_MISSING;
 		}
 		$ability = wp_get_ability( $tool );
 		if ( null === $ability || ! self::is_mcp_public( $ability ) ) {
-			return false;
+			return self::STEP_MISSING;
 		}
 
-		return self::probe_permission( $ability, $args );
+		return self::probe_permission( $ability, $args ) ? self::STEP_OK : self::STEP_DENIED;
 	}
 
 	/**
@@ -210,8 +244,9 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	}
 
 	/**
-	 * Store profile step. Dropped by available() when we stand aside for WooCommerce for Claude:
-	 * its own store tools are not MCP-public, so the gateway would refuse them.
+	 * Store profile step. Dropped as STEP_MISSING when we stand aside for WooCommerce for Claude:
+	 * its own store tools are not MCP-public, so the gateway would refuse them. The preamble then
+	 * tells the AI where the store name may come from, or to leave the Store line out.
 	 *
 	 * @param string $why Why the step is there.
 	 * @return array{tool: string, arguments: array<string, mixed>, why: string}
@@ -273,11 +308,14 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	}
 
 	/**
-	 * Common instructions: how to run the steps, analytics-unavailable handling, skipped steps.
+	 * Common instructions: how to run the steps, analytics-unavailable handling, skipped steps and,
+	 * when there is no store profile step, where the store name comes from.
 	 *
-	 * @param array<int, array{tool: string, arguments: array<string, mixed>, why: string}> $skipped Dropped steps.
+	 * @param array<int, array{tool: string, arguments: array<string, mixed>, why: string}> $missing     Steps dropped because the tool is not on this store.
+	 * @param array<int, array{tool: string, arguments: array<string, mixed>, why: string}> $denied      Steps dropped because the user's role may not use them.
+	 * @param bool                                                                           $has_profile Whether a store profile step remains.
 	 */
-	private static function preamble( array $skipped ): string {
+	private static function preamble( array $missing, array $denied, bool $has_profile ): string {
 		$text = implode(
 			"\n",
 			array(
@@ -295,16 +333,36 @@ abstract class AbstractWorkflow extends AbstractAbility {
 			)
 		);
 
-		if ( array() !== $skipped ) {
-			$lines = array();
-			foreach ( $skipped as $step ) {
-				$lines[] = '- ' . $step['tool'] . ': ' . $step['why'];
-			}
-			$text .= "\n\nSKIPPED STEPS\nThese steps were left out because the tool is not available for your role or not installed on this store:\n"
-				. implode( "\n", $lines )
-				. "\nDo not try to run them. Work with the remaining data, and tell the merchant in one short sentence which checks were skipped and that a store administrator can see them.";
+		if ( array() !== $missing ) {
+			$text .= "\n\nSKIPPED STEPS: NOT ON THIS STORE\nThese steps were left out because the tool is not installed on this store or is not available to AI assistants here:\n"
+				. self::step_lines( $missing )
+				. "\nDo not try to run them. Work with the remaining data. If the missing check matters to the answer, tell the merchant in one short sentence that it is not available on this store; do not suggest asking an administrator for it.";
+		}
+
+		if ( array() !== $denied ) {
+			$text .= "\n\nSKIPPED STEPS: NOT AVAILABLE FOR YOUR ROLE\nThese steps were left out because they are not available for your role (your WordPress user is not allowed to use them):\n"
+				. self::step_lines( $denied )
+				. "\nDo not try to run them. Work with the remaining data, and tell the merchant in one short sentence which checks were skipped and that a store administrator can run them.";
+		}
+
+		if ( ! $has_profile ) {
+			$text .= "\n\nSTORE NAME\nThere is no store profile step in this plan. For the **Store:** line, use the store's name only if you already know it from this conversation or the connection (for example the name or web address the merchant connected). Otherwise leave the **Store:** line out. Never guess a name.";
 		}
 
 		return $text;
+	}
+
+	/**
+	 * Bullet list of dropped steps.
+	 *
+	 * @param array<int, array{tool: string, arguments: array<string, mixed>, why: string}> $steps Dropped steps.
+	 */
+	private static function step_lines( array $steps ): string {
+		$lines = array();
+		foreach ( $steps as $step ) {
+			$lines[] = '- ' . $step['tool'] . ': ' . $step['why'];
+		}
+
+		return implode( "\n", $lines );
 	}
 }

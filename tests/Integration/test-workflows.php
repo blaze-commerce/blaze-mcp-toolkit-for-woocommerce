@@ -4,8 +4,11 @@
  *
  *   npx wp-env run cli wp eval-file wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/test-workflows.php
  *
- * Set BLZMCP_SAMPLE=1 to print one admin sample per workflow. Run in normal (bundled) mode: with the
- * stand-aside stub no wc-analytics/* abilities exist, so the analytics-step assertions do not apply.
+ * Set BLZMCP_SAMPLE=1 to print one admin sample per workflow.
+ *
+ * Stand-aside run (WooCommerce for Claude stub; only the skipped-step and store-name rules are checked,
+ * since with the stub no wc-analytics/* abilities exist):
+ *   npx wp-env run cli wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php eval-file wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/test-workflows.php
  *
  * @package Blaze\McpToolkit
  */
@@ -14,6 +17,7 @@
 
 require_once __DIR__ . '/assert.php';
 
+use Blaze\McpToolkit\Bundled\Commerce;
 use Blaze\McpToolkit\Settings;
 
 global $wpdb;
@@ -49,6 +53,57 @@ $step_for = static function ( $result, string $tool, ?string $subject = null ) {
 	}
 	return null;
 };
+
+$profile = 'blaze-mcp-toolkit/store-profile';
+
+if ( Commerce::is_standing_aside() ) {
+	echo "Mode: stand-aside\n";
+	$settings = Settings::get();
+	Settings::update( array_merge( $settings, array( 'shop_manager_diagnostics' => false ) ) );
+	$sm_user = wp_insert_user(
+		array(
+			'user_login' => 'blzmcp_wf_sa_' . wp_generate_password( 6, false ),
+			'user_pass'  => wp_generate_password(),
+			'role'       => 'shop_manager',
+		)
+	);
+	foreach ( array_keys( $workflows ) as $name ) {
+		$ability = wp_get_ability( $name );
+		blzmcp_it_assert( null !== $ability, "standaside: {$name} still registered" );
+		if ( null === $ability ) {
+			continue;
+		}
+
+		// Administrator: the store profile is missing, not forbidden.
+		wp_set_current_user( $admins[0]->ID );
+		$result = $ability->execute();
+		$text   = is_array( $result ) ? $result['instructions'] : '';
+		blzmcp_it_assert( ! in_array( $profile, $tools_of( $result ), true ), "standaside admin {$name}: no store-profile step" );
+		blzmcp_it_assert( str_contains( $text, 'NOT ON THIS STORE' ) && str_contains( $text, $profile ), "standaside admin {$name}: store profile listed as not on this store" );
+		blzmcp_it_assert( ! str_contains( $text, 'not available for your role' ) && ! str_contains( $text, 'administrator can' ), "standaside admin {$name}: nothing blamed on the admin's role" );
+		blzmcp_it_assert( str_contains( $text, 'STORE NAME' ) && str_contains( $text, 'leave the **Store:** line out' ), "standaside admin {$name}: store-name rule present" );
+		if ( 'blaze-mcp-toolkit/weekly-store-review' === $name ) {
+			blzmcp_it_assert( in_array( $health, $tools_of( $result ), true ) && in_array( $history, $tools_of( $result ), true ), 'standaside admin weekly: diagnostics steps kept' );
+		}
+
+		// Shop manager, diagnostics off: both reasons, each in its own section.
+		wp_set_current_user( $sm_user );
+		$sm   = $ability->execute();
+		$text = is_array( $sm ) ? $sm['instructions'] : '';
+		blzmcp_it_assert( str_contains( $text, 'NOT ON THIS STORE' ), "standaside shop_manager {$name}: missing section present" );
+		if ( in_array( $name, array( 'blaze-mcp-toolkit/weekly-store-review', 'blaze-mcp-toolkit/revenue-drop-triage' ), true ) ) {
+			$denied_part = (string) strstr( $text, 'NOT AVAILABLE FOR YOUR ROLE' );
+			blzmcp_it_assert( str_contains( $denied_part, $health ), "standaside shop_manager {$name}: health listed under not available for your role" );
+			blzmcp_it_assert( ! str_contains( substr( $denied_part, 0, (int) strpos( $denied_part . 'STORE NAME', 'STORE NAME' ) ), $profile ), "standaside shop_manager {$name}: store profile not blamed on the role" );
+		}
+	}
+	wp_set_current_user( $admins[0]->ID );
+	require_once ABSPATH . 'wp-admin/includes/user.php';
+	wp_delete_user( $sm_user );
+	Settings::update( $settings );
+	blzmcp_it_finish();
+	return;
+}
 
 $samples = array();
 $gateway = wp_get_ability( 'mcp-adapter/execute-ability' );
@@ -96,6 +151,8 @@ foreach ( $workflows as $name => $default_period ) {
 	blzmcp_it_assert( ! str_contains( $instructions, 'mcp-adapter' ), "{$name} instructions do not hard-code connector tool names" );
 	blzmcp_it_assert( ! str_contains( $instructions, '{$period}' ) && str_contains( $instructions, $default_period ), "{$name} instructions carry the period" );
 	blzmcp_it_assert( ! str_contains( $instructions, 'not available for your role' ), "{$name} as admin lists nothing as unavailable" );
+	blzmcp_it_assert( ! str_contains( $instructions, 'NOT ON THIS STORE' ), "{$name} as admin lists nothing as missing" );
+	blzmcp_it_assert( in_array( $profile, $tools_of( $result ), true ) && ! str_contains( $instructions, 'STORE NAME' ), "{$name} has the store profile step and no store-name fallback" );
 
 	// Every step validates against its target's input schema and encodes arguments as a JSON object.
 	$encoded = wp_json_encode( $result );
@@ -234,6 +291,7 @@ foreach ( array_keys( $workflows ) as $name ) {
 	if ( in_array( $name, array( 'blaze-mcp-toolkit/weekly-store-review', 'blaze-mcp-toolkit/revenue-drop-triage' ), true ) ) {
 		blzmcp_it_assert( str_contains( $sm['instructions'], 'not available for your role' ), "{$name} as shop_manager says steps are not available for your role" );
 		blzmcp_it_assert( str_contains( $sm['instructions'], $health ), "{$name} as shop_manager names the dropped health tool" );
+		blzmcp_it_assert( ! str_contains( $sm['instructions'], 'NOT ON THIS STORE' ), "{$name} as shop_manager does not call a role denial missing" );
 	}
 }
 $denied_after = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE status = %s', $audit_table, 'denied' ) );
