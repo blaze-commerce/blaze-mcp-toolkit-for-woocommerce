@@ -93,7 +93,8 @@ final class Commerce {
 
 		if ( ! class_exists( \WooCommerce\CommerceAbilities\Loader::class ) ) {
 			// Broken install (vendor/ incomplete): say so instead of failing silently.
-			if ( function_exists( 'wc_get_logger' ) ) {
+			if ( function_exists( 'wc_get_logger' ) && false === get_transient( 'blzmcp_missing_pkg_logged' ) ) {
+				set_transient( 'blzmcp_missing_pkg_logged', 1, DAY_IN_SECONDS );
 				wc_get_logger()->error( 'Bundled commerce-abilities package is missing; analytics and store tools are not registered.', array( 'source' => 'blzmcp' ) );
 			}
 			add_action( 'admin_notices', array( self::class, 'missing_package_notice' ) );

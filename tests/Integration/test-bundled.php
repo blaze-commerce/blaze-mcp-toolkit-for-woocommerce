@@ -169,7 +169,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$clear_upstream_cache();
 	$disabled = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
 	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $disabled ), 'analytics_import_incomplete_is_reported: Analytics off returns blzmcp_analytics_unavailable' );
-	blzmcp_it_assert( is_wp_error( $disabled ) && str_contains( $disabled->get_error_message(), 'turned off' ), 'analytics off: plain message for the owner' );
+	blzmcp_it_assert( is_wp_error( $disabled ) && str_contains( $disabled->get_error_message(), 'turned off' ) && str_contains( $disabled->get_error_message(), 'Features' ), 'analytics off: plain turn-on message for the owner' );
 	blzmcp_it_equals( 'analytics_disabled', is_wp_error( $disabled ) ? ( $disabled->get_error_data()['reason'] ?? null ) : null, 'analytics off: reason analytics_disabled' );
 	$valid_inputs = array(
 		'wc-analytics/breakdown' => array( 'subject' => 'revenue' ),
@@ -202,18 +202,73 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	wp_delete_user( $sub_id );
 	wp_set_current_user( $admins[0]->ID );
 
-	// analytics_import_incomplete_is_reported (2): Analytics on, but an older paid order never made
-	// it into wc_order_stats (historical import not run).
+	// analytics_import_incomplete_is_reported (2): Analytics on. Anchor the synced window three days
+	// back by moving one synced order there and re-importing it.
 	update_option( 'woocommerce_analytics_enabled', 'yes' );
-	$old_order = wc_get_order( $order_ids[0] );
-	$old_order->set_date_created( time() - 2 * DAY_IN_SECONDS );
-	$old_order->save();
-	$wpdb->delete( $wpdb->prefix . 'wc_order_stats', array( 'order_id' => $order_ids[0] ) );
+	$stats_table = $wpdb->prefix . 'wc_order_stats';
+	$anchor      = wc_get_order( $order_ids[1] );
+	$anchor->set_date_created( time() - 3 * DAY_IN_SECONDS );
+	$anchor->save();
+	\Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler::import( $order_ids[1] );
+
+	// Partial history: an order from before the oldest synced order (outside the historical
+	// import's window by design) is not a gap, so complete recent queries are not blocked.
+	$pre_window = wc_create_order();
+	$pre_window->add_product( $product, 1 );
+	$pre_window->calculate_totals();
+	$pre_window->payment_complete();
+	$pre_window->set_date_created( time() - 20 * DAY_IN_SECONDS );
+	$pre_window->save();
+	$order_ids[] = $pre_window->get_id();
+	$wpdb->delete( $stats_table, array( 'order_id' => $pre_window->get_id() ) );
+	$oldest_synced = (string) $wpdb->get_var( $wpdb->prepare( 'SELECT MIN(date_created) FROM %i', $stats_table ) );
+	if ( strtotime( $oldest_synced ) < time() - 20 * DAY_IN_SECONDS ) {
+		echo "SKIP  partial-history check: this env already has wc_order_stats rows older than 20 days ({$oldest_synced})\n";
+	} else {
+		delete_transient( AnalyticsGuard::GAP_TRANSIENT );
+		$clear_upstream_cache();
+		$partial = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
+		blzmcp_it_assert( is_array( $partial ), 'partial history: an unsynced order older than the synced window does not block (' . $error_code( $partial ) . ')' );
+	}
+
+	// Recent gap: an order two days old (inside the synced window, past the 1 h grace) missing from stats.
+	$recent = wc_get_order( $order_ids[0] );
+	$recent->set_date_created( time() - 2 * DAY_IN_SECONDS );
+	$recent->save();
+	$wpdb->delete( $stats_table, array( 'order_id' => $order_ids[0] ) );
 	delete_transient( AnalyticsGuard::GAP_TRANSIENT );
 	$clear_upstream_cache();
 	$incomplete = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
-	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $incomplete ), 'analytics_import_incomplete_is_reported: unimported order returns blzmcp_analytics_unavailable' );
-	blzmcp_it_equals( 'orders_not_imported', is_wp_error( $incomplete ) ? ( $incomplete->get_error_data()['reason'] ?? null ) : null, 'import incomplete: reason orders_not_imported' );
+	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $incomplete ), 'analytics_import_incomplete_is_reported: recent unsynced order returns blzmcp_analytics_unavailable' );
+	blzmcp_it_equals( 'orders_not_imported', is_wp_error( $incomplete ) ? ( $incomplete->get_error_data()['reason'] ?? null ) : null, 'recent gap: reason orders_not_imported' );
+	blzmcp_it_assert( is_wp_error( $incomplete ) && str_contains( $incomplete->get_error_message(), 'Scheduled Actions' ), 'recent gap: message points to Scheduled Actions' );
+	blzmcp_it_equals( 'orders_not_imported', get_transient( AnalyticsGuard::GAP_TRANSIENT ), 'recent gap: result cached' );
+	blzmcp_it_equals( 999, has_action( 'wc-admin_import_batch_orders', array( AnalyticsGuard::class, 'clear_cache' ) ), 'import batch hook clears the cached probe' );
+	blzmcp_it_equals( 999, has_action( 'wc-admin_import_batch_init_orders', array( AnalyticsGuard::class, 'clear_cache' ) ), 'import batch init hook clears the cached probe' );
+	update_option( 'woocommerce_analytics_enabled', 'yes' === get_option( 'woocommerce_analytics_enabled' ) ? 'no' : 'yes' );
+	blzmcp_it_equals( false, get_transient( AnalyticsGuard::GAP_TRANSIENT ), 'toggling Analytics clears the cached probe' );
+	update_option( 'woocommerce_analytics_enabled', 'yes' );
+
+	// wc_order_stats empty with recent orders: the import never ran (rolled back afterwards).
+	$wpdb->query( 'START TRANSACTION' );
+	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i', $stats_table ) );
+	AnalyticsGuard::clear_cache();
+	$never = AnalyticsGuard::unavailable_error();
+	$wpdb->query( 'ROLLBACK' );
+	wp_cache_flush(); // The probe's transient write was rolled back too; drop the in-memory copy.
+	blzmcp_it_equals( 'import_not_run', is_wp_error( $never ) ? ( $never->get_error_data()['reason'] ?? null ) : null, 'empty wc_order_stats with recent orders: reason import_not_run' );
+	blzmcp_it_assert( is_wp_error( $never ) && str_contains( $never->get_error_message(), 'importing' ), 'import not run: message asks to finish the import' );
+	blzmcp_it_assert( null !== $wpdb->get_var( $wpdb->prepare( 'SELECT order_id FROM %i WHERE order_id = %d', $stats_table, $order_ids[1] ) ), 'stats rows restored after rollback' );
+	AnalyticsGuard::clear_cache();
+
+	// A young order (inside the 1 h grace) missing from stats is not a gap.
+	$recent->set_date_created( time() - 10 * MINUTE_IN_SECONDS );
+	$recent->save();
+	$wpdb->delete( $stats_table, array( 'order_id' => $order_ids[0] ) );
+	AnalyticsGuard::clear_cache();
+	blzmcp_it_equals( null, AnalyticsGuard::sync_gap(), 'order inside the 1 h sync grace is not a gap' );
+	blzmcp_it_equals( 'none', get_transient( AnalyticsGuard::GAP_TRANSIENT ), 'no-gap result cached' );
+	AnalyticsGuard::clear_cache();
 
 	// Historical import queued: reported as in progress.
 	as_schedule_single_action( time() + HOUR_IN_SECONDS, 'wc-admin_import_batch_orders', array( 'blzmcp-test' ), 'wc-admin-data' );

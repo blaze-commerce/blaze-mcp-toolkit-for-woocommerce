@@ -44,6 +44,11 @@ final class AnalyticsGuard {
 	private const SYNC_GRACE_SECONDS = HOUR_IN_SECONDS;
 
 	/**
+	 * How far back the gap probe looks.
+	 */
+	private const WINDOW_DAYS = 30;
+
+	/**
 	 * Statuses WooCommerce Analytics reports on that must appear in wc_order_stats.
 	 */
 	private const COUNTED_STATUSES = array( 'wc-processing', 'wc-completed', 'wc-on-hold', 'wc-refunded' );
@@ -55,6 +60,12 @@ final class AnalyticsGuard {
 	 */
 	public static function register(): void {
 		add_filter( 'wp_register_ability_args', array( self::class, 'filter_args' ), 20, 2 );
+
+		// Re-probe after historical import batches run and when Analytics is toggled.
+		foreach ( self::IMPORT_BATCH_HOOKS as $hook ) {
+			add_action( $hook, array( self::class, 'clear_cache' ), 999, 0 );
+		}
+		add_action( 'update_option_woocommerce_analytics_enabled', array( self::class, 'clear_cache' ), 10, 0 );
 	}
 
 	/**
@@ -95,7 +106,7 @@ final class AnalyticsGuard {
 
 		return new \WP_Error(
 			self::ERROR_CODE,
-			__( 'WooCommerce Analytics is turned off or hasn\'t finished importing historical orders, so these figures would be incomplete. Turn on Analytics under WooCommerce > Settings > Advanced > Features, or finish the import under Analytics > Settings, then try again.', 'blaze-mcp-toolkit-for-woocommerce' ),
+			self::message( $reason ),
 			array(
 				'status' => 503,
 				'reason' => $reason,
@@ -104,9 +115,26 @@ final class AnalyticsGuard {
 	}
 
 	/**
+	 * Plain message for the store owner, per reason.
+	 *
+	 * @param string $reason Reason code.
+	 */
+	public static function message( string $reason ): string {
+		switch ( $reason ) {
+			case 'analytics_disabled':
+				return __( 'WooCommerce Analytics is turned off, so these figures would be incomplete. Turn on Analytics under WooCommerce > Settings > Advanced > Features, then try again.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'import_in_progress':
+			case 'import_not_run':
+				return __( 'WooCommerce Analytics hasn\'t finished importing your orders, so these figures would be incomplete. Wait for the import to finish (or start it under Analytics > Settings > Import historical data), then try again.', 'blaze-mcp-toolkit-for-woocommerce' );
+			default:
+				return __( 'Recent orders haven\'t synced to WooCommerce Analytics, so these figures would be incomplete. WooCommerce\'s background tasks may be stalled: check WooCommerce > Status > Scheduled Actions for pending wc-admin jobs, then try again.', 'blaze-mcp-toolkit-for-woocommerce' );
+		}
+	}
+
+	/**
 	 * Why analytics data is unreliable right now, or null when it is fine.
 	 *
-	 * @return string|null One of analytics_disabled, import_in_progress, orders_not_imported.
+	 * @return string|null One of analytics_disabled, import_in_progress, import_not_run, orders_not_imported.
 	 */
 	public static function unavailable_reason(): ?string {
 		if ( 'yes' !== get_option( 'woocommerce_analytics_enabled', 'yes' ) ) {
@@ -123,33 +151,83 @@ final class AnalyticsGuard {
 			}
 		}
 
-		return self::has_unimported_orders() ? 'orders_not_imported' : null;
+		return self::sync_gap();
 	}
 
 	/**
-	 * Whether any reportable order older than the sync grace period is missing from wc_order_stats.
-	 * One indexed anti-join with LIMIT 1, cached for 15 minutes.
+	 * Clear the cached gap probe (import batches ran, Analytics toggled).
 	 */
-	public static function has_unimported_orders(): bool {
+	public static function clear_cache(): void {
+		delete_transient( self::GAP_TRANSIENT );
+	}
+
+	/**
+	 * Probe for orders that should be in wc_order_stats but are not.
+	 *
+	 * Only looks at a bounded, recent window: orders created in the last 30 days, at least an hour
+	 * ago (new orders sync asynchronously), and not before the oldest order Analytics has synced.
+	 * Older orders are outside the historical import's window by design and are ignored. Uses the
+	 * type/status/date indexes (wc_orders.type_status_date or posts.type_status_date) with LIMIT 1.
+	 * Cached: "no gap" for 6 hours, a gap for 15 minutes; cleared when import batches run.
+	 *
+	 * @return string|null import_not_run, orders_not_imported, or null.
+	 */
+	public static function sync_gap(): ?string {
 		$cached = get_transient( self::GAP_TRANSIENT );
 		if ( false !== $cached ) {
-			return 'yes' === $cached;
+			return 'none' === $cached ? null : (string) $cached;
 		}
 
 		global $wpdb;
 
-		$stats  = $wpdb->prefix . 'wc_order_stats';
-		$cutoff = gmdate( 'Y-m-d H:i:s', time() - self::SYNC_GRACE_SECONDS );
-		$hpos   = class_exists( \Automattic\WooCommerce\Utilities\OrderUtil::class )
+		$now   = time();
+		$upper = $now - self::SYNC_GRACE_SECONDS;
+		$lower = $now - self::WINDOW_DAYS * DAY_IN_SECONDS;
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- cached in a transient.
+		// Oldest synced order. date_created is indexed (site-local time); date_created_gmt is not.
+		$oldest_local = $wpdb->get_var( $wpdb->prepare( 'SELECT MIN(date_created) FROM %i', $wpdb->prefix . 'wc_order_stats' ) );
+		$query_failed = '' !== $wpdb->last_error;
+		// phpcs:enable
+
+		if ( $query_failed ) {
+			// wc_order_stats unreadable: the figures can't be trusted.
+			$reason = 'orders_not_imported';
+		} elseif ( null === $oldest_local ) {
+			// Nothing synced at all: only a problem if there are recent orders to report on.
+			$reason = self::recent_order_missing( $lower, $upper ) ? 'import_not_run' : null;
+		} else {
+			$oldest = strtotime( get_gmt_from_date( (string) $oldest_local ) . ' UTC' );
+			$lower  = max( $lower, (int) $oldest );
+			$reason = $lower < $upper && self::recent_order_missing( $lower, $upper ) ? 'orders_not_imported' : null;
+		}
+
+		set_transient( self::GAP_TRANSIENT, null === $reason ? 'none' : $reason, null === $reason ? 6 * HOUR_IN_SECONDS : 15 * MINUTE_IN_SECONDS );
+
+		return $reason;
+	}
+
+	/**
+	 * Whether a counted order created between two GMT timestamps is missing from wc_order_stats.
+	 * (With wc_order_stats empty this is simply "any counted order in the window".)
+	 *
+	 * @param int $from_gmt Lower bound, Unix timestamp (inclusive).
+	 * @param int $to_gmt   Upper bound, Unix timestamp (exclusive).
+	 */
+	private static function recent_order_missing( int $from_gmt, int $to_gmt ): bool {
+		global $wpdb;
+
+		$stats = $wpdb->prefix . 'wc_order_stats';
+		$hpos  = class_exists( \Automattic\WooCommerce\Utilities\OrderUtil::class )
 			&& \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
 
 		list( $s1, $s2, $s3, $s4 ) = self::COUNTED_STATUSES;
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- cached in a transient above.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- cached by the caller.
 		if ( $hpos ) {
 			$found = $wpdb->get_var(
 				$wpdb->prepare(
-					'SELECT o.id FROM %i o LEFT JOIN %i s ON s.order_id = o.id WHERE s.order_id IS NULL AND o.type = %s AND o.status IN (%s, %s, %s, %s) AND o.date_created_gmt < %s LIMIT 1',
+					'SELECT o.id FROM %i o LEFT JOIN %i s ON s.order_id = o.id WHERE s.order_id IS NULL AND o.type = %s AND o.status IN (%s, %s, %s, %s) AND o.date_created_gmt >= %s AND o.date_created_gmt < %s LIMIT 1',
 					$wpdb->prefix . 'wc_orders',
 					$stats,
 					'shop_order',
@@ -157,13 +235,15 @@ final class AnalyticsGuard {
 					$s2,
 					$s3,
 					$s4,
-					$cutoff
+					gmdate( 'Y-m-d H:i:s', $from_gmt ),
+					gmdate( 'Y-m-d H:i:s', $to_gmt )
 				)
 			);
 		} else {
+			// post_date (site-local) is the indexed column in posts.type_status_date.
 			$found = $wpdb->get_var(
 				$wpdb->prepare(
-					'SELECT p.ID FROM %i p LEFT JOIN %i s ON s.order_id = p.ID WHERE s.order_id IS NULL AND p.post_type = %s AND p.post_status IN (%s, %s, %s, %s) AND p.post_date_gmt < %s LIMIT 1',
+					'SELECT p.ID FROM %i p LEFT JOIN %i s ON s.order_id = p.ID WHERE s.order_id IS NULL AND p.post_type = %s AND p.post_status IN (%s, %s, %s, %s) AND p.post_date >= %s AND p.post_date < %s LIMIT 1',
 					$wpdb->posts,
 					$stats,
 					'shop_order',
@@ -171,16 +251,13 @@ final class AnalyticsGuard {
 					$s2,
 					$s3,
 					$s4,
-					$cutoff
+					get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $from_gmt ) ),
+					get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $to_gmt ) )
 				)
 			);
 		}
 		// phpcs:enable
 
-		// A failed query (e.g. wc_order_stats missing) also means the figures can't be trusted.
-		$gap = null !== $found || '' !== $wpdb->last_error;
-		set_transient( self::GAP_TRANSIENT, $gap ? 'yes' : 'no', 15 * MINUTE_IN_SECONDS );
-
-		return $gap;
+		return null !== $found;
 	}
 }
