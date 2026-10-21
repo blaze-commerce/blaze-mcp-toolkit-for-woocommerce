@@ -8,6 +8,9 @@
  * those fetches SKIP here and the HTTP half runs from the host: bash tests/Integration/frontend-curl.sh
  * (global-constraints R6). The hook, asset, rewrite and REST-route assertions need no HTTP.
  *
+ * If no page could be fetched, the run FAILS with "HTTP CHECK NOT RUN" unless BLZMCP_SKIP_HTTP=1 is set
+ * (scripts/run-integration.sh sets it and then runs frontend-curl.sh itself).
+ *
  * @package Blaze\McpToolkit
  */
 
@@ -68,6 +71,13 @@ try {
 		blzmcp_it_assert( false === stripos( $body, 'blaze-mcp-toolkit' ), "{$label} response has no 'blaze-mcp-toolkit'" );
 	}
 	echo "fetched {$fetched} of " . count( $urls ) . " pages over HTTP\n";
+	if ( 0 === $fetched ) {
+		if ( '1' === getenv( 'BLZMCP_SKIP_HTTP' ) ) {
+			echo "NOTE  HTTP half skipped (BLZMCP_SKIP_HTTP=1); it must be run by tests/Integration/frontend-curl.sh\n";
+		} else {
+			blzmcp_it_assert( false, '!!! HTTP CHECK NOT RUN !!! run tests/Integration/frontend-curl.sh (or set BLZMCP_SKIP_HTTP=1 if you run it separately)' );
+		}
+	}
 
 	// 2. No enqueued assets from the plugin (handles or URLs).
 	global $wp_scripts, $wp_styles;
@@ -78,23 +88,35 @@ try {
 	}
 
 	// 3. No callback from our namespace on any front-end output/render hook.
-	$ours = static function ( $cb ): bool {
+	$prefixes = array( 'Blaze\\McpToolkit\\', 'WooCommerce\\CommerceAbilities\\' );
+	$is_ours  = static function ( string $class_name ) use ( $prefixes ): bool {
+		foreach ( $prefixes as $prefix ) {
+			if ( str_starts_with( ltrim( $class_name, '\\' ), $prefix ) ) {
+				return true;
+			}
+		}
+		return false;
+	};
+	$ours     = static function ( $cb ) use ( $is_ours ): bool {
 		try {
 			if ( is_string( $cb ) ) {
-				return str_starts_with( ltrim( $cb, '\\' ), 'Blaze\\McpToolkit\\' ) || str_starts_with( $cb, 'blzmcp_' );
+				return $is_ours( $cb ) || str_starts_with( $cb, 'blzmcp_' );
 			}
 			if ( is_array( $cb ) ) {
-				$cls = is_object( $cb[0] ) ? get_class( $cb[0] ) : (string) $cb[0];
-				return str_starts_with( ltrim( $cls, '\\' ), 'Blaze\\McpToolkit\\' );
+				return $is_ours( is_object( $cb[0] ) ? get_class( $cb[0] ) : (string) $cb[0] );
 			}
 			if ( $cb instanceof Closure ) {
 				$ref   = new ReflectionFunction( $cb );
 				$scope = $ref->getClosureScopeClass();
-				$file  = (string) $ref->getFileName();
-				return ( $scope && str_starts_with( $scope->getName(), 'Blaze\\McpToolkit\\' ) ) || str_contains( $file, 'blaze-mcp-toolkit-for-woocommerce/src/' ) || str_contains( $file, 'blaze-mcp-toolkit-for-woocommerce/blaze-mcp-toolkit-for-woocommerce.php' );
+				$file  = str_replace( '\\', '/', (string) $ref->getFileName() );
+				return ( $scope && $is_ours( $scope->getName() ) )
+					|| str_contains( $file, '/blaze-mcp-toolkit-for-woocommerce/src/' )
+					|| str_contains( $file, '/blaze-mcp-toolkit-for-woocommerce/blaze-mcp-toolkit-for-woocommerce.php' )
+					|| str_contains( $file, '/vendor/woocommerce/commerce-abilities/' )
+					|| str_contains( $file, '/vendor-src/commerce-abilities/' );
 			}
 			if ( is_object( $cb ) ) {
-				return str_starts_with( get_class( $cb ), 'Blaze\\McpToolkit\\' );
+				return $is_ours( get_class( $cb ) );
 			}
 		} catch ( Throwable $e ) {
 			return false;
@@ -102,64 +124,64 @@ try {
 		return false;
 	};
 
-	$front_hooks = array(
-		'wp_enqueue_scripts',
-		'wp_print_scripts',
-		'wp_print_styles',
-		'wp_print_footer_scripts',
-		'wp_head',
-		'wp_footer',
-		'wp_body_open',
-		'wp',
-		'template_redirect',
-		'template_include',
-		'send_headers',
-		'parse_request',
-		'pre_get_posts',
-		'the_content',
-		'body_class',
-		'wp_resource_hints',
-		'script_loader_tag',
-		'style_loader_tag',
-		'login_enqueue_scripts',
-		'login_head',
-		'rest_api_init',
-		'woocommerce_before_main_content',
-		'woocommerce_after_main_content',
-		'woocommerce_before_shop_loop',
-		'woocommerce_after_shop_loop',
-		'woocommerce_before_single_product',
-		'woocommerce_after_single_product',
-		'woocommerce_single_product_summary',
-		'woocommerce_before_cart',
-		'woocommerce_after_cart',
-		'woocommerce_before_calculate_totals',
-	);
+	// Positive controls: the matcher must recognise callbacks we know are ours, or the scan proves nothing.
 	global $wp_filter;
-	foreach ( $front_hooks as $hook ) {
-		$found = array();
-		if ( isset( $wp_filter[ $hook ] ) ) {
-			foreach ( $wp_filter[ $hook ]->callbacks as $priority => $callbacks ) {
-				foreach ( $callbacks as $entry ) {
-					if ( $ours( $entry['function'] ) ) {
-						$found[] = "{$priority}";
-					}
+	$has_ours = static function ( string $hook ) use ( $wp_filter, $ours ): bool {
+		foreach ( isset( $wp_filter[ $hook ] ) ? $wp_filter[ $hook ]->callbacks : array() as $callbacks ) {
+			foreach ( $callbacks as $entry ) {
+				if ( $ours( $entry['function'] ) ) {
+					return true;
 				}
 			}
 		}
-		blzmcp_it_assert( empty( $found ), "no Blaze\\McpToolkit callback on {$hook}" . ( $found ? ' (priorities ' . implode( ',', $found ) . ')' : '' ) );
+		return false;
+	};
+	foreach ( array( 'wp_abilities_api_init', 'wp_abilities_api_categories_init', 'blzmcp_daily_cleanup', 'action_scheduler_init', 'before_woocommerce_init' ) as $known ) {
+		blzmcp_it_assert( $has_ours( $known ), "matcher control: {$known} is detected as ours" );
 	}
+	blzmcp_it_assert( $ours( 'Blaze\\McpToolkit\\Plugin::boot' ), 'matcher control: string callable' );
+	blzmcp_it_assert( $ours( array( 'Blaze\\McpToolkit\\Plugin', 'boot' ) ), 'matcher control: array callable' );
+	blzmcp_it_assert( $ours( array( 'WooCommerce\\CommerceAbilities\\Plugin', 'x' ) ), 'matcher control: bundled namespace' );
+	blzmcp_it_assert( ! $ours( 'wp_head' ) && ! $ours( static function () {} ), 'matcher control: core function and foreign closure are not ours' );
+	$scoped = Closure::bind( static function () {}, null, Blaze\McpToolkit\Plugin::class );
+	blzmcp_it_assert( $ours( $scoped ), 'matcher control: closure scoped to our class' );
 
-	// Every hook our code does attach to, for the record.
-	$attached = array();
+	// Scan every hook. Only these admin / API / cron / lifecycle hooks may carry our callbacks.
+	$allowed_hooks = array(
+		'switch_theme',
+		'plugins_loaded',
+		'wp_abilities_api_categories_init',
+		'wp_abilities_api_init',
+		'wp_register_ability_args',
+		'upgrader_process_complete',
+		'upgrader_pre_install',
+		'_core_updated_successfully',
+		'deactivated_plugin',
+		'activated_plugin',
+		'before_woocommerce_init',
+		'action_scheduler_init',
+		'blzmcp_daily_cleanup',
+		'update_option_woocommerce_analytics_enabled',
+		'wc-admin_import_batch_init_orders',
+		'wc-admin_import_batch_orders',
+	);
+	$attached      = array();
 	foreach ( $wp_filter as $hook => $obj ) {
-		foreach ( $obj->callbacks as $callbacks ) {
+		foreach ( $obj->callbacks as $priority => $callbacks ) {
 			foreach ( $callbacks as $entry ) {
 				if ( $ours( $entry['function'] ) ) {
 					$attached[ $hook ] = true;
 				}
 			}
 		}
+	}
+	foreach ( array_keys( $attached ) as $hook ) {
+		$ok = in_array( $hook, $allowed_hooks, true ) || str_starts_with( $hook, 'activate_blaze-mcp-toolkit' ) || str_starts_with( $hook, 'deactivate_blaze-mcp-toolkit' );
+		blzmcp_it_assert( $ok, "our callback on {$hook} is an allowed non-front-end hook" );
+	}
+	// And never on the render path, whatever the allowlist says.
+	foreach ( array( 'wp_enqueue_scripts', 'wp_head', 'wp_footer', 'wp', 'template_redirect', 'template_include', 'wp_body_open', 'the_content', 'send_headers', 'init' ) as $hook ) {
+		blzmcp_it_assert( ! isset( $attached[ $hook ] ), "no callback of ours on {$hook}" );
 	}
 	echo 'Hooks with our callbacks (cli, non-admin): ' . implode( ', ', array_keys( $attached ) ) . "\n";
 

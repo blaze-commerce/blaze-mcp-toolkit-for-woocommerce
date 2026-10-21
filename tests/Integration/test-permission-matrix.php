@@ -38,6 +38,10 @@ $expectations = array(
 	// Anything under wc-analytics/ is manage_woocommerce.
 );
 
+// Abilities allowed to answer an authorised call with a data error under the minimal input: confirm-large-range
+// needs a pending query minted by a previous gated call.
+$data_error_ok = array( 'wc-analytics/confirm-large-range' );
+
 $allowed_for = static function ( string $name, string $role, bool $sm_diag ) use ( $expectations ): bool {
 	$rule = $expectations[ $name ] ?? ( str_starts_with( $name, 'wc-analytics/' ) ? BLZMCP_PM_WOO : null );
 	switch ( $rule ) {
@@ -117,6 +121,11 @@ try {
 	$gateway = wp_get_ability( 'mcp-adapter/execute-ability' );
 	blzmcp_it_assert( null !== $gateway, 'MCP Adapter execute-ability is registered' );
 
+	// Reverse check: every expected ability is registered (this env has no stand-aside).
+	foreach ( array_keys( $expectations ) as $expected_name ) {
+		blzmcp_it_assert( isset( $abilities[ $expected_name ] ), "expected ability {$expected_name} is registered" );
+	}
+
 	foreach ( $abilities as $name => $ability ) {
 		$covered = isset( $expectations[ $name ] ) || str_starts_with( $name, 'wc-analytics/' );
 		blzmcp_it_assert( $covered, "{$name} has a permission expectation" );
@@ -136,7 +145,8 @@ try {
 				$result = $ability->execute( $input );
 				$label  = "[{$tag}] {$role} -> {$name}";
 				if ( $want ) {
-					blzmcp_it_assert( ! $is_permission_error( $result ), "{$label} allowed (direct)" . ( is_wp_error( $result ) ? ' got ' . $result->get_error_code() : '' ) );
+					$direct_ok = ! is_wp_error( $result ) || ( in_array( $name, $data_error_ok, true ) && ! $is_permission_error( $result ) );
+					blzmcp_it_assert( $direct_ok, "{$label} allowed (direct)" . ( is_wp_error( $result ) ? ' got ' . $result->get_error_code() : '' ) );
 				} else {
 					blzmcp_it_assert( $is_permission_error( $result ), "{$label} denied (direct)" . ( is_wp_error( $result ) ? ' code ' . $result->get_error_code() : ' got data' ) );
 				}
@@ -155,7 +165,7 @@ try {
 					$gw_ok     = is_array( $out ) && true === ( $out['success'] ?? false );
 					$gw_note   = is_wp_error( $out ) ? $out->get_error_code() : ( is_array( $out ) ? (string) ( $out['error'] ?? '' ) : 'unexpected' );
 					if ( $want ) {
-						blzmcp_it_assert( $gw_ok || ! str_contains( strtolower( $gw_note ), 'permission' ), "{$label} allowed (gateway) {$gw_note}" );
+						blzmcp_it_assert( $gw_ok || ( in_array( $name, $data_error_ok, true ) && ! str_contains( strtolower( $gw_note ), 'permission' ) ), "{$label} allowed (gateway) {$gw_note}" );
 					} else {
 						blzmcp_it_assert( $gw_denied, "{$label} denied (gateway) {$gw_note}" );
 					}
