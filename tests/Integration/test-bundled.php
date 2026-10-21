@@ -170,6 +170,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$disabled = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
 	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $disabled ), 'analytics_import_incomplete_is_reported: Analytics off returns blzmcp_analytics_unavailable' );
 	blzmcp_it_assert( is_wp_error( $disabled ) && str_contains( $disabled->get_error_message(), 'turned off' ) && str_contains( $disabled->get_error_message(), 'Features' ), 'analytics off: plain turn-on message for the owner' );
+	blzmcp_it_assert( is_wp_error( $disabled ) && str_starts_with( $disabled->get_error_message(), AnalyticsGuard::MESSAGE_TOKEN . ' ' ), 'analytics off: message starts with the stable token' );
 	blzmcp_it_equals( 'analytics_disabled', is_wp_error( $disabled ) ? ( $disabled->get_error_data()['reason'] ?? null ) : null, 'analytics off: reason analytics_disabled' );
 	$valid_inputs = array(
 		'wc-analytics/breakdown' => array( 'subject' => 'revenue' ),

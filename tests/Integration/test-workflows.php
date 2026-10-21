@@ -51,6 +51,8 @@ $step_for = static function ( $result, string $tool, ?string $subject = null ) {
 };
 
 $samples = array();
+$gateway = wp_get_ability( 'mcp-adapter/execute-ability' );
+blzmcp_it_assert( null !== $gateway, 'MCP Adapter execute-ability is registered' );
 
 foreach ( $workflows as $name => $default_period ) {
 	$ability = wp_get_ability( $name );
@@ -86,7 +88,10 @@ foreach ( $workflows as $name => $default_period ) {
 	blzmcp_it_assert( null !== $first && 'wc-analytics/totals' === $first['tool'] && 'orders' === ( (array) $first['arguments'] )['subject'], "{$name} first step is totals orders" );
 
 	$instructions = $result['instructions'];
-	blzmcp_it_assert( str_contains( $instructions, 'blzmcp_analytics_unavailable' ), "{$name} instructions handle analytics unavailable" );
+	blzmcp_it_assert( str_contains( $instructions, '[ANALYTICS_UNAVAILABLE]' ), "{$name} instructions handle analytics unavailable" );
+	blzmcp_it_assert( null !== $first && str_contains( $first['why'], '[ANALYTICS_UNAVAILABLE]' ), "{$name} first step why keys on the analytics token" );
+	blzmcp_it_assert( str_contains( $instructions, 'untrusted_text' ) && str_contains( $instructions, 'read-only' ), "{$name} instructions carry the safety rules" );
+	blzmcp_it_assert( str_contains( $instructions, 'Run the first step alone' ), "{$name} instructions run the first step alone" );
 	blzmcp_it_assert( str_contains( $instructions, 'execute' ), "{$name} instructions say how to run steps" );
 	blzmcp_it_assert( ! str_contains( $instructions, 'mcp-adapter' ), "{$name} instructions do not hard-code connector tool names" );
 	blzmcp_it_assert( ! str_contains( $instructions, '{$period}' ) && str_contains( $instructions, $default_period ), "{$name} instructions carry the period" );
@@ -107,14 +112,15 @@ foreach ( $workflows as $name => $default_period ) {
 		}
 	}
 
-	// As admin every step actually runs (analytics data is complete in wp-env).
+	// As admin every step actually runs through the MCP gateway (analytics data is complete in wp-env).
 	foreach ( $result['steps'] as $i => $step ) {
-		$target = wp_get_ability( $step['tool'] );
-		if ( null === $target ) {
-			continue;
-		}
-		$out = $target->execute( json_decode( (string) wp_json_encode( $step['arguments'] ), true ) );
-		blzmcp_it_assert( ! is_wp_error( $out ), "{$name} step {$i} ({$step['tool']}) executes" . ( is_wp_error( $out ) ? ': ' . $out->get_error_code() . ' ' . $out->get_error_message() : '' ) );
+		$out = null === $gateway ? null : $gateway->execute(
+			array(
+				'ability_name' => $step['tool'],
+				'parameters'   => json_decode( (string) wp_json_encode( $step['arguments'] ), true ),
+			)
+		);
+		blzmcp_it_assert( is_array( $out ) && true === ( $out['success'] ?? null ), "{$name} step {$i} ({$step['tool']}) runs through execute-ability" . ( is_array( $out ) && isset( $out['error'] ) ? ': ' . $out['error'] : '' ) );
 	}
 
 	// Every period produces valid steps.
@@ -148,6 +154,22 @@ if ( is_array( $weekly ) ) {
 	$today = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute( array( 'period' => 'today' ) );
 	blzmcp_it_equals( 24, ( (array) $step_for( $today, $health )['arguments'] )['since_hours'] ?? null, 'today maps to 24 hours of health' );
 	blzmcp_it_equals( 1, ( (array) $step_for( $today, $history )['arguments'] )['days'] ?? null, 'today maps to 1 day of history' );
+}
+
+// Analytics unavailable: the first step's error text reaches the AI through the gateway with the token.
+if ( null !== $gateway && isset( $samples['blaze-mcp-toolkit/weekly-store-review'] ) ) {
+	$saved_enabled = get_option( 'woocommerce_analytics_enabled', 'yes' );
+	update_option( 'woocommerce_analytics_enabled', 'no' );
+	$first = $samples['blaze-mcp-toolkit/weekly-store-review']['steps'][0];
+	$out   = $gateway->execute(
+		array(
+			'ability_name' => $first['tool'],
+			'parameters'   => json_decode( (string) wp_json_encode( $first['arguments'] ), true ),
+		)
+	);
+	update_option( 'woocommerce_analytics_enabled', $saved_enabled );
+	blzmcp_it_assert( is_array( $out ) && false === ( $out['success'] ?? null ), 'tripped guard: gateway reports failure' );
+	blzmcp_it_assert( is_array( $out ) && str_starts_with( (string) ( $out['error'] ?? '' ), '[ANALYTICS_UNAVAILABLE] ' ), 'tripped guard: gateway error text starts with the token' );
 }
 
 // Revenue drop (admin): health and update-history over the drop window.
@@ -216,6 +238,12 @@ foreach ( array_keys( $workflows ) as $name ) {
 }
 $denied_after = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE status = %s', $audit_table, 'denied' ) );
 blzmcp_it_equals( $denied_before, $denied_after, 'probing step availability writes no denied audit rows' );
+
+// The probe flag is cleared: a real denied call after the workflows is still audited, once.
+$real = wp_get_ability( $health )->execute( array( 'since_hours' => 24 ) );
+$denied_real = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE status = %s', $audit_table, 'denied' ) );
+blzmcp_it_assert( is_wp_error( $real ), 'shop_manager real health-summary call is denied' );
+blzmcp_it_equals( $denied_after + 1, $denied_real, 'real denied health-summary call adds exactly one denied audit row' );
 
 // Shop manager, diagnostics on: health steps return.
 Settings::update( array_merge( $settings, array( 'shop_manager_diagnostics' => true ) ) );

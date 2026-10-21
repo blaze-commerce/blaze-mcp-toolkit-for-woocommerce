@@ -59,7 +59,7 @@ final class FailedOrderTriage extends AbstractWorkflow {
 					'period'  => $period,
 					'compare' => true,
 				),
-				'Status breakdown, pipeline diagnostic, comparison dates and the paid-order count. Also confirms Analytics data is complete; stop if it returns blzmcp_analytics_unavailable.'
+				'Status breakdown, pipeline diagnostic, comparison dates and the paid-order count. Also confirms Analytics data is complete: if its error text starts with [ANALYTICS_UNAVAILABLE], explain the rest of that message to the merchant in plain words and stop.'
 			),
 			self::store_profile_step( 'Store name, currency, locale and payment setup context. Read once.' ),
 			self::step( 'wc-analytics/rows', self::status_args( $period, 'on-hold', 'aggregate' ), 'On-hold order count and value for the period.' ),

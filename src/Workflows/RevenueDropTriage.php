@@ -62,7 +62,7 @@ final class RevenueDropTriage extends AbstractWorkflow {
 					'period'  => $period,
 					'compare' => true,
 				),
-				'Paid orders, average order value, status breakdown, pending/on-hold pipeline, failed-order count, value distribution and comparison fields. Also confirms Analytics data is complete; stop if it returns blzmcp_analytics_unavailable.'
+				'Paid orders, average order value, status breakdown, pending/on-hold pipeline, failed-order count, value distribution and comparison fields. Also confirms Analytics data is complete: if its error text starts with [ANALYTICS_UNAVAILABLE], explain the rest of that message to the merchant in plain words and stop.'
 			),
 			self::store_profile_step( 'Store name, currency, locale, payment setup, shipping context and store geography. Read once.' ),
 			self::step(

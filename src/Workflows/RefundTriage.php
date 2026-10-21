@@ -58,7 +58,7 @@ final class RefundTriage extends AbstractWorkflow {
 					'period'  => $period,
 					'compare' => true,
 				),
-				'Order background for the period. Confirms Analytics data is complete; stop if it returns blzmcp_analytics_unavailable.'
+				'Order background for the period. Confirms Analytics data is complete: if its error text starts with [ANALYTICS_UNAVAILABLE], explain the rest of that message to the merchant in plain words and stop.'
 			),
 			self::store_profile_step( 'Store name, currency, locale, shipping context and payment setup context. Read once.' ),
 			self::step(

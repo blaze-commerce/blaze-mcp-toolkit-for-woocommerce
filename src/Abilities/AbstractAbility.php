@@ -145,7 +145,7 @@ abstract class AbstractAbility {
 	 * @param \WP_Ability          $ability Ability to probe (ours or another plugin's).
 	 * @param array<string, mixed> $input   Input the step would run with.
 	 */
-	public static function probe_permission( \WP_Ability $ability, array $input = array() ): bool {
+	protected static function probe_permission( \WP_Ability $ability, array $input = array() ): bool {
 		self::$probing = true;
 		try {
 			$result = $ability->check_permissions( $input );

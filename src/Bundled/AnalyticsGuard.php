@@ -24,6 +24,12 @@ final class AnalyticsGuard {
 	public const ERROR_CODE = 'blzmcp_analytics_unavailable';
 
 	/**
+	 * Stable, untranslated prefix of the error message. MCP Adapter's execute-ability passes only the
+	 * message (not the code) to the AI, so workflows key on this token.
+	 */
+	public const MESSAGE_TOKEN = '[ANALYTICS_UNAVAILABLE]';
+
+	/**
 	 * Transient caching the "orders missing from wc_order_stats" probe.
 	 */
 	public const GAP_TRANSIENT = 'blzmcp_analytics_gap';
@@ -106,7 +112,7 @@ final class AnalyticsGuard {
 
 		return new \WP_Error(
 			self::ERROR_CODE,
-			self::message( $reason ),
+			self::MESSAGE_TOKEN . ' ' . self::message( $reason ),
 			array(
 				'status' => 503,
 				'reason' => $reason,

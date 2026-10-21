@@ -62,7 +62,7 @@ final class WeeklyStoreReview extends AbstractWorkflow {
 					'period'  => $period,
 					'compare' => true,
 				),
-				'Orders, status mix and pipeline versus the previous period. Also confirms Analytics data is complete; stop if it returns blzmcp_analytics_unavailable.'
+				'Orders, status mix and pipeline versus the previous period. Also confirms Analytics data is complete: if its error text starts with [ANALYTICS_UNAVAILABLE], explain the rest of that message to the merchant in plain words and stop.'
 			),
 			self::store_profile_step( 'Store name, currency, locale, payment methods and shipping context. Read once.' ),
 			self::step(
