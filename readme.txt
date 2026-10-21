@@ -84,7 +84,8 @@ This plugin has no sign-in or keys, and registers no REST routes of its own. It 
 
 = Privacy =
 
-* Our tools return totals, counts, order numbers and error summaries. They never return customer names, emails, phone numbers, postal addresses or IP addresses, and they don't accept them as filters.
+* Our diagnostics tools (store health, update history, access check) don't return customer contact details. They remove emails, phone numbers, card numbers and secrets from log lines, but log lines are free text and may still contain a name someone typed.
+* The sales analytics tools (from WooCommerce for Claude) return totals, counts and, when asked, order rows with customers pseudonymised (Customer #N, never names or emails). They accept location filters such as billing city, state and postcode, but never filters on names or emails.
 * Text that comes from the site (log lines, labels people typed in) is shortened and marked as untrusted, so the AI treats it as data and not as instructions.
 * Each call to our tools is logged for 30 days: time, user ID, tool, a hash of the inputs, row count and duration. No customer data is logged. Store changes (updates, activations) are kept for 180 days.
 * The plugin suggests wording for your privacy policy under Settings > Privacy.
