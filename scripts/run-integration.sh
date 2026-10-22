@@ -17,7 +17,7 @@ for f in tests/Integration/test-*.php; do
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
 	if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
 		echo "FAIL  $f (${summary:-no summary})"
-		printf '%s\n' "$out" | grep -E '^FAIL' | head -20
+		printf '%s\n' "$out" | awk '/^FAIL/ && n++ < 20'
 		fail=1
 	else
 		echo "PASS  $f ($summary)"
@@ -30,7 +30,7 @@ for f in tests/Integration/test-bundled.php tests/Integration/test-workflows.php
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
 	if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
 		echo "FAIL  $f [stand-aside] (${summary:-no summary})"
-		printf '%s\n' "$out" | grep -E '^FAIL' | head -20
+		printf '%s\n' "$out" | awk '/^FAIL/ && n++ < 20'
 		fail=1
 	else
 		echo "PASS  $f [stand-aside] ($summary)"
