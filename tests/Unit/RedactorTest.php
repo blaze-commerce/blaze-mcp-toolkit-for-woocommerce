@@ -382,4 +382,16 @@ final class RedactorTest extends TestCase {
 		$this->assertStringNotContainsString( 'SYNTH_', $out );
 		$this->assertSame( $expected, $out );
 	}
+
+	public function test_cookie_class_references_are_not_redacted(): void {
+		$this->assertSame(
+			'PHP Fatal error: Uncaught Error: Call to undefined method Cookie::set() in wp-content/plugins/x/y.php:5',
+			$this->redact( 'PHP Fatal error: Uncaught Error: Call to undefined method Cookie::set() in /www/site_123/public/wp-content/plugins/x/y.php:5' )
+		);
+		$this->assertSame(
+			'Symfony\Component\HttpFoundation\Cookie::create(): Argument #1 ($name) must be of type string',
+			$this->redact( 'Symfony\Component\HttpFoundation\Cookie::create(): Argument #1 ($name) must be of type string' )
+		);
+		$this->assertSame( 'use_cookie: true, cookies: 3', $this->redact( 'use_cookie: true, cookies: 3' ) );
+	}
 }

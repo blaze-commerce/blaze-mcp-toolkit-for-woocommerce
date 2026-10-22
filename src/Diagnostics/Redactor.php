@@ -163,9 +163,9 @@ final class Redactor {
 		// Cookie / Set-Cookie (also $_SERVER's HTTP_COOKIE) with a bare, quoted, escaped-quoted or
 		// bracketed name ("Cookie":, \"Cookie\":, [HTTP_COOKIE] =>, 'Cookie' =>, ['HTTP_COOKIE'] =,
 		// Cookie =). A quoted value goes up to its closing quote, a JSON array up to its closing
-		// bracket, anything else to the end of the line.
+		// bracket, anything else to the end of the line. "Cookie::" (a class reference) is not a key.
 		$out = self::sub(
-			'/(' . self::COOKIE_KEY . '\s*(?:=>|=(?!>)|:)\s*+)(?:\\\\"(?:(?!\\\\").)*(?:\\\\"|$)|"(?:[^"\\\\]|\\\\.)*(?:"|$)|\'(?:[^\'\\\\]|\\\\.)*(?:\'|$)|\[(?!secret\])[^\]\r\n]*(?:\]|$)|(?!\[secret\])[^\r\n]*)/i',
+			'/(' . self::COOKIE_KEY . '\s*(?:=>|=(?!>)|:(?!:))\s*+)(?:\\\\"(?:(?!\\\\").)*(?:\\\\"|$)|"(?:[^"\\\\]|\\\\.)*(?:"|$)|\'(?:[^\'\\\\]|\\\\.)*(?:\'|$)|\[(?!secret\])[^\]\r\n]*(?:\]|$)|(?!\[secret\])[^\r\n]*)/i',
 			'${1}[secret]',
 			$out
 		);
