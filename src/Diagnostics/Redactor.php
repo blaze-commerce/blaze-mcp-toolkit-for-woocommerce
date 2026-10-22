@@ -29,6 +29,9 @@ final class Redactor {
 	/** PII keys too generic for free text: only as a quoted or bracketed key ("name": / [name] =>). */
 	private const PII_STRUCTURED = '(?:billing_|shipping_|customer_)?(?:name|state)';
 
+	/** A Cookie / Set-Cookie key, optionally $_SERVER-style (HTTP_COOKIE), quoted or bracketed. */
+	private const COOKIE_KEY = '(?:\\\\?["\']|\[)?(?<![\w-])(?:HTTP_)?(?:Set[-_]Cookie|Cookie)(?![\w-])(?:\\\\?["\']\]?|\])?';
+
 	/** Longest input redacted; callers pass one line at a time. */
 	private const MAX_BYTES = 4096;
 
@@ -157,11 +160,12 @@ final class Redactor {
 		$out = self::sub( '/\b(Authorization|Proxy-Authorization)(\\\\?["\'\]]*\s*(?:=>|[:=](?!>))\s*)\\\\?["\']?(?:(?:Bearer|Basic|Token|Digest|OAuth)\s+)?(?:\[secret\]|[^\s"\',;\\\\})]+)(?:\\\\?["\'])?/i', '${1}${2}[secret]', $out );
 		$out = self::sub( '/\bBearer\s+[^\s"\',;]{8,}/', '[secret]', $out );
 		$out = self::sub( '/\bBasic\s+(?=[A-Za-z0-9+\/]*[\d+\/=])[A-Za-z0-9+\/]{8,}={0,2}/', '[secret]', $out );
-		// Cookie / Set-Cookie with a bare, quoted, escaped-quoted or bracketed name ("Cookie":,
-		// \"Cookie\":, [Cookie] =>, 'Cookie' =>). A quoted value goes up to its closing quote, a
-		// JSON array up to its closing bracket, anything else to the end of the line.
+		// Cookie / Set-Cookie (also $_SERVER's HTTP_COOKIE) with a bare, quoted, escaped-quoted or
+		// bracketed name ("Cookie":, \"Cookie\":, [HTTP_COOKIE] =>, 'Cookie' =>, ['HTTP_COOKIE'] =,
+		// Cookie =). A quoted value goes up to its closing quote, a JSON array up to its closing
+		// bracket, anything else to the end of the line.
 		$out = self::sub(
-			'/((?:\\\\?["\']|\[)?\b(?:Set-Cookie|Cookie)(?:\\\\?["\']|\])?\s*(?:=>|:)\s*+)(?:\\\\"(?:(?!\\\\").)*(?:\\\\"|$)|"(?:[^"\\\\]|\\\\.)*(?:"|$)|\'(?:[^\'\\\\]|\\\\.)*(?:\'|$)|\[(?!secret\])[^\]\r\n]*(?:\]|$)|(?!\[secret\])[^\r\n]*)/i',
+			'/(' . self::COOKIE_KEY . '\s*(?:=>|=(?!>)|:)\s*+)(?:\\\\"(?:(?!\\\\").)*(?:\\\\"|$)|"(?:[^"\\\\]|\\\\.)*(?:"|$)|\'(?:[^\'\\\\]|\\\\.)*(?:\'|$)|\[(?!secret\])[^\]\r\n]*(?:\]|$)|(?!\[secret\])[^\r\n]*)/i',
 			'${1}[secret]',
 			$out
 		);

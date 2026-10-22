@@ -355,4 +355,31 @@ final class RedactorTest extends TestCase {
 			$this->redact( 'PHP Warning: Undefined index: cookie_consent in /www/site_123/public/wp-content/plugins/foo/bar.php on line 3' )
 		);
 	}
+	/**
+	 * $_SERVER-style cookie keys (review I1).
+	 *
+	 * @return array<string,array{0:string,1:string}>
+	 */
+	public static function server_cookie_keys(): array {
+		return array(
+			'print_r'          => array( '[HTTP_COOKIE] => zz_auth=SYNTH_A; other=SYNTH_B', '[HTTP_COOKIE] => [secret]' ),
+			'json'             => array( '{"HTTP_COOKIE":"zz_auth=SYNTH_A","x":1}', '{"HTTP_COOKIE":[secret],"x":1}' ),
+			'escaped json'     => array( '{\"HTTP_COOKIE\":\"zz_auth=SYNTH_A\"}', '{\"HTTP_COOKIE\":[secret]}' ),
+			'server array'     => array( "\$_SERVER['HTTP_COOKIE'] = zz_auth=SYNTH_A; b=SYNTH_B", "\$_SERVER['HTTP_COOKIE'] = [secret]" ),
+			'var_export'       => array( "'HTTP_COOKIE' => 'zz_auth=SYNTH_A', 'HTTP_HOST' => 'kept'", "'HTTP_COOKIE' => [secret], 'HTTP_HOST' => 'kept'" ),
+			'env plain'        => array( 'HTTP_COOKIE=zz_auth=SYNTH_A; b=SYNTH_B', 'HTTP_COOKIE=[secret]' ),
+			'set cookie key'   => array( '[HTTP_SET_COOKIE] => zz_auth=SYNTH_A', '[HTTP_SET_COOKIE] => [secret]' ),
+			'cookie equals'    => array( 'Cookie = zz_auth=SYNTH_A', 'Cookie = [secret]' ),
+			'lowercase header' => array( 'cookie: zz_auth=SYNTH_A', 'cookie: [secret]' ),
+		);
+	}
+
+	/**
+	 * @dataProvider server_cookie_keys
+	 */
+	public function test_server_cookie_keys_redacted( string $line, string $expected ): void {
+		$out = $this->redact( $line );
+		$this->assertStringNotContainsString( 'SYNTH_', $out );
+		$this->assertSame( $expected, $out );
+	}
 }
