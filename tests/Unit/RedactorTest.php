@@ -473,4 +473,10 @@ final class RedactorTest extends TestCase {
 		// Quoted / bracketed keys keep the fields after a balanced value.
 		$this->assertSame( '{"Cookie":[secret],"ok":1}', $this->redact( '{"Cookie":{"a":"SYNTH_A"},"ok":1}' ) );
 	}
+	public function test_protected_cookie_value_property_keeps_its_name(): void {
+		$this->assertSame(
+			'WpOrg\Requests\Cookie Object ( [name] => [pii] [value:protected] => [secret] [flags] => x )',
+			$this->redact( 'WpOrg\Requests\Cookie Object ( [name] => zz [value:protected] => SYNTH_A [flags] => x )' )
+		);
+	}
 }

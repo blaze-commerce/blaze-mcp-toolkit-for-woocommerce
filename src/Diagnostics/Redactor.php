@@ -279,7 +279,7 @@ final class Redactor {
 		$out = self::sub( '/((?<![\w"\'\[\\\\-])(?:[A-Za-z_]*HTTP_)?(?:Set[-_]Cookie|Cookie)2?\s*(?::(?!:)|=(?!>))\s*)\[secret\][^\r\n]+/i', '${1}[secret]', $out );
 		// The value of a dumped cookie object (WP_Http_Cookie, Requests' Cookie) is the cookie itself.
 		if ( 1 === preg_match( '/' . self::COOKIE_OBJECT . '/i', $out ) ) {
-			$out = self::replace_values( '(?:\[\s*["\']?|\\\\?["\'])value(?::\w+)?(?:\\\\?["\'])?\s*\]?', '[secret]', $out );
+			$out = self::replace_values( '(?:\[\s*["\']?value(?::\w+)?["\']?\s*\]|\\\\?["\']value\\\\?["\'])', '[secret]', $out );
 		}
 		$out = self::sub(
 			'/\b(?:wordpress_[\w-]*|wp_woocommerce_session_[\w-]*|woocommerce_(?:items_in_cart|cart_hash|recently_viewed)|wp-settings(?:-time)?-\d+|PHPSESSID|JSESSIONID|ASP\.NET_SessionId|connect\.sid|session_?id|sess_?id|[\w-]*_session)=[^;\s"\',]+/i',
