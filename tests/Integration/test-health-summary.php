@@ -215,7 +215,23 @@ ActionScheduler::store()->delete_action( $recent_id );
 $clear_cache();
 
 // Totals and status come from every group, not the 50 listed (audit F04). Fresh debug.log content.
+// Only debug.log in play: today's WooCommerce fatal logs (from other runs) are moved aside and put back.
 $saved_log  = (string) file_get_contents( $log );
+$f04_aside  = array();
+foreach ( (array) glob( trailingslashit( WC_LOG_DIR ) . 'fatal-errors-*.log' ) as $wc_file ) {
+	if ( rename( $wc_file, $wc_file . '.blzmcp-aside' ) ) {
+		$f04_aside[] = $wc_file;
+	}
+}
+blzmcp_it_cleanup(
+	static function () use ( $f04_aside ): void {
+		foreach ( $f04_aside as $wc_file ) {
+			if ( file_exists( $wc_file . '.blzmcp-aside' ) ) {
+				rename( $wc_file . '.blzmcp-aside', $wc_file );
+			}
+		}
+	}
+);
 $f04_stamp  = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] ';
 $f04_lines  = static function ( string $level, string $prefix, int $n, int $repeat = 1 ) use ( $f04_stamp, $marker ): string {
 	$out = '';
@@ -229,19 +245,32 @@ $f04_lines  = static function ( string $level, string $prefix, int $n, int $repe
 file_put_contents( $log, $f04_lines( 'Warning', 'warn', 60 ) );
 $clear_cache();
 $f04 = $ability->execute( array( 'since_hours' => 24 ) );
-blzmcp_it_assert( ( $f04['php_errors']['counts']['warning'] ?? 0 ) >= 60, '60 distinct warnings: counts.warning covers all 60 (' . ( $f04['php_errors']['counts']['warning'] ?? 'none' ) . ')' );
-blzmcp_it_assert( ( $f04['php_errors']['groups_total'] ?? 0 ) >= 60, '60 distinct warnings: groups_total covers all of them' );
+blzmcp_it_equals( 60, $f04['php_errors']['counts']['warning'] ?? null, '60 distinct warnings: counts.warning is 60' );
+blzmcp_it_equals( 60, $f04['php_errors']['groups_total'] ?? null, '60 distinct warnings: groups_total is 60' );
+blzmcp_it_equals( 'amber', $f04['php_errors']['status'] ?? null, '60 distinct warnings: php_errors is amber' );
 blzmcp_it_equals( true, $f04['php_errors']['groups_truncated'] ?? null, '60 distinct warnings: groups_truncated is true' );
 blzmcp_it_equals( 50, count( (array) ( $f04['php_errors']['groups'] ?? array() ) ), '60 distinct warnings: 50 groups listed' );
 blzmcp_it_assert( (bool) preg_grep( '/distinct error groups were found/', (array) ( $f04['notes'] ?? array() ) ), '60 distinct warnings: truncation note' );
 file_put_contents( $log, $f04_lines( 'Deprecated', 'dep', 50, 2 ) . $f04_lines( 'Warning', 'warn', 21 ) );
 $clear_cache();
 $f04 = $ability->execute( array( 'since_hours' => 24 ) );
-blzmcp_it_assert( ( $f04['php_errors']['counts']['warning'] ?? 0 ) >= 21, '21 warnings among 100 deprecations: all 21 counted' );
-// (Red instead of amber only if a WooCommerce fatal log from today adds a fatal.)
-$f04_expected = ( $f04['php_errors']['counts']['fatal'] ?? 0 ) > 0 ? 'red' : 'amber';
-blzmcp_it_equals( $f04_expected, $f04['php_errors']['status'] ?? null, '21 warnings among 100 deprecations: php_errors is not green' );
+blzmcp_it_equals(
+	array(
+		'fatal'      => 0,
+		'error'      => 0,
+		'warning'    => 21,
+		'notice'     => 0,
+		'deprecated' => 100,
+	),
+	$f04['php_errors']['counts'] ?? null,
+	'21 warnings among 100 deprecations: exact counts'
+);
+blzmcp_it_equals( 71, $f04['php_errors']['groups_total'] ?? null, '21 warnings among 100 deprecations: groups_total is 71' );
+blzmcp_it_equals( 'amber', $f04['php_errors']['status'] ?? null, '21 warnings among 100 deprecations: php_errors is amber' );
 file_put_contents( $log, $saved_log );
+foreach ( $f04_aside as $wc_file ) {
+	rename( $wc_file . '.blzmcp-aside', $wc_file );
+}
 $clear_cache();
 
 // A failed Action Scheduler read is unknown (amber), never green (audit F03).
