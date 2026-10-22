@@ -211,4 +211,35 @@ final class ErrorGrouperTest extends TestCase {
 		$this->assertCount( 1, $g );
 		$this->assertSame( 'warning', $g[0]['severity'] );
 	}
+	/**
+	 * @return string[]
+	 */
+	private static function distinct_lines( string $level, string $prefix, int $n, int $repeat = 1 ): array {
+		$stamp = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] ';
+		$lines = array();
+		for ( $i = 0; $i < $n; $i++ ) {
+			for ( $r = 0; $r < $repeat; $r++ ) {
+				$lines[] = $stamp . 'PHP ' . $level . ': ' . $prefix . '_' . chr( 65 + intdiv( $i, 26 ) ) . chr( 65 + $i % 26 );
+			}
+		}
+		return $lines;
+	}
+
+	public function test_group_all_keeps_every_group_and_group_caps_at_50(): void {
+		$lines = self::distinct_lines( 'Warning', 'component', 60 );
+		$this->assertCount( 60, ErrorGrouper::group_all( $lines, 0, 'wp_debug' ) );
+		$this->assertCount( 50, ErrorGrouper::group( $lines, 0, 'wp_debug' ) );
+	}
+
+	public function test_limit_groups_keeps_fatals_and_errors_first(): void {
+		$lines = array_merge(
+			self::distinct_lines( 'Deprecated', 'dep', 50, 3 ),
+			self::distinct_lines( 'Fatal error', 'fatal', 2 ),
+			self::distinct_lines( 'Warning', 'warn', 5, 2 )
+		);
+		$kept  = ErrorGrouper::limit_groups( ErrorGrouper::group_all( $lines, 0, 'wp_debug' ), 50 );
+		$sev   = array_count_values( array_column( $kept, 'severity' ) );
+		$this->assertCount( 50, $kept );
+		$this->assertSame( 2, $sev['fatal'] ?? 0 );
+	}
 }

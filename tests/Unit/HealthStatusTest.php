@@ -149,4 +149,63 @@ final class HealthStatusTest extends TestCase {
 		$this->assertSame( 'green', HealthSummary::status_for( array( 'kind' => 'overall', 'statuses' => array( 'green', 'green', 'green' ) ) ) );
 		$this->assertSame( 'amber', HealthSummary::status_for( array( 'kind' => 'overall', 'statuses' => array() ) ) );
 	}
+	/**
+	 * @return string[]
+	 */
+	private static function lines( string $level, string $prefix, int $n, int $repeat = 1 ): array {
+		$stamp = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] ';
+		$out   = array();
+		for ( $i = 0; $i < $n; $i++ ) {
+			for ( $r = 0; $r < $repeat; $r++ ) {
+				$out[] = $stamp . 'PHP ' . $level . ': ' . $prefix . '_' . chr( 65 + intdiv( $i, 26 ) ) . chr( 65 + $i % 26 );
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Audit F04: totals and status come from every group, not the 50 shown.
+	 */
+	public function test_sixty_distinct_warnings_report_sixty(): void {
+		$sum = HealthSummary::summarise_groups( \Blaze\McpToolkit\Diagnostics\ErrorGrouper::group_all( self::lines( 'Warning', 'component', 60 ), 0, 'wp_debug' ) );
+		$this->assertSame( 60, $sum['counts']['warning'] );
+		$this->assertSame( 60, $sum['groups_total'] );
+		$this->assertTrue( $sum['groups_truncated'] );
+		$this->assertCount( 50, $sum['groups'] );
+		$this->assertSame( 'amber', HealthSummary::status_for( array( 'kind' => 'php_errors', 'sources' => array( self::source( true ) ) ) + $sum ) );
+	}
+
+	public function test_warnings_crowded_out_by_deprecations_stay_amber(): void {
+		$lines = array_merge( self::lines( 'Deprecated', 'component', 50, 2 ), self::lines( 'Warning', 'warning', 21 ) );
+		$sum   = HealthSummary::summarise_groups( \Blaze\McpToolkit\Diagnostics\ErrorGrouper::group_all( $lines, 0, 'wp_debug' ) );
+		$this->assertSame( 21, $sum['counts']['warning'] );
+		$this->assertSame( 100, $sum['counts']['deprecated'] );
+		$this->assertSame( 71, $sum['groups_total'] );
+		$this->assertCount( 50, $sum['groups'] );
+		$this->assertSame( 'amber', HealthSummary::status_for( array( 'kind' => 'php_errors', 'sources' => array( self::source( true ) ) ) + $sum ) );
+	}
+
+	public function test_multi_source_totals_survive_the_cap(): void {
+		$grouper = \Blaze\McpToolkit\Diagnostics\ErrorGrouper::class;
+		$all     = array_merge(
+			$grouper::group_all( self::lines( 'Warning', 'debug', 40 ), 0, 'wp_debug' ),
+			$grouper::group_all( self::lines( 'Notice', 'ini', 30 ), 0, 'php_error_log' ),
+			$grouper::group_all( self::lines( 'Fatal error', 'wc', 5 ), 0, 'wc_fatal' )
+		);
+		$sum = HealthSummary::summarise_groups( $all );
+		$this->assertSame( 40, $sum['counts']['warning'] );
+		$this->assertSame( 30, $sum['counts']['notice'] );
+		$this->assertSame( 5, $sum['counts']['fatal'] );
+		$this->assertSame( 75, $sum['groups_total'] );
+		$this->assertTrue( $sum['groups_truncated'] );
+		$this->assertCount( 50, $sum['groups'] );
+		$this->assertSame( 5, count( array_filter( $sum['groups'], static fn( $g ) => 'fatal' === $g['severity'] ) ) );
+	}
+
+	public function test_small_logs_are_not_truncated(): void {
+		$sum = HealthSummary::summarise_groups( \Blaze\McpToolkit\Diagnostics\ErrorGrouper::group_all( self::lines( 'Warning', 'w', 3 ), 0, 'wp_debug' ) );
+		$this->assertSame( 3, $sum['groups_total'] );
+		$this->assertFalse( $sum['groups_truncated'] );
+		$this->assertSame( 'green', HealthSummary::status_for( array( 'kind' => 'php_errors', 'sources' => array( self::source( true ) ) ) + $sum ) );
+	}
 }

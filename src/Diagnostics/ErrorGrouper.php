@@ -31,7 +31,9 @@ final class ErrorGrouper {
 	private const PHP_LEVEL = '/^(?:PHP )?(Fatal error|Parse error|Recoverable fatal error|Warning|Notice|Deprecated|Strict Standards):\s*/i';
 
 	/**
-	 * Group log lines.
+	 * Group log lines, keeping at most 50 groups (fatals and errors first).
+	 *
+	 * Totals must not be taken from this list; use group_all() for those.
 	 *
 	 * @param string[] $lines     Raw log lines, oldest first.
 	 * @param int      $since_ts  Ignore entries older than this Unix time.
@@ -39,6 +41,42 @@ final class ErrorGrouper {
 	 * @return array<int,array{severity:string,message:string,count:int,first_seen:string,last_seen:string,component:string,source:string}>
 	 */
 	public static function group( array $lines, int $since_ts, string $source_id ): array {
+		return self::limit_groups( self::group_all( $lines, $since_ts, $source_id ), self::MAX_GROUPS );
+	}
+
+	/**
+	 * Keep at most $limit groups: fatals, then errors, then the rest by count; then order by count.
+	 *
+	 * @param array<int,array{severity:string,count:int,last_seen:string}> $groups Groups.
+	 * @param int                                                          $limit  Most groups kept.
+	 * @return array<int,array<string,mixed>>
+	 */
+	public static function limit_groups( array $groups, int $limit ): array {
+		$rank = array(
+			'fatal' => 0,
+			'error' => 1,
+		);
+		usort(
+			$groups,
+			static fn( array $a, array $b ): int => array( $rank[ $a['severity'] ] ?? 2, -$a['count'], $b['last_seen'] ) <=> array( $rank[ $b['severity'] ] ?? 2, -$b['count'], $a['last_seen'] )
+		);
+		$groups = array_slice( $groups, 0, max( 0, $limit ) );
+		usort(
+			$groups,
+			static fn( array $a, array $b ): int => array( $b['count'], $b['last_seen'] ) <=> array( $a['count'], $a['last_seen'] )
+		);
+		return $groups;
+	}
+
+	/**
+	 * Group log lines without any display cap (every parsed entry in the bounded input).
+	 *
+	 * @param string[] $lines     Raw log lines, oldest first.
+	 * @param int      $since_ts  Ignore entries older than this Unix time.
+	 * @param string   $source_id Source id echoed into each group.
+	 * @return array<int,array{severity:string,message:string,count:int,first_seen:string,last_seen:string,component:string,source:string}>
+	 */
+	public static function group_all( array $lines, int $since_ts, string $source_id ): array {
 		$entries = self::parse( $lines, $since_ts );
 
 		$groups = array();
@@ -61,21 +99,6 @@ final class ErrorGrouper {
 		}
 
 		$groups = array_values( $groups );
-		usort(
-			$groups,
-			static fn( array $a, array $b ): int => array( $b['count'], $b['last_ts'] ) <=> array( $a['count'], $a['last_ts'] )
-		);
-
-		// Keep fatals first, then errors, then the rest by count; then show by count.
-		$rank = array(
-			'fatal' => 0,
-			'error' => 1,
-		);
-		usort(
-			$groups,
-			static fn( array $a, array $b ): int => array( $rank[ $a['severity'] ] ?? 2, -$a['count'], -$a['last_ts'] ) <=> array( $rank[ $b['severity'] ] ?? 2, -$b['count'], -$b['last_ts'] )
-		);
-		$groups = array_slice( $groups, 0, self::MAX_GROUPS );
 		usort(
 			$groups,
 			static fn( array $a, array $b ): int => array( $b['count'], $b['last_ts'] ) <=> array( $a['count'], $a['last_ts'] )

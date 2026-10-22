@@ -192,6 +192,36 @@ ActionScheduler::store()->delete_action( $late_id );
 ActionScheduler::store()->delete_action( $recent_id );
 $clear_cache();
 
+// Totals and status come from every group, not the 50 listed (audit F04). Fresh debug.log content.
+$saved_log  = (string) file_get_contents( $log );
+$f04_stamp  = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] ';
+$f04_lines  = static function ( string $level, string $prefix, int $n, int $repeat = 1 ) use ( $f04_stamp, $marker ): string {
+	$out = '';
+	for ( $i = 0; $i < $n; $i++ ) {
+		for ( $r = 0; $r < $repeat; $r++ ) {
+			$out .= $f04_stamp . 'PHP ' . $level . ':  ' . $marker . '_' . $prefix . '_' . chr( 65 + intdiv( $i, 26 ) ) . chr( 65 + $i % 26 ) . "\n";
+		}
+	}
+	return $out;
+};
+file_put_contents( $log, $f04_lines( 'Warning', 'warn', 60 ) );
+$clear_cache();
+$f04 = $ability->execute( array( 'since_hours' => 24 ) );
+blzmcp_it_assert( ( $f04['php_errors']['counts']['warning'] ?? 0 ) >= 60, '60 distinct warnings: counts.warning covers all 60 (' . ( $f04['php_errors']['counts']['warning'] ?? 'none' ) . ')' );
+blzmcp_it_assert( ( $f04['php_errors']['groups_total'] ?? 0 ) >= 60, '60 distinct warnings: groups_total covers all of them' );
+blzmcp_it_equals( true, $f04['php_errors']['groups_truncated'] ?? null, '60 distinct warnings: groups_truncated is true' );
+blzmcp_it_equals( 50, count( (array) ( $f04['php_errors']['groups'] ?? array() ) ), '60 distinct warnings: 50 groups listed' );
+blzmcp_it_assert( (bool) preg_grep( '/distinct error groups were found/', (array) ( $f04['notes'] ?? array() ) ), '60 distinct warnings: truncation note' );
+file_put_contents( $log, $f04_lines( 'Deprecated', 'dep', 50, 2 ) . $f04_lines( 'Warning', 'warn', 21 ) );
+$clear_cache();
+$f04 = $ability->execute( array( 'since_hours' => 24 ) );
+blzmcp_it_assert( ( $f04['php_errors']['counts']['warning'] ?? 0 ) >= 21, '21 warnings among 100 deprecations: all 21 counted' );
+// (Red instead of amber only if a WooCommerce fatal log from today adds a fatal.)
+$f04_expected = ( $f04['php_errors']['counts']['fatal'] ?? 0 ) > 0 ? 'red' : 'amber';
+blzmcp_it_equals( $f04_expected, $f04['php_errors']['status'] ?? null, '21 warnings among 100 deprecations: php_errors is not green' );
+file_put_contents( $log, $saved_log );
+$clear_cache();
+
 // A failed Action Scheduler read is unknown (amber), never green (audit F03).
 $jobs_breaker = static function ( $query ) {
 	// Every Action Scheduler read (database store's grouped query or the sampled/hybrid store path).
