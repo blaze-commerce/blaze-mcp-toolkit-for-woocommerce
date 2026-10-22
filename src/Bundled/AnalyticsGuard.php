@@ -272,8 +272,9 @@ final class AnalyticsGuard {
 	 * orders sync asynchronously). There is no clamp to the oldest synced order: a store that imported
 	 * only recent history still works for queries inside the imported range, and a query reaching
 	 * into un-imported dates is refused. Uses the type/status/date indexes with LIMIT 1. Cached per
-	 * set of windows: "no gap" for 6 hours, a gap for 15 minutes, a failed read (analytics_unreadable)
-	 * for 5 minutes; cleared when import batches run.
+	 * set of windows: "no gap" for 6 hours (15 minutes when a window reaches into the last hour), a
+	 * gap for 15 minutes, a failed read (analytics_unreadable) for 5 minutes; cleared when import
+	 * batches run.
 	 *
 	 * @param array<int, array{key: string, from: int, to: int}>|null $windows Windows to check; null for the default period.
 	 * @return string|null import_not_run, orders_not_imported, analytics_unreadable, or null.
@@ -320,8 +321,14 @@ final class AnalyticsGuard {
 			}
 		}
 
+		// A window reaching into the sync grace (today, last_7_days, ...) has unchecked recent orders:
+		// re-check it soon rather than trusting "none" for hours.
+		$reaches_grace = false;
+		foreach ( $windows as $window ) {
+			$reaches_grace = $reaches_grace || (int) $window['to'] > $now - self::SYNC_GRACE_SECONDS;
+		}
 		if ( null === $reason ) {
-			$ttl = 6 * HOUR_IN_SECONDS;
+			$ttl = $reaches_grace ? 15 * MINUTE_IN_SECONDS : 6 * HOUR_IN_SECONDS;
 		} elseif ( 'analytics_unreadable' === $reason ) {
 			$ttl = 5 * MINUTE_IN_SECONDS;
 		} else {

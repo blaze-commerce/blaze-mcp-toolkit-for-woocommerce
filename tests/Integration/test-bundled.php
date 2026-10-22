@@ -438,6 +438,34 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$clear_upstream_cache();
 	blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), 'after the failure clears: figures come back' );
 
+	// A "none" for a window that reaches into the last hour (today, last_7_days, ...) is only cached
+	// for 15 minutes, so orders from the sync grace are checked again soon (review M5). A window
+	// that ended before the grace keeps the 6-hour cache.
+	blzmcp_it_sync_analytics();
+	$ttl_of = static function ( array $input ): int {
+		$hash = md5( implode( '|', array_column( AnalyticsGuard::windows( $input ), 'key' ) ) );
+		$map  = get_transient( AnalyticsGuard::GAP_TRANSIENT );
+		return is_array( $map ) && isset( $map[ $hash ]['expires'] ) ? (int) $map[ $hash ]['expires'] - time() : -1;
+	};
+	foreach ( array( 'today', 'last_7_days' ) as $recent_period ) {
+		AnalyticsGuard::clear_cache();
+		$recent_input = array(
+			'period'  => $recent_period,
+			'compare' => false,
+		);
+		blzmcp_it_equals( null, AnalyticsGuard::sync_gap( AnalyticsGuard::windows( $recent_input ) ), "{$recent_period}: no gap" );
+		$ttl = $ttl_of( $recent_input );
+		blzmcp_it_assert( $ttl > 0 && $ttl <= 15 * MINUTE_IN_SECONDS, "{$recent_period}: 'none' cached for at most 15 minutes ({$ttl} s)" );
+	}
+	AnalyticsGuard::clear_cache();
+	$past_input = array(
+		'period'  => 'last_month',
+		'compare' => false,
+	);
+	blzmcp_it_equals( null, AnalyticsGuard::sync_gap( AnalyticsGuard::windows( $past_input ) ), 'last_month: no gap' );
+	blzmcp_it_assert( $ttl_of( $past_input ) > 5 * HOUR_IN_SECONDS, "last_month: 'none' cached for 6 hours" );
+	AnalyticsGuard::clear_cache();
+
 	// Resolver fallback: unknown period resolves to the package default (last 30 days).
 	$default_windows = AnalyticsGuard::windows( array( 'compare' => false ) );
 	blzmcp_it_equals( 1, count( $default_windows ), 'no period, compare off: one window' );
