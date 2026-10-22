@@ -466,4 +466,11 @@ final class RedactorTest extends TestCase {
 			ini_set( 'pcre.jit', false === $jit ? '1' : (string) $jit );
 		}
 	}
+	public function test_bare_header_with_bracketed_value_is_redacted_to_end_of_line(): void {
+		$this->assertSame( 'Cookie: [secret]', $this->redact( 'Cookie: {"a":1}; zz_auth=SYNTH_A' ) );
+		$this->assertSame( 'Set-Cookie: [secret]', $this->redact( 'Set-Cookie: (x) zz_auth=SYNTH_A; path=/' ) );
+		$this->assertSame( 'HTTP_COOKIE=[secret]', $this->redact( 'HTTP_COOKIE=[x] zz_auth=SYNTH_A' ) );
+		// Quoted / bracketed keys keep the fields after a balanced value.
+		$this->assertSame( '{"Cookie":[secret],"ok":1}', $this->redact( '{"Cookie":{"a":"SYNTH_A"},"ok":1}' ) );
+	}
 }

@@ -274,6 +274,9 @@ final class Redactor {
 			'${1}[secret]',
 			$out
 		);
+		// A bare header (Cookie: / Set-Cookie: / HTTP_COOKIE=) never has fields after its value: when the
+		// value began with a bracket, the balanced match above stopped early, so redact to the end.
+		$out = self::sub( '/((?<![\w"\'\[\\\\-])(?:[A-Za-z_]*HTTP_)?(?:Set[-_]Cookie|Cookie)2?\s*(?::(?!:)|=(?!>))\s*)\[secret\][^\r\n]+/i', '${1}[secret]', $out );
 		// The value of a dumped cookie object (WP_Http_Cookie, Requests' Cookie) is the cookie itself.
 		if ( 1 === preg_match( '/' . self::COOKIE_OBJECT . '/i', $out ) ) {
 			$out = self::replace_values( '(?:\[\s*["\']?|\\\\?["\'])value(?::\w+)?(?:\\\\?["\'])?\s*\]?', '[secret]', $out );
