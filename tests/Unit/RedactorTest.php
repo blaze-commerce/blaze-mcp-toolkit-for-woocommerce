@@ -329,6 +329,8 @@ final class RedactorTest extends TestCase {
 			'var_export'             => array( "'Cookie' => 'sessionid=SYNTH_SESSION_VALUE; b=SYNTH_OTHER', 'Host' => 'kept'", "'Cookie' => [secret], 'Host' => 'kept'" ),
 			'set-cookie json'        => array( '{"Set-Cookie":"sessionid=SYNTH_SESSION_VALUE; HttpOnly; Path=/"}', '{"Set-Cookie":[secret]}' ),
 			'set-cookie json array'  => array( '{"Set-Cookie":["sessionid=SYNTH_SESSION_VALUE; HttpOnly","b=SYNTH_OTHER"],"ok":1}', '{"Set-Cookie":[secret],"ok":1}' ),
+			'json array, ] inside a value'     => array( '{"Set-Cookie":["a=x]y","zz_auth=SYNTH_A"],"ok":1}', '{"Set-Cookie":[secret],"ok":1}' ),
+			'json object value'                => array( '{"Cookie":{"zz_auth":"SYNTH_A","b":"}"},"ok":1}', '{"Cookie":[secret],"ok":1}' ),
 			'set-cookie single-quoted escaped' => array( "{'set-cookie': 'JSESSIONID=SYNTH_SESSION_VALUE; Secure'}", "{'set-cookie': [secret]}" ),
 		);
 	}

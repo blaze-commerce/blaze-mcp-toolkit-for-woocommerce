@@ -32,6 +32,12 @@ final class Redactor {
 	/** A Cookie / Set-Cookie key, optionally $_SERVER-style (HTTP_COOKIE), quoted or bracketed. */
 	private const COOKIE_KEY = '(?:\\\\?["\']|\[)?(?<![\w-])(?:HTTP_)?(?:Set[-_]Cookie|Cookie)(?![\w-])(?:\\\\?["\']\]?|\])?';
 
+	/** A bare structural token that opens a dumped array or object: "(", "[", "{", "array (", "array(2) {". */
+	private const BLOCK_OPENER = '(?:\(|\[|\{|array\s*\(|array\(\d+\)\s*\{|object\([^)]*\)#\d+\s*\(\d+\)\s*\{)';
+
+	/** One balanced bracket group, skipping brackets inside quoted strings (recursive). */
+	private const BALANCED = '(?<bal>[\[{(](?:"(?:[^"\\\\]|\\\\.)*+"|\'(?:[^\'\\\\]|\\\\.)*+\'|[^\[\]{}()"\'\r\n]++|(?&bal))*+[\]})])';
+
 	/** Longest input redacted; callers pass one line at a time. */
 	private const MAX_BYTES = 4096;
 
@@ -60,63 +66,86 @@ final class Redactor {
 
 	/**
 	 * Whether a raw log line opens a multi-line Cookie / Set-Cookie value (an array or object
-	 * dumped over several lines by print_r, var_export or pretty JSON).
+	 * dumped over several lines by print_r, var_export, var_dump or pretty JSON).
 	 *
-	 * Returns null when it does not, 0 when the key's value starts on the next line ("=> Array",
-	 * "=>" at the end of a var_export line), or the open bracket depth after this line ("=> [",
-	 * "\": [", "\": {", "=> array (").
+	 * Returns null when it does not, otherwise the block state for cookie_block_line(): the
+	 * indentation of the opening key (the dump formats indent the value's children deeper) and
+	 * whether the value's opening bracket was already on this line.
 	 *
-	 * @param string $line Raw line.
+	 * @param string $line    Raw line.
+	 * @param bool   $is_head Whether this is an entry's first line (its key indentation counts as 0).
+	 * @return array{indent:int,opened:bool}|null
 	 */
-	public static function cookie_block_open( string $line ): ?int {
+	public static function cookie_block_open( string $line, bool $is_head = false ): ?array {
 		$m = array();
 		if ( 1 !== preg_match( '/' . self::COOKIE_KEY . '\s*(?:=>|=(?!>)|:(?!:))\s*(.*)$/i', $line, $m ) ) {
 			return null;
 		}
-		$rest = trim( $m[1] );
-		if ( '' === $rest || 1 === preg_match( '/^array$/i', $rest ) ) {
-			return 0;
+		$rest   = trim( $m[1] );
+		$indent = $is_head ? 0 : strlen( $line ) - strlen( ltrim( $line ) );
+		if ( '' === $rest || 1 === preg_match( '/^(?:Array|[\w\\\\]*Cookie\s+Object)$/i', $rest ) ) {
+			// The opening bracket (or a scalar value) is on the next line.
+			return array(
+				'indent' => $indent,
+				'opened' => false,
+			);
 		}
-		if ( 1 === preg_match( '/^(?:array\s*\(|\[|\{)/i', $rest ) ) {
-			$depth = self::bracket_delta( $rest );
-			return $depth > 0 ? $depth : null;
+		if ( 1 === preg_match( '/^' . self::BLOCK_OPENER . '$/i', $rest ) ) {
+			return array(
+				'indent' => $indent,
+				'opened' => true,
+			);
+		}
+		// A value that starts a bracket but does not close it on this line (quote-aware): fail closed.
+		if ( 1 === preg_match( '/^(?:array\s*|Array\s*)?[\[{(]/i', $rest ) && 1 !== preg_match( '/^(?:array\s*|Array\s*)?' . self::BALANCED . '$/i', $rest ) ) {
+			return array(
+				'indent' => $indent,
+				'opened' => true,
+			);
 		}
 		return null;
 	}
 
 	/**
-	 * Redact one continuation line inside a multi-line cookie value and track its brackets.
+	 * Redact one continuation line inside a multi-line cookie value.
 	 *
-	 * Fail closed: every line inside the block becomes "[secret]" except lines made only of
-	 * closing brackets; the block ends when its brackets balance (or with the log entry).
+	 * The block ends by indentation, which print_r, var_export, var_dump and pretty JSON all use:
+	 * children sit deeper than the opening key, so the first line indented at or below the key
+	 * ends it. Brackets inside values are never counted. Fail closed: every line inside the
+	 * block becomes "[secret]" except bare structural lines ("(", ")", "array (", "],", ...).
 	 *
-	 * @param string $line  Raw line.
-	 * @param int    $depth State from cookie_block_open() or a previous call (0 = value pending).
-	 * @return array{0:string,1:?int} Redacted line, and the new state (null once the block has ended).
+	 * @param string                         $line  Raw line.
+	 * @param array{indent:int,opened:bool}  $state State from cookie_block_open() or a previous call.
+	 * @return array{0:?string,1:?array{indent:int,opened:bool}} The redacted line (null when the block
+	 *         ended before this line, which the caller then handles as an ordinary line) and the new state.
 	 */
-	public static function cookie_block_line( string $line, int $depth ): array {
-		$trim = trim( $line );
-		if ( 0 === $depth ) {
-			if ( 1 === preg_match( '/^(?:array\s*\(|\(|\[|\{)/i', $trim ) ) {
-				$depth = self::bracket_delta( $trim );
-				return array( $depth > 0 ? $trim : '[secret]', $depth > 0 ? $depth : null );
-			}
-			// The value itself sits on this line.
-			return array( '[secret]', null );
+	public static function cookie_block_line( string $line, array $state ): array {
+		$trim   = trim( $line );
+		$indent = strlen( $line ) - strlen( ltrim( $line ) );
+		if ( $indent > $state['indent'] ) {
+			$structural = 1 === preg_match( '/^(?:' . self::BLOCK_OPENER . '|[)\]}][,;]?|Array)$/i', $trim );
+			return array(
+				$structural ? $trim : '[secret]',
+				array(
+					'indent' => $state['indent'],
+					'opened' => true,
+				),
+			);
 		}
-		$depth += self::bracket_delta( $trim );
-		$kept   = 1 === preg_match( '/^[)\]}]+[,;]?$/', $trim ) ? $trim : '[secret]';
-		return array( $kept, $depth > 0 ? $depth : null );
-	}
-
-	/**
-	 * Open minus close brackets, ignoring quoted strings.
-	 *
-	 * @param string $text Text.
-	 */
-	private static function bracket_delta( string $text ): int {
-		$bare = (string) preg_replace( '/"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'/', '', $text );
-		return preg_match_all( '/[(\[{]/', $bare ) - preg_match_all( '/[)\]}]/', $bare );
+		// var_export / var_dump put the value's opener and closer at the key's own indentation.
+		if ( ! $state['opened'] && 1 === preg_match( '/^' . self::BLOCK_OPENER . '$/i', $trim ) ) {
+			return array(
+				$trim,
+				array(
+					'indent' => $state['indent'],
+					'opened' => true,
+				),
+			);
+		}
+		if ( $state['opened'] && 1 === preg_match( '/^[)\]}][,;]?$/', $trim ) ) {
+			return array( $trim, null );
+		}
+		return array( null, null );
 	}
 
 	/**
@@ -223,10 +252,11 @@ final class Redactor {
 		$out = self::sub( '/\bBasic\s+(?=[A-Za-z0-9+\/]*[\d+\/=])[A-Za-z0-9+\/]{8,}={0,2}/', '[secret]', $out );
 		// Cookie / Set-Cookie (also $_SERVER's HTTP_COOKIE) with a bare, quoted, escaped-quoted or
 		// bracketed name ("Cookie":, \"Cookie\":, [HTTP_COOKIE] =>, 'Cookie' =>, ['HTTP_COOKIE'] =,
-		// Cookie =). A quoted value goes up to its closing quote, a JSON array up to its closing
-		// bracket, anything else to the end of the line. "Cookie::" (a class reference) is not a key.
+		// Cookie =). A quoted value goes up to its closing quote, a JSON array or object up to its
+		// matching bracket (brackets inside quoted strings skipped), anything else to the end of the
+		// line. "Cookie::" (a class reference) is not a key.
 		$out = self::sub(
-			'/(' . self::COOKIE_KEY . '\s*(?:=>|=(?!>)|:(?!:))\s*+)(?:\\\\"(?:(?!\\\\").)*(?:\\\\"|$)|"(?:[^"\\\\]|\\\\.)*(?:"|$)|\'(?:[^\'\\\\]|\\\\.)*(?:\'|$)|\[(?!secret\])[^\]\r\n]*(?:\]|$)|(?!\[secret\])[^\r\n]*)/i',
+			'/(' . self::COOKIE_KEY . '\s*(?:=>|=(?!>)|:(?!:))\s*+)(?:\\\\"(?:(?!\\\\").)*(?:\\\\"|$)|"(?:[^"\\\\]|\\\\.)*(?:"|$)|\'(?:[^\'\\\\]|\\\\.)*(?:\'|$)|(?!\[secret\])' . self::BALANCED . '|(?!\[secret\])[^\r\n]*)/i',
 			'${1}[secret]',
 			$out
 		);

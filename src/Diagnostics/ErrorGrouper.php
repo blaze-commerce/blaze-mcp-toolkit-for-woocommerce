@@ -151,7 +151,7 @@ final class ErrorGrouper {
 				if ( null === $head['severity'] || $head['ts'] < $since_ts ) {
 					continue;
 				}
-				$cookie = Redactor::cookie_block_open( $head['body'] );
+				$cookie = Redactor::cookie_block_open( $head['body'], true );
 				$in_pem = self::opens_pem( $head['body'] );
 				$body   = Redactor::redact( $head['body'] );
 				$body = (string) preg_replace( self::PHP_LEVEL, '', $body );
@@ -177,9 +177,12 @@ final class ErrorGrouper {
 				$in_pem = true;
 			}
 			// Multi-line cookie values: redaction is per line, so the block is tracked here.
+			$clean = null;
 			if ( null !== $cookie ) {
 				list( $clean, $cookie ) = Redactor::cookie_block_line( $line, $cookie );
-			} else {
+			}
+			if ( null === $clean ) {
+				// Not inside a block (or the block just ended): an ordinary line, maybe a new opener.
 				$clean  = trim( Redactor::redact( $line ) );
 				$cookie = Redactor::cookie_block_open( $line );
 			}

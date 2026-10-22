@@ -316,6 +316,61 @@ final class ErrorGrouperTest extends TestCase {
 					')',
 				),
 			),
+			'print_r value with )'  => array(
+				array(
+					$h . 'Array',
+					'(',
+					'    [set-cookie] => Array',
+					'        (',
+					'            [0] => zz=abc); path=/',
+					'            [1] => zz_auth=SYNTH_A; path=/',
+					'        )',
+					'',
+					'    [content-type] => text/html',
+					')',
+				),
+			),
+			'print_r value with ]'  => array(
+				array(
+					$h . 'Array',
+					'(',
+					'    [set-cookie] => Array',
+					'        (',
+					'            [0] => zz=a]b',
+					'            [1] => cart=}',
+					'            [2] => zz_auth=SYNTH_A',
+					'        )',
+					'',
+					'    [content-type] => text/html',
+					')',
+				),
+			),
+			'json value with ]'     => array(
+				array(
+					$h . '{',
+					'    "set-cookie": [',
+					'        "zz=a]b",',
+					'        "zz_auth=SYNTH_A"',
+					'    ],',
+					'    "content-type": "text/html"',
+					'}',
+				),
+			),
+			'var_dump'              => array(
+				array(
+					$h . 'array(2) {',
+					'  ["Set-Cookie"]=>',
+					'  array(2) {',
+					'    [0]=>',
+					'    string(10) "zz=abc); x"',
+					'    [1]=>',
+					'    string(15) "zz_auth=SYNTH_A"',
+					'  }',
+					'  ["content-type"]=>',
+					'  string(9) "text/html"',
+					'}',
+				),
+			),
 			'unclosed'     => array(
 				array(
 					$h . '"set-cookie": [',
@@ -338,7 +393,13 @@ final class ErrorGrouperTest extends TestCase {
 	}
 
 	public function test_multiline_cookie_block_keeps_following_fields(): void {
-		$groups = ErrorGrouper::group_all( self::multiline_cookie_dumps()['print_r'][0], 0, 'wp_debug' );
-		$this->assertStringContainsString( '[content-type] => text/html', $groups[0]['message'] );
+		$dumps = self::multiline_cookie_dumps();
+		foreach ( array( 'print_r', 'print_r value with )', 'print_r value with ]' ) as $case ) {
+			$groups = ErrorGrouper::group_all( $dumps[ $case ][0], 0, 'wp_debug' );
+			$this->assertStringContainsString( '[content-type] => text/html', $groups[0]['message'], $case );
+		}
+		$this->assertStringContainsString( "'content-type' => 'text/html'", ErrorGrouper::group_all( $dumps['var_export'][0], 0, 'wp_debug' )[0]['message'] );
+		$this->assertStringContainsString( '"content-type": "text/html"', ErrorGrouper::group_all( $dumps['pretty json'][0], 0, 'wp_debug' )[0]['message'] );
+		$this->assertStringContainsString( 'string(9) "text/html"', ErrorGrouper::group_all( $dumps['var_dump'][0], 0, 'wp_debug' )[0]['message'] );
 	}
 }
