@@ -129,11 +129,33 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s', $wpdb->options, $wpdb->esc_like( '_transient_woocommerce_claude_' ) . '%', $wpdb->esc_like( '_transient_timeout_woocommerce_claude_' ) . '%' ) );
 		wp_cache_flush();
 	};
+	// Start from a store whose Analytics data is complete, whatever earlier files left behind.
+	blzmcp_it_sync_analytics();
+	$saved_analytics = get_option( 'woocommerce_analytics_enabled', null );
+	blzmcp_it_cleanup(
+		static function () use ( $saved_analytics ): void {
+			if ( null === $saved_analytics ) {
+				delete_option( 'woocommerce_analytics_enabled' );
+			} else {
+				update_option( 'woocommerce_analytics_enabled', $saved_analytics );
+			}
+			\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
+		}
+	);
 	$product = new WC_Product_Simple();
 	$product->set_name( 'Blzmcp bundled test product' );
 	$product->set_regular_price( '10' );
 	$product->save();
 	$order_ids = array();
+	// Every order and the product are removed even if an assertion fatals half way.
+	blzmcp_it_cleanup(
+		static function () use ( &$order_ids, $product ): void {
+			foreach ( $order_ids as $order_id ) {
+				blzmcp_it_delete_order( (int) $order_id );
+			}
+			$product->delete( true );
+		}
+	);
 	for ( $i = 0; $i < 3; $i++ ) {
 		$order = wc_create_order();
 		$order->add_product( $product, 1 );
@@ -290,24 +312,41 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 
 	// Requested-window checks (audit F02), with HPOS on and off. The guard checks the dates the
 	// tool reads (period, plus the previous period when compare is on), not the oldest synced row.
-	$rows = wp_get_ability( 'wc-analytics/rows' );
-	$hpos_modes = array( 'yes', 'no' );
-	foreach ( $hpos_modes as $hpos_mode ) {
-		$force_mode = static function () use ( $hpos_mode ) {
-			return $hpos_mode;
-		};
-		add_filter( 'pre_option_woocommerce_custom_orders_table_enabled', $force_mode );
-		$label = 'yes' === $hpos_mode ? 'HPOS on' : 'HPOS off';
-		blzmcp_it_equals( 'yes' === $hpos_mode, \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled(), "{$label}: order storage mode forced" );
+	// Order storage is switched the way WooCommerce's settings do it (tables, sync, then the
+	// authoritative store) and restored afterwards; a mode that can't be switched is skipped.
+	$rows          = wp_get_ability( 'wc-analytics/rows' );
+	$hpos_original = \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+	$sync_original = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null );
+	blzmcp_it_cleanup(
+		static function () use ( $hpos_original, $sync_original ): void {
+			if ( ! blzmcp_it_set_hpos( $hpos_original ) ) {
+				echo 'CLEANUP ERROR  could not restore the original order storage mode' . "\n";
+			}
+			if ( null === $sync_original ) {
+				delete_option( 'woocommerce_custom_orders_table_data_sync_enabled' );
+			} else {
+				update_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync_original );
+			}
+		}
+	);
+	foreach ( array( true, false ) as $hpos_on ) {
+		$label = $hpos_on ? 'HPOS on' : 'HPOS off';
+		if ( ! blzmcp_it_set_hpos( $hpos_on ) ) {
+			echo "SKIP  {$label}: WooCommerce would not switch order storage in this environment\n";
+			continue;
+		}
+		blzmcp_it_equals( $hpos_on, \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled(), "{$label}: order storage switched" );
+		blzmcp_it_sync_analytics();
 
 		// A paid order created $days ago that never reached wc_order_stats.
-		$make_missing = static function ( int $days ) use ( $product, $wpdb, $stats_table ): int {
+		$make_missing = static function ( int $days ) use ( $product, $wpdb, $stats_table, &$order_ids ): int {
 			$o = wc_create_order();
 			$o->add_product( $product, 1 );
 			$o->calculate_totals();
 			$o->payment_complete();
 			$o->set_date_created( time() - $days * DAY_IN_SECONDS );
 			$o->save();
+			$order_ids[] = (int) $o->get_id();
 			$wpdb->delete( $stats_table, array( 'order_id' => $o->get_id() ) );
 			return (int) $o->get_id();
 		};
@@ -361,12 +400,8 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		$resolve( $twenty );
 
 		foreach ( array( $five, $ten, $twenty ) as $id ) {
-			$o = wc_get_order( $id );
-			if ( $o ) {
-				$o->delete( true );
-			}
+			blzmcp_it_delete_order( $id );
 		}
-		remove_filter( 'pre_option_woocommerce_custom_orders_table_enabled', $force_mode );
 	}
 	AnalyticsGuard::clear_cache();
 
@@ -431,13 +466,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$profile_schema = $profile instanceof WP_Ability ? $profile->get_input_schema() : array();
 	blzmcp_it_equals( false, $profile_schema['additionalProperties'] ?? null, 'no-input store tools reject extra properties' );
 
-	foreach ( $order_ids as $order_id ) {
-		$order = wc_get_order( $order_id );
-		if ( $order ) {
-			$order->delete( true );
-		}
-	}
-	$product->delete( true );
+	// Orders, product, Analytics option and order storage are restored by the registered cleanups.
 } else {
 	echo 'Mode: stand-aside (' . ( $wcfc_plugin ? 'real WooCommerce for Claude plugin' : 'stub WOOCOMMERCE_CLAUDE_VERSION constant' ) . ")\n";
 

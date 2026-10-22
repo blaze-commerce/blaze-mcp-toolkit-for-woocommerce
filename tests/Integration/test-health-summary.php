@@ -37,6 +37,19 @@ blzmcp_it_assert( str_contains( $ability->get_description(), 'hook names and plu
 $log      = WP_CONTENT_DIR . '/debug.log';
 $existed  = file_exists( $log );
 $old_size = $existed ? (int) filesize( $log ) : 0;
+$original_log = $existed ? (string) file_get_contents( $log ) : null;
+// Restore debug.log exactly, even if an assertion fatals half way.
+blzmcp_it_cleanup(
+	static function () use ( $log, $original_log ): void {
+		if ( null === $original_log ) {
+			if ( file_exists( $log ) ) {
+				unlink( $log );
+			}
+		} else {
+			file_put_contents( $log, $original_log );
+		}
+	}
+);
 $marker   = 'blzmcp_it_' . wp_generate_password( 8, false );
 $line     = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Fatal error:  Uncaught Exception: ' . $marker . ' payment failed for jane.doe@example.com in /var/www/html/wp-content/plugins/fake-gateway/gateway.php:42' . "\n"
 	. '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Fatal error:  Uncaught Error: ' . $marker . '_phar in phar:///usr/local/bin/wp/vendor/wp-cli/eval-command/src/EvalFile_Command.php(85) : eval()\'d code:21' . "\n";
@@ -140,6 +153,15 @@ blzmcp_it_assert( is_array( $result['notes'] ?? null ), 'notes is a list' );
 blzmcp_it_equals( 0, $http_calls, 'no outbound HTTP request was made' );
 
 // A failed money-related job turns background_jobs red; a failed ordinary job only amber.
+blzmcp_it_cleanup(
+	static function (): void {
+		foreach ( array( 'blzmcp_it_stock_sync', 'blzmcp_it_plain_job', 'blzmcp_it_late_job', 'blzmcp_it_recent_job' ) as $it_hook ) {
+			foreach ( as_get_scheduled_actions( array( 'hook' => $it_hook, 'per_page' => -1, 'status' => '' ), 'ids' ) as $it_id ) {
+				ActionScheduler::store()->delete_action( (int) $it_id );
+			}
+		}
+	}
+);
 $job_id = as_schedule_single_action( time() - 120, 'blzmcp_it_stock_sync', array(), 'blzmcp-it' );
 ActionScheduler::store()->mark_failure( $job_id );
 $clear_cache();

@@ -121,6 +121,23 @@ $hook->set_user_id( $admin->ID );
 $hook_id = $hook->save();
 
 $extra_hooks = array();
+// Keys, webhooks and users are removed even if an assertion fatals half way.
+blzmcp_it_cleanup(
+	static function () use ( $wpdb, $key_id, $key2_id, $key3_id, $hook, &$extra_hooks, $owner_id ): void {
+		foreach ( array( $key_id, $key2_id, $key3_id ) as $kid ) {
+			$wpdb->delete( $wpdb->prefix . 'woocommerce_api_keys', array( 'key_id' => $kid ) );
+		}
+		foreach ( array_merge( array( $hook ), array_values( $extra_hooks ) ) as $wh ) {
+			if ( $wh->get_id() && wc_get_webhook( $wh->get_id() ) ) {
+				$wh->delete( true );
+			}
+		}
+		require_once ABSPATH . 'wp-admin/includes/user.php';
+		if ( get_userdata( (int) $owner_id ) ) {
+			wp_delete_user( (int) $owner_id );
+		}
+	}
+);
 foreach (
 	array(
 		'Bad1'  => array( 'https://apikey_ABC123#x@host.net/p', 'order.updated' ),

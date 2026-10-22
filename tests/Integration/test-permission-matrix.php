@@ -15,6 +15,9 @@
 
 require_once __DIR__ . '/assert.php';
 
+// Analytics must be complete for the "allowed" rows, whatever earlier files left behind.
+blzmcp_it_sync_analytics();
+
 use Blaze\McpToolkit\Settings;
 
 const BLZMCP_PM_ADMIN_ONLY = 'admin_only';

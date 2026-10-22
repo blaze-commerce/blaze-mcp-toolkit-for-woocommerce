@@ -59,11 +59,21 @@ $profile = 'blaze-mcp-toolkit/store-profile';
 // Requested-period analytics check (audit F02), in both modes: a paid order 5 days ago missing from
 // wc_order_stats stops a last_7_days review but not one for yesterday.
 $wf_mode    = Commerce::is_standing_aside() ? 'standaside' : 'bundled';
+blzmcp_it_sync_analytics();
 $wf_product = new WC_Product_Simple();
 $wf_product->set_name( 'Blzmcp workflow gap product' );
 $wf_product->set_regular_price( '10' );
 $wf_product->save();
 $wf_order = wc_create_order();
+blzmcp_it_cleanup(
+	static function () use ( $wf_order, $wf_product ): void {
+		blzmcp_it_delete_order( (int) $wf_order->get_id() );
+		if ( wc_get_product( $wf_product->get_id() ) ) {
+			$wf_product->delete( true );
+		}
+		\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
+	}
+);
 $wf_order->add_product( $wf_product, 1 );
 $wf_order->calculate_totals();
 $wf_order->payment_complete();
