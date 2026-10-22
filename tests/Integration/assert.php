@@ -136,22 +136,28 @@ function blzmcp_it_set_hpos( bool $on ): bool {
 }
 
 /**
- * Import every order that is missing from wc_order_stats (left by a crashed run or a real store's
- * pending sync) so analytics checks do not depend on what earlier test files left behind.
+ * Import the suite's own orders (a line item named "Blzmcp ...") that are missing from
+ * wc_order_stats, e.g. left by a crashed run, so analytics checks do not depend on what earlier
+ * test files left behind. Other orders on the store are never touched.
  */
 function blzmcp_it_sync_analytics(): void {
 	global $wpdb;
-	$util = \Automattic\WooCommerce\Utilities\OrderUtil::class;
-	if ( ! class_exists( $util ) || ! class_exists( \Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler::class ) ) {
+	if ( ! class_exists( \Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler::class ) ) {
 		return;
 	}
-	$hpos  = $util::custom_orders_table_usage_is_enabled();
-	$table = $hpos ? $wpdb->prefix . 'wc_orders' : $wpdb->posts;
-	$id    = $hpos ? 'id' : 'ID';
-	$type  = $hpos ? 'type' : 'post_type';
-	$ids   = $wpdb->get_col( $wpdb->prepare( 'SELECT o.%i FROM %i o LEFT JOIN %i s ON s.order_id = o.%i WHERE s.order_id IS NULL AND o.%i = %s', $id, $table, $wpdb->prefix . 'wc_order_stats', $id, $type, 'shop_order' ) );
+	$ids = $wpdb->get_col(
+		$wpdb->prepare(
+			'SELECT DISTINCT i.order_id FROM %i i LEFT JOIN %i s ON s.order_id = i.order_id WHERE s.order_id IS NULL AND i.order_item_type = %s AND i.order_item_name LIKE %s',
+			$wpdb->prefix . 'woocommerce_order_items',
+			$wpdb->prefix . 'wc_order_stats',
+			'line_item',
+			$wpdb->esc_like( 'Blzmcp' ) . '%'
+		)
+	);
 	foreach ( (array) $ids as $order_id ) {
-		\Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler::import( (int) $order_id );
+		if ( wc_get_order( (int) $order_id ) ) {
+			\Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler::import( (int) $order_id );
+		}
 	}
 	if ( class_exists( \Blaze\McpToolkit\Bundled\AnalyticsGuard::class ) ) {
 		\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();

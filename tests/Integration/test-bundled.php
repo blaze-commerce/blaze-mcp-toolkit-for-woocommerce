@@ -173,6 +173,40 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$product->set_name( 'Blzmcp bundled test product' );
 	$product->set_regular_price( '10' );
 	$product->save();
+	// The analytics sync helper imports only the suite's own orders (products named "Blzmcp ..."),
+	// never anything else on the store.
+	$other_product = new WC_Product_Simple();
+	$other_product->set_name( 'Other store product' );
+	$other_product->set_regular_price( '5' );
+	$other_product->save();
+	$probe_ids = array();
+	blzmcp_it_cleanup(
+		static function () use ( &$probe_ids, $other_product ): void {
+			foreach ( $probe_ids as $probe_id ) {
+				blzmcp_it_delete_order( (int) $probe_id );
+			}
+			if ( wc_get_product( $other_product->get_id() ) ) {
+				$other_product->delete( true );
+			}
+		}
+	);
+	foreach ( array( $other_product, $product ) as $probe_product ) {
+		$probe = wc_create_order();
+		$probe->add_product( $probe_product, 1 );
+		$probe->calculate_totals();
+		$probe->payment_complete();
+		$probe_ids[] = (int) $probe->get_id();
+		$wpdb->delete( $wpdb->prefix . 'wc_order_stats', array( 'order_id' => $probe->get_id() ) );
+	}
+	blzmcp_it_sync_analytics();
+	$in_stats = static fn( int $id ): bool => null !== $wpdb->get_var( $wpdb->prepare( 'SELECT order_id FROM %i WHERE order_id = %d', $wpdb->prefix . 'wc_order_stats', $id ) );
+	blzmcp_it_equals( false, $in_stats( $probe_ids[0] ), 'sync helper leaves a non-suite order alone' );
+	blzmcp_it_equals( true, $in_stats( $probe_ids[1] ), "sync helper imports the suite's own order" );
+	foreach ( $probe_ids as $probe_id ) {
+		blzmcp_it_delete_order( $probe_id );
+	}
+	$other_product->delete( true );
+
 	$order_ids = array();
 	// Every order and the product are removed even if an assertion fatals half way.
 	blzmcp_it_cleanup(
