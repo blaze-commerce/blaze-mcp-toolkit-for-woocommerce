@@ -129,6 +129,33 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s', $wpdb->options, $wpdb->esc_like( '_transient_woocommerce_claude_' ) . '%', $wpdb->esc_like( '_transient_timeout_woocommerce_claude_' ) . '%' ) );
 		wp_cache_flush();
 	};
+	// Registered first, so it runs last: after every cleanup, both order stores (HPOS tables and
+	// posts) must hold exactly the orders they held before this file ran (review N2).
+	$stores_before = blzmcp_it_order_store_ids();
+	blzmcp_it_cleanup(
+		static function () use ( $stores_before ): void {
+			blzmcp_it_equals( $stores_before, blzmcp_it_order_store_ids(), 'after cleanup, both order stores hold the same orders as before this file' );
+		}
+	);
+
+	// Order storage is restored after the fixture orders are gone (cleanups run last-in first-out,
+	// so this is registered before them): deleting while the test's storage mode and compatibility
+	// sync are still on removes each order from both stores.
+	$hpos_original = \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+	$sync_original = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null );
+	blzmcp_it_cleanup(
+		static function () use ( $hpos_original, $sync_original ): void {
+			if ( ! blzmcp_it_set_hpos( $hpos_original ) ) {
+				echo 'CLEANUP ERROR  could not restore the original order storage mode' . "\n";
+			}
+			if ( null === $sync_original ) {
+				delete_option( 'woocommerce_custom_orders_table_data_sync_enabled' );
+			} else {
+				update_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync_original );
+			}
+		}
+	);
+
 	// Start from a store whose Analytics data is complete, whatever earlier files left behind.
 	blzmcp_it_sync_analytics();
 	$saved_analytics = get_option( 'woocommerce_analytics_enabled', null );
@@ -315,20 +342,6 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	// Order storage is switched the way WooCommerce's settings do it (tables, sync, then the
 	// authoritative store) and restored afterwards; a mode that can't be switched is skipped.
 	$rows          = wp_get_ability( 'wc-analytics/rows' );
-	$hpos_original = \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
-	$sync_original = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null );
-	blzmcp_it_cleanup(
-		static function () use ( $hpos_original, $sync_original ): void {
-			if ( ! blzmcp_it_set_hpos( $hpos_original ) ) {
-				echo 'CLEANUP ERROR  could not restore the original order storage mode' . "\n";
-			}
-			if ( null === $sync_original ) {
-				delete_option( 'woocommerce_custom_orders_table_data_sync_enabled' );
-			} else {
-				update_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync_original );
-			}
-		}
-	);
 	foreach ( array( true, false ) as $hpos_on ) {
 		$label = $hpos_on ? 'HPOS on' : 'HPOS off';
 		if ( ! blzmcp_it_set_hpos( $hpos_on ) ) {

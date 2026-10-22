@@ -64,6 +64,41 @@ function blzmcp_it_delete_order( int $id ): void {
 	}
 	global $wpdb;
 	$wpdb->delete( $wpdb->prefix . 'wc_order_stats', array( 'order_id' => $id ) );
+	// Belt and braces: no copy may survive in the other store (HPOS tables or posts), whatever
+	// the storage and sync settings were when it was deleted. Fixture IDs only.
+	if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . 'wc_orders' ) ) ) ) {
+		foreach ( array( 'wc_orders_meta', 'wc_order_addresses', 'wc_order_operational_data' ) as $table ) {
+			$wpdb->delete( $wpdb->prefix . $table, array( 'order_id' => $id ) );
+		}
+		$wpdb->delete( $wpdb->prefix . 'wc_orders', array( 'id' => $id ) );
+	}
+	if ( $wpdb->get_var( $wpdb->prepare( 'SELECT ID FROM %i WHERE ID = %d AND post_type IN (%s, %s)', $wpdb->posts, $id, 'shop_order', 'shop_order_placehold' ) ) ) {
+		wp_delete_post( $id, true );
+	}
+	$items = $wpdb->get_col( $wpdb->prepare( 'SELECT order_item_id FROM %i WHERE order_id = %d', $wpdb->prefix . 'woocommerce_order_items', $id ) );
+	foreach ( $items as $item_id ) {
+		$wpdb->delete( $wpdb->prefix . 'woocommerce_order_itemmeta', array( 'order_item_id' => (int) $item_id ) );
+	}
+	$wpdb->delete( $wpdb->prefix . 'woocommerce_order_items', array( 'order_id' => $id ) );
+	wp_cache_flush();
+}
+
+/**
+ * Order IDs in each order store: the HPOS tables and the posts table (orders, refunds, placeholders).
+ *
+ * @return array{hpos: array<int,int>, posts: array<int,int>}
+ */
+function blzmcp_it_order_store_ids(): array {
+	global $wpdb;
+	$hpos = array();
+	if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . 'wc_orders' ) ) ) ) {
+		$hpos = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( 'SELECT id FROM %i ORDER BY id', $wpdb->prefix . 'wc_orders' ) ) );
+	}
+	$posts = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( 'SELECT ID FROM %i WHERE post_type IN (%s, %s, %s) ORDER BY ID', $wpdb->posts, 'shop_order', 'shop_order_refund', 'shop_order_placehold' ) ) );
+	return array(
+		'hpos'  => $hpos,
+		'posts' => $posts,
+	);
 }
 
 /**
