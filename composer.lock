@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "1ed53df0b50710c165543dfa43dff4f4",
+    "content-hash": "7f6072bd39043b60202db7d231a31b43",
     "packages": [
         {
             "name": "woocommerce/commerce-abilities",
@@ -2450,11 +2450,11 @@
     "prefer-stable": false,
     "prefer-lowest": false,
     "platform": {
-        "php": ">=8.0"
+        "php": ">=8.1"
     },
     "platform-dev": {},
     "platform-overrides": {
-        "php": "8.0.30"
+        "php": "8.1.31"
     },
     "plugin-api-version": "2.9.0"
 }

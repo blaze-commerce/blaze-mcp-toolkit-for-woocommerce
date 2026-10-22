@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*-*' # Pre-release tags (v1.0.0-rc5) never deploy.
 
 jobs:
   deploy:

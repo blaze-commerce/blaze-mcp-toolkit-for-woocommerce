@@ -4,7 +4,7 @@
  * Description:       Ask Claude or ChatGPT how your WooCommerce store is doing: sales, errors, failed jobs, updates and API access. Our tools are read-only.
  * Version:           1.0.0
  * Requires at least: 6.9
- * Requires PHP:      8.0
+ * Requires PHP:      8.1
  * Requires Plugins:  woocommerce, mcp-adapter, enable-abilities-for-mcp
  * WC requires at least: 10.9
  * WC tested up to:   11.2
