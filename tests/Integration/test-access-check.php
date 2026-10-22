@@ -264,6 +264,56 @@ foreach ( array(
 $wpdb->suppress_errors( $suppressed );
 $clear_cache();
 
+// User discovery works but one user's application-password metadata read fails (review R2):
+// WordPress turns that into an empty list and caches it. A later user's successful read must not
+// hide it, a repeat call must not trust the cached empty list, and recovery needs no cache flush.
+$later_id = wp_insert_user(
+	array(
+		'user_login' => 'blzit_later_' . wp_generate_password( 6, false ),
+		'user_pass'  => wp_generate_password(),
+		'user_email' => 'blzit-later-' . wp_generate_password( 6, false ) . '@example.org',
+		'role'       => 'editor',
+	)
+);
+$empty_id = wp_insert_user(
+	array(
+		'user_login' => 'blzit_empty_' . wp_generate_password( 6, false ),
+		'user_pass'  => wp_generate_password(),
+		'user_email' => 'blzit-empty-' . wp_generate_password( 6, false ) . '@example.org',
+		'role'       => 'editor',
+	)
+);
+blzmcp_it_assert( is_int( $later_id ) && $later_id > $owner_id && is_int( $empty_id ), 'later and empty users created' );
+WP_Application_Passwords::create_new_application_password( (int) $later_id, array( 'name' => 'BlzIT later app' ) );
+$app_method  = new ReflectionMethod( AccessCheck::class, 'application_passwords' );
+$roles       = array();
+$meta_needle = $wpdb->usermeta . ' WHERE user_id IN (' . $owner_id . ')';
+$meta_break  = static function ( $query ) use ( $meta_needle ) {
+	return is_string( $query ) && str_contains( $query, $meta_needle ) ? 'SELECT umeta_id FROM blzmcp_it_missing_table_xyz' : $query;
+};
+wp_cache_delete( $owner_id, 'user_meta' );
+$suppressed = $wpdb->suppress_errors( true );
+add_filter( 'query', $meta_break );
+$first  = $app_method->invokeArgs( null, array( &$roles ) );
+$second = $app_method->invokeArgs( null, array( &$roles ) );
+remove_filter( 'query', $meta_break );
+$wpdb->suppress_errors( $suppressed );
+blzmcp_it_equals( array( false, false ), array( $first['available'] ?? null, $second['available'] ?? null ), 'one user\'s app-password meta read fails (a later user reads fine): unavailable on the first and repeated call' );
+blzmcp_it_equals( array(), $first['rows'] ?? null, 'failed app-password meta read: no rows listed' );
+$recovered = $app_method->invokeArgs( null, array( &$roles ) );
+$names     = array_column( (array) ( $recovered['rows'] ?? array() ), 'untrusted_text' );
+blzmcp_it_assert( true === ( $recovered['available'] ?? null ) && (bool) array_filter( $names, static fn( $n ) => str_starts_with( (string) $n, 'BlzIT app' ) ) && in_array( 'BlzIT later app', $names, true ), 'after the failure clears: both users\' app passwords listed again, no cache flush' );
+$only_empty = static function ( $results, $query ) use ( $empty_id ) {
+	return 'ID' === ( $query->query_vars['fields'] ?? '' ) ? array( (string) $empty_id ) : $results;
+};
+add_filter( 'users_pre_query', $only_empty, 10, 2 );
+$none = $app_method->invokeArgs( null, array( &$roles ) );
+remove_filter( 'users_pre_query', $only_empty, 10 );
+blzmcp_it_equals( array( true, array() ), array( $none['available'] ?? null, $none['rows'] ?? null ), 'a user with no app passwords: an available, empty list' );
+wp_delete_user( (int) $later_id );
+wp_delete_user( (int) $empty_id );
+$clear_cache();
+
 $apps = $result['application_passwords'] ?? array();
 blzmcp_it_assert( count( $apps ) >= 1, 'application password listed' );
 $app = array();

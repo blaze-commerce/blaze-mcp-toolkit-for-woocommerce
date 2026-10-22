@@ -403,7 +403,21 @@ final class AccessCheck extends AbstractAbility {
 		$stale_before = time() - self::STALE_DAYS * DAY_IN_SECONDS;
 		$out          = array();
 		foreach ( $user_ids as $user_id ) {
-			foreach ( \WP_Application_Passwords::get_user_application_passwords( (int) $user_id ) as $item ) {
+			// WordPress turns a failed meta read into an empty list and caches it: read past the
+			// cache, check this user's read before the next query clears the error, and never leave
+			// a failed read behind as a cached "no passwords".
+			wp_cache_delete( (int) $user_id, 'user_meta' );
+			$wpdb->last_error = '';
+			$items            = \WP_Application_Passwords::get_user_application_passwords( (int) $user_id );
+			if ( '' !== $wpdb->last_error ) {
+				wp_cache_delete( (int) $user_id, 'user_meta' );
+				return array(
+					'rows'      => array(),
+					'truncated' => false,
+					'available' => false,
+				);
+			}
+			foreach ( $items as $item ) {
 				$last_used = isset( $item['last_used'] ) && is_numeric( $item['last_used'] ) && (int) $item['last_used'] > 0 ? (int) $item['last_used'] : null;
 				$out[]     = array(
 					'untrusted_text' => self::label_text( isset( $item['name'] ) ? (string) $item['name'] : '' ),
