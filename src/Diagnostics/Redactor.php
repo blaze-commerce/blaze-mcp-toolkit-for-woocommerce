@@ -32,8 +32,12 @@ final class Redactor {
 	/** A Cookie / Cookie2 / Set-Cookie key, also any $_SERVER-style *HTTP_(SET_)COOKIE, or a quoted/bracketed 'cookies' key. */
 	private const COOKIE_KEY = '(?:(?:\\\\?["\']|\[)?(?<![\w-])(?:[A-Za-z_]*HTTP_)?(?:Set[-_]Cookie|Cookie)2?(?![\w-])(?:\\\\?["\']\]?|\])?|(?:\\\\?["\']|\[)(?<![\w-])cookies(?![\w-])(?:\\\\?["\']\]?|\]))';
 
-	/** A dumped cookie object: WP_Http_Cookie, WpOrg\Requests\Cookie, Requests_Cookie (print_r, var_dump, var_export). */
-	private const COOKIE_OBJECT = '(?:[\w\\\\]*Cookie\s+Object\b|object\(\\\\?[\w\\\\]*Cookie\)|[\w\\\\]*Cookie::__set_state)';
+	/**
+	 * A dumped cookie object: WP_Http_Cookie, WpOrg\Requests\Cookie, Requests_Cookie (print_r, var_dump,
+	 * var_export). Class-name runs are anchored on the left: unanchored, a long run of word characters
+	 * is rescanned from every start position, which is quadratic without PCRE JIT.
+	 */
+	private const COOKIE_OBJECT = '(?:(?<![\w\\\\])[\w\\\\]*Cookie\s+Object\b|object\(\\\\?[\w\\\\]*Cookie\)|(?<![\w\\\\])[\w\\\\]*Cookie::__set_state)';
 
 	/** A bare structural token that opens a dumped array or object: "(", "[", "{", "array (", "array(2) {". */
 	private const BLOCK_OPENER = '(?:\(|\[|\{|array\s*\(|array\(\d+\)\s*\{|object\([^)]*\)#\d+\s*\(\d+\)\s*\{)';
@@ -282,7 +286,7 @@ final class Redactor {
 
 		// 4. Nonces, credential-named pairs, stack-frame arguments.
 		$out = self::sub( '/\b((?:_wpnonce|_ajax_nonce|security|[\w-]*nonce))(\s*=\s*)[\w-]+/i', '${1}${2}[nonce]', $out );
-		$out = self::replace_values( '(?:["\'\[]+\s*pass[12]?\\\\?\s*["\'\]]+|(?<![\w-])pass[12]\b|(?<![\w-])' . self::SECRET_NAMES . '\\\\?["\'\]]*)', '[secret]', $out );
+		$out = self::replace_values( '(?:(?<!["\'\[])["\'\[]+\s*pass[12]?\\\\?\s*["\'\]]+|(?<![\w-])pass[12]\b|(?<![\w-])' . self::SECRET_NAMES . '\\\\?["\'\]]*)', '[secret]', $out );
 		$out = self::sub( '/(?<=[?&])(key|order_key)(=)[^\s&"\']+/i', '${1}${2}[secret]', $out );
 		// Every string argument in a "#N file(line): call(args)" frame (DB credentials, passwords).
 		$out = self::subcb(
@@ -302,14 +306,14 @@ final class Redactor {
 		);
 
 		// 5. Personal data keys in payload dumps (WooCommerce, Stripe, PayPal, WP users).
-		$out = self::replace_values( '(?:["\'\[]+\s*' . self::PII_STRUCTURED . '\\\\?\s*["\'\]]+|["\'\[]?\b' . self::PII_LOOSE . '\b\\\\?["\'\]]*)', '[pii]', $out );
+		$out = self::replace_values( '(?:(?<!["\'\[])["\'\[]+\s*' . self::PII_STRUCTURED . '\\\\?\s*["\'\]]+|["\'\[]?\b' . self::PII_LOOSE . '\b\\\\?["\'\]]*)', '[pii]', $out );
 
 		// 6. Card security codes, then card numbers.
 		$out = self::sub( '/\b((?:[a-z]+_)?(?:cvv2?|cvc2?|csc|security_code))(["\']?(?:\s*[:=]\s*|\s+)["\']?)\d{3,4}\b/i', '${1}${2}[card]', $out );
 		$out = self::redact_cards( $out );
 
 		// 7. Emails.
-		$out = self::sub( '/[A-Za-z0-9._%+-]+(?:@|%40|\\\\u0040)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/', '[email]', $out );
+		$out = self::sub( '/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+(?:@|%40|\\\\u0040)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/', '[email]', $out );
 
 		// 8. IPs before phones (dotted quads), then phones.
 		$out = self::redact_ips( $out );

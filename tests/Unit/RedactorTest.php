@@ -432,4 +432,38 @@ final class RedactorTest extends TestCase {
 		$this->assertSame( '{"cookies":[secret],"ok":1}', $this->redact( '{"cookies":{"zz_auth":"SYNTH_A"},"ok":1}' ) );
 		$this->assertSame( '{"cookies":[secret],"ok":1}', $this->redact( '{"cookies":[{"name":"zz_auth","value":"SYNTH_A"}],"ok":1}' ) );
 	}
+	/**
+	 * Without PCRE JIT (some hosts set pcre.jit=0), long runs of the same character class must not
+	 * make any rule quadratic (review P1: about 130 ms per 4 KB hex line before the anchors).
+	 */
+	public function test_long_runs_stay_fast_without_pcre_jit(): void {
+		$jit = ini_get( 'pcre.jit' );
+		ini_set( 'pcre.jit', '0' );
+		try {
+			$shapes = array(
+				substr( str_repeat( bin2hex( random_bytes( 64 ) ), 40 ), 0, 4096 ),
+				str_repeat( 'CookieCookie', 341 ),
+				str_repeat( '1.', 2048 ),
+				str_repeat( 'a.', 2047 ) . '@',
+				str_repeat( '"', 4096 ),
+				str_repeat( '[', 4096 ),
+			);
+			$started = microtime( true );
+			for ( $i = 0; $i < 300; $i++ ) {
+				$out = Redactor::redact( 'PHP Warning: ' . $shapes[ $i % count( $shapes ) ] );
+				$this->assertNotSame( Redactor::FAILED, $out );
+			}
+			$elapsed = microtime( true ) - $started;
+			$this->assertLessThan( 6.0, $elapsed, sprintf( '300 long lines took %.2f s without JIT', $elapsed ) );
+
+			// The anchored cookie-object pattern still matches.
+			$this->assertStringNotContainsString( 'SYNTH_', $this->redact( '[0] => WpOrg\Requests\Cookie Object ( [name] => zz [value] => SYNTH_A )' ) );
+			$this->assertStringNotContainsString( 'SYNTH_', $this->redact( 'WP_Http_Cookie Object ( [name] => zz [value] => SYNTH_A )' ) );
+			$this->assertStringNotContainsString( 'SYNTH_', $this->redact( "\\WP_Http_Cookie::__set_state(array( 'value' => 'SYNTH_A' ))" ) );
+			$this->assertSame( '[email]', $this->redact( 'jane.doe@example.com' ) );
+			$this->assertSame( '{"password":[secret]}', $this->redact( '{"password":"hunter2"}' ) );
+		} finally {
+			ini_set( 'pcre.jit', false === $jit ? '1' : (string) $jit );
+		}
+	}
 }

@@ -177,16 +177,18 @@ final class ErrorGrouper {
 				$in_pem = true;
 			}
 			// Multi-line cookie values: redaction is per line, so the block is tracked here.
+			$kept  = null !== $current && $cont < self::MAX_CONT_LINES;
 			$clean = null;
 			if ( null !== $cookie ) {
 				list( $clean, $cookie ) = Redactor::cookie_block_line( $line, $cookie );
 			}
 			if ( null === $clean ) {
 				// Not inside a block (or the block just ended): an ordinary line, maybe a new opener.
-				$clean  = trim( Redactor::redact( $line ) );
+				// The block tracking needs only the raw line; dropped lines are never redacted.
+				$clean  = $kept ? trim( Redactor::redact( $line ) ) : '';
 				$cookie = Redactor::cookie_block_open( $line );
 			}
-			if ( null === $current || $cont >= self::MAX_CONT_LINES ) {
+			if ( ! $kept ) {
 				continue;
 			}
 			++$cont;
