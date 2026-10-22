@@ -304,42 +304,38 @@ final class AccessCheck extends AbstractAbility {
 			'truncated'     => false,
 			'available'     => true,
 		);
-		if ( ! class_exists( 'WC_Data_Store' ) || ! function_exists( 'wc_get_webhook' ) ) {
+		if ( ! class_exists( 'WC_Webhook' ) ) {
 			return $result;
 		}
 
-		$wpdb->last_error = ''; // The search may be served from cache; don't inherit an earlier error.
-		try {
-			$ids = \WC_Data_Store::load( 'webhook' )->search_webhooks(
-				array(
-					'limit'   => self::SCAN_LIMIT,
-					'orderby' => 'id',
-					'order'   => 'DESC',
-				)
-			);
-		} catch ( \Throwable $e ) {
-			$result['available'] = false;
-			return $result;
-		}
-		if ( '' !== $wpdb->last_error ) {
-			// The search query failed: unknown, not "no webhooks".
+		// Read the table directly (as rest_keys() does), never through WooCommerce's object-cached
+		// webhook search or per-webhook cache: a failed read must not come back later as "none".
+		// Explicit column list: the secret column is never selected.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Live security data, deliberately uncached.
+		$hooks = $wpdb->get_results(
+			$wpdb->prepare(
+				'SELECT webhook_id, status, name, delivery_url, topic, failure_count FROM %i ORDER BY webhook_id DESC LIMIT %d',
+				$wpdb->prefix . 'wc_webhooks',
+				self::SCAN_LIMIT
+			),
+			ARRAY_A
+		);
+		if ( '' !== $wpdb->last_error || ! is_array( $hooks ) ) {
+			// The query failed: unknown, not "no webhooks".
 			$result['available'] = false;
 			return $result;
 		}
 
 		$site_host = self::bare_host( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
-		$result['truncated'] = count( (array) $ids ) > self::MAX_ROWS;
-		foreach ( (array) $ids as $id ) {
-			$hook = wc_get_webhook( (int) $id );
-			if ( ! $hook instanceof \WC_Webhook ) {
-				continue;
-			}
-			$host      = self::safe_host( (string) $hook->get_delivery_url() );
-			$malformed = null === $host && self::has_unsafe_authority( (string) $hook->get_delivery_url() );
+		$result['truncated'] = count( $hooks ) > self::MAX_ROWS;
+		foreach ( $hooks as $hook ) {
+			$url       = (string) $hook['delivery_url'];
+			$host      = self::safe_host( $url );
+			$malformed = null === $host && self::has_unsafe_authority( $url );
 
-			$topic  = (string) $hook->get_topic();
-			$status = (string) $hook->get_status();
-			$count  = (int) $hook->get_failure_count();
+			$topic  = (string) $hook['topic'];
+			$status = (string) $hook['status'];
+			$count  = (int) $hook['failure_count'];
 			$flags  = array();
 			if ( str_starts_with( $topic, 'order.' ) ) {
 				$flags[] = 'sends_order_data';
@@ -357,7 +353,7 @@ final class AccessCheck extends AbstractAbility {
 				$flags[] = 'failing';
 			}
 			$result['rows'][] = array(
-				'untrusted_text' => self::label_text( (string) $hook->get_name() ),
+				'untrusted_text' => self::label_text( (string) $hook['name'] ),
 				'topic'         => self::label_text( $topic ),
 				'delivery_host' => $host,
 				'status'        => $status,
@@ -386,12 +382,14 @@ final class AccessCheck extends AbstractAbility {
 		}
 
 		$wpdb->last_error = '';
+		// No query cache: a failed read must not be served later from the object cache as "none".
 		$user_ids = get_users(
 			array(
-				'capability' => 'edit_posts',
-				'fields'     => 'ID',
-				'number'     => 200,
-				'orderby'    => 'ID',
+				'capability'    => 'edit_posts',
+				'fields'        => 'ID',
+				'number'        => 200,
+				'orderby'       => 'ID',
+				'cache_results' => false,
 			)
 		);
 		if ( '' !== $wpdb->last_error ) {

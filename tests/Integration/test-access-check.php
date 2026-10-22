@@ -243,6 +243,27 @@ foreach ( array(
 $wpdb->suppress_errors( $suppressed );
 $clear_cache();
 
+// A failed read must not come back healthy from WooCommerce's or core's object cache (review I3):
+// the same broken read twice in one request, without flushing the cache, is unavailable both times.
+$suppressed = $wpdb->suppress_errors( true );
+foreach ( array(
+	'webhooks'              => 'wc_webhooks',
+	'application_passwords' => $wpdb->users,
+) as $list => $needle ) {
+	$method  = new ReflectionMethod( AccessCheck::class, $list );
+	$breaker = $break_query( $needle );
+	$roles   = array();
+	add_filter( 'query', $breaker );
+	$first  = 'webhooks' === $list ? $method->invoke( null ) : $method->invokeArgs( null, array( &$roles ) );
+	$second = 'webhooks' === $list ? $method->invoke( null ) : $method->invokeArgs( null, array( &$roles ) );
+	remove_filter( 'query', $breaker );
+	blzmcp_it_equals( array( false, false ), array( $first['available'] ?? null, $second['available'] ?? null ), "{$list}: a failed read is unavailable on the first and on a repeated (cacheable) call" );
+	$healthy = 'webhooks' === $list ? $method->invoke( null ) : $method->invokeArgs( null, array( &$roles ) );
+	blzmcp_it_equals( true, $healthy['available'] ?? null, "{$list}: readable again once the failure clears" );
+}
+$wpdb->suppress_errors( $suppressed );
+$clear_cache();
+
 $apps = $result['application_passwords'] ?? array();
 blzmcp_it_assert( count( $apps ) >= 1, 'application password listed' );
 $app = array();
