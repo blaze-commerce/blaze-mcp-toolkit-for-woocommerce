@@ -30,9 +30,25 @@ final class AnalyticsGuard {
 	public const MESSAGE_TOKEN = '[ANALYTICS_UNAVAILABLE]';
 
 	/**
-	 * Transient caching the "orders missing from wc_order_stats" probe.
+	 * Transient caching the "orders missing from wc_order_stats" probe: a map of
+	 * hash(requested windows) => array{reason: string, expires: int}.
 	 */
 	public const GAP_TRANSIENT = 'blzmcp_analytics_gap';
+
+	/**
+	 * The bundled package's date resolver (WooCommerce for Claude's copy has the same name).
+	 */
+	private const SERVICE_CLASS = 'WooCommerce\\CommerceAbilities\\Analytics\\AnalyticsService';
+
+	/**
+	 * Abilities without a compare input (they never read a comparison period).
+	 */
+	private const NO_COMPARE = array( 'wc-analytics/rows' );
+
+	/**
+	 * Most cached windows kept in the gap transient.
+	 */
+	private const CACHE_ENTRIES = 50;
 
 	/**
 	 * Abilities that read no store data and so are never blocked.
@@ -90,8 +106,9 @@ final class AnalyticsGuard {
 		}
 
 		$original                 = $args['execute_callback'];
-		$args['execute_callback'] = static function ( ...$call_args ) use ( $original ) {
-			$error = self::unavailable_error();
+		$args['execute_callback'] = static function ( ...$call_args ) use ( $original, $name ) {
+			$input = isset( $call_args[0] ) && is_array( $call_args[0] ) ? $call_args[0] : array();
+			$error = self::unavailable_error( $input, $name );
 			if ( null !== $error ) {
 				return $error;
 			}
@@ -103,9 +120,12 @@ final class AnalyticsGuard {
 
 	/**
 	 * The error to return instead of incomplete figures, or null when analytics data is fine.
+	 *
+	 * @param array<string, mixed> $input   The analytics call's input (period, date_start, date_end, compare).
+	 * @param string               $ability Ability name, when known.
 	 */
-	public static function unavailable_error(): ?\WP_Error {
-		$reason = self::unavailable_reason();
+	public static function unavailable_error( array $input = array(), string $ability = '' ): ?\WP_Error {
+		$reason = self::unavailable_reason( $input, $ability );
 		if ( null === $reason ) {
 			return null;
 		}
@@ -133,16 +153,18 @@ final class AnalyticsGuard {
 			case 'import_not_run':
 				return __( 'WooCommerce Analytics hasn\'t finished importing your orders, so these figures would be incomplete. Wait for the import to finish (or start it under Analytics > Settings > Import historical data), then try again.', 'blaze-mcp-toolkit-for-woocommerce' );
 			default:
-				return __( 'Recent orders haven\'t synced to WooCommerce Analytics, so these figures would be incomplete. WooCommerce\'s background tasks may be stalled: check WooCommerce > Status > Scheduled Actions for pending wc-admin jobs, then try again.', 'blaze-mcp-toolkit-for-woocommerce' );
+				return __( 'The requested dates include orders that aren\'t in WooCommerce Analytics yet, so these figures would be incomplete. Import them under WooCommerce > Analytics > Settings > Import historical data (if recent orders are missing, also check WooCommerce > Status > Scheduled Actions for stalled wc-admin jobs), or ask about a more recent period.', 'blaze-mcp-toolkit-for-woocommerce' );
 		}
 	}
 
 	/**
-	 * Why analytics data is unreliable right now, or null when it is fine.
+	 * Why analytics data for the requested dates is unreliable right now, or null when it is fine.
 	 *
+	 * @param array<string, mixed> $input   The analytics call's input; empty uses the resolver's default period.
+	 * @param string               $ability Ability name, when known (decides whether compare applies).
 	 * @return string|null One of analytics_disabled, import_in_progress, import_not_run, orders_not_imported.
 	 */
-	public static function unavailable_reason(): ?string {
+	public static function unavailable_reason( array $input = array(), string $ability = '' ): ?string {
 		if ( 'yes' !== get_option( 'woocommerce_analytics_enabled', 'yes' ) ) {
 			return 'analytics_disabled';
 		}
@@ -157,7 +179,81 @@ final class AnalyticsGuard {
 			}
 		}
 
-		return self::sync_gap();
+		return self::sync_gap( self::windows( $input, $ability ) );
+	}
+
+	/**
+	 * The windows an analytics call reads, as GMT [from, to) Unix timestamps.
+	 *
+	 * Resolved with the bundled package's own resolver, so the guard checks the dates the tool reads:
+	 * the requested period and, when compare is on (the tools' default), the previous period of the
+	 * same length. Falls back to the last 30 days when the resolver is unavailable or fails.
+	 *
+	 * @param array<string, mixed> $input   The analytics call's input.
+	 * @param string               $ability Ability name, when known.
+	 * @return array<int, array{key: string, from: int, to: int}>
+	 */
+	public static function windows( array $input = array(), string $ability = '' ): array {
+		$now      = time();
+		$fallback = array(
+			array(
+				'key'  => 'fallback_' . self::WINDOW_DAYS,
+				'from' => $now - self::WINDOW_DAYS * DAY_IN_SECONDS,
+				'to'   => $now,
+			),
+		);
+
+		$service = self::SERVICE_CLASS;
+		if ( ! class_exists( $service ) || ! method_exists( $service, 'resolve_dates' ) ) {
+			return $fallback;
+		}
+
+		try {
+			$period = isset( $input['period'] ) && is_string( $input['period'] ) ? $input['period'] : '';
+			$dates  = $service::resolve_dates( $period, $input['date_start'] ?? null, $input['date_end'] ?? null );
+			$ranges = array( array( $dates['start'] ?? '', $dates['end'] ?? '' ) );
+
+			$compare = ! in_array( $ability, self::NO_COMPARE, true )
+				&& ( array_key_exists( 'compare', $input ) ? rest_sanitize_boolean( $input['compare'] ) : true );
+			if ( $compare ) {
+				if ( ! method_exists( $service, 'get_previous_period' ) ) {
+					return $fallback;
+				}
+				$previous = $service::get_previous_period( $ranges[0][0], $ranges[0][1] );
+				$ranges[] = array( $previous['start'] ?? '', $previous['end'] ?? '' );
+			}
+
+			$windows = array();
+			foreach ( $ranges as $range ) {
+				$from = self::local_day_to_gmt( (string) $range[0], '00:00:00' );
+				$to   = self::local_day_to_gmt( (string) $range[1], '23:59:59' );
+				if ( null === $from || null === $to ) {
+					return $fallback;
+				}
+				$windows[] = array(
+					'key'  => $range[0] . '..' . $range[1],
+					'from' => $from,
+					'to'   => $to + 1,
+				);
+			}
+			return $windows;
+		} catch ( \Throwable $e ) {
+			return $fallback;
+		}
+	}
+
+	/**
+	 * A site-local Y-m-d day plus a time, as a GMT Unix timestamp.
+	 *
+	 * @param string $day  Y-m-d in the site's timezone.
+	 * @param string $time H:i:s.
+	 */
+	private static function local_day_to_gmt( string $day, string $time ): ?int {
+		if ( 1 !== preg_match( '/^\d{4}-\d{2}-\d{2}$/', $day ) ) {
+			return null;
+		}
+		$date = date_create_immutable_from_format( 'Y-m-d H:i:s', $day . ' ' . $time, wp_timezone() );
+		return false === $date ? null : $date->getTimestamp();
 	}
 
 	/**
@@ -168,30 +264,32 @@ final class AnalyticsGuard {
 	}
 
 	/**
-	 * Probe for orders that should be in wc_order_stats but are not.
+	 * Probe for orders that should be in wc_order_stats but are not, inside the requested windows.
 	 *
-	 * Only looks at a bounded, recent window: orders created in the last 30 days, at least an hour
-	 * ago (new orders sync asynchronously), and not before the oldest order Analytics has synced.
-	 * Older orders are outside the historical import's window by design and are ignored. Uses the
-	 * type/status/date indexes (wc_orders.type_status_date or posts.type_status_date) with LIMIT 1.
-	 * Cached: "no gap" for 6 hours, a gap for 15 minutes; cleared when import batches run.
+	 * Each window is checked from its start up to its end or an hour ago, whichever is earlier (new
+	 * orders sync asynchronously). There is no clamp to the oldest synced order: a store that imported
+	 * only recent history still works for queries inside the imported range, and a query reaching
+	 * into un-imported dates is refused. Uses the type/status/date indexes with LIMIT 1. Cached per
+	 * set of windows: "no gap" for 6 hours, a gap for 15 minutes; cleared when import batches run.
 	 *
+	 * @param array<int, array{key: string, from: int, to: int}>|null $windows Windows to check; null for the default period.
 	 * @return string|null import_not_run, orders_not_imported, or null.
 	 */
-	public static function sync_gap(): ?string {
-		$cached = get_transient( self::GAP_TRANSIENT );
-		if ( false !== $cached ) {
-			return 'none' === $cached ? null : (string) $cached;
+	public static function sync_gap( ?array $windows = null ): ?string {
+		$windows = $windows ?? self::windows();
+		$hash    = md5( implode( '|', array_column( $windows, 'key' ) ) );
+		$now     = time();
+
+		$cache = get_transient( self::GAP_TRANSIENT );
+		$cache = is_array( $cache ) ? $cache : array();
+		if ( isset( $cache[ $hash ]['reason'], $cache[ $hash ]['expires'] ) && $cache[ $hash ]['expires'] > $now ) {
+			return 'none' === $cache[ $hash ]['reason'] ? null : (string) $cache[ $hash ]['reason'];
 		}
 
 		global $wpdb;
 
-		$now   = time();
-		$upper = $now - self::SYNC_GRACE_SECONDS;
-		$lower = $now - self::WINDOW_DAYS * DAY_IN_SECONDS;
-
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- cached in a transient.
-		// Oldest synced order. date_created is indexed (site-local time); date_created_gmt is not.
+		// Oldest synced order: only used to tell "import never ran" from "some orders missing".
 		$oldest_local = $wpdb->get_var( $wpdb->prepare( 'SELECT MIN(date_created) FROM %i', $wpdb->prefix . 'wc_order_stats' ) );
 		$query_failed = '' !== $wpdb->last_error;
 		// phpcs:enable
@@ -199,18 +297,61 @@ final class AnalyticsGuard {
 		if ( $query_failed ) {
 			// wc_order_stats unreadable: the figures can't be trusted.
 			$reason = 'orders_not_imported';
-		} elseif ( null === $oldest_local ) {
-			// Nothing synced at all: only a problem if there are recent orders to report on.
-			$reason = self::recent_order_missing( $lower, $upper ) ? 'import_not_run' : null;
 		} else {
-			$oldest = strtotime( get_gmt_from_date( (string) $oldest_local ) . ' UTC' );
-			$lower  = max( $lower, (int) $oldest );
-			$reason = $lower < $upper && self::recent_order_missing( $lower, $upper ) ? 'orders_not_imported' : null;
+			$reason = null;
+			$upper  = $now - self::SYNC_GRACE_SECONDS;
+			foreach ( $windows as $window ) {
+				$to = min( (int) $window['to'], $upper );
+				if ( (int) $window['from'] < $to && self::recent_order_missing( (int) $window['from'], $to ) ) {
+					$reason = null === $oldest_local ? 'import_not_run' : 'orders_not_imported';
+					break;
+				}
+			}
 		}
 
-		set_transient( self::GAP_TRANSIENT, null === $reason ? 'none' : $reason, null === $reason ? 6 * HOUR_IN_SECONDS : 15 * MINUTE_IN_SECONDS );
+		self::cache_result( $cache, $hash, $reason, null === $reason ? 6 * HOUR_IN_SECONDS : 15 * MINUTE_IN_SECONDS );
 
 		return $reason;
+	}
+
+	/**
+	 * Store one probe result in the gap map, dropping expired and oldest entries.
+	 *
+	 * @param array<string, array{reason: string, expires: int}> $cache  Current map.
+	 * @param string                                             $hash   Windows hash.
+	 * @param string|null                                        $reason Reason, null for none.
+	 * @param int                                                $ttl    Seconds.
+	 */
+	private static function cache_result( array $cache, string $hash, ?string $reason, int $ttl ): void {
+		$now   = time();
+		$cache = array_filter(
+			$cache,
+			static function ( $entry ) use ( $now ): bool {
+				return is_array( $entry ) && isset( $entry['expires'] ) && $entry['expires'] > $now;
+			}
+		);
+		unset( $cache[ $hash ] );
+		$cache[ $hash ] = array(
+			'reason'  => null === $reason ? 'none' : $reason,
+			'expires' => $now + $ttl,
+		);
+		if ( count( $cache ) > self::CACHE_ENTRIES ) {
+			$cache = array_slice( $cache, -self::CACHE_ENTRIES, null, true );
+		}
+		set_transient( self::GAP_TRANSIENT, $cache, 6 * HOUR_IN_SECONDS );
+	}
+
+	/**
+	 * The cached probe result for an analytics call's windows (for tests and diagnostics).
+	 *
+	 * @param array<string, mixed> $input   The analytics call's input.
+	 * @param string               $ability Ability name, when known.
+	 * @return string|null 'none', a reason, or null when not cached.
+	 */
+	public static function cached_reason( array $input = array(), string $ability = '' ): ?string {
+		$cache = get_transient( self::GAP_TRANSIENT );
+		$hash  = md5( implode( '|', array_column( self::windows( $input, $ability ), 'key' ) ) );
+		return is_array( $cache ) && isset( $cache[ $hash ]['reason'] ) ? (string) $cache[ $hash ]['reason'] : null;
 	}
 
 	/**

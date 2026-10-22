@@ -233,7 +233,8 @@ final class SetupChecks {
 	 * @return array{id: string, status: string, label: string, fix: string}
 	 */
 	private static function analytics_import(): array {
-		$reason = AnalyticsGuard::unavailable_reason();
+		// The last 30 days, the analytics tools' default period.
+		$reason = AnalyticsGuard::unavailable_reason( array( 'compare' => false ) );
 		if ( null === $reason ) {
 			return self::result( 'analytics_import', 'pass', __( 'WooCommerce Analytics is on and up to date', 'blaze-mcp-toolkit-for-woocommerce' ) );
 		}

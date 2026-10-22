@@ -56,6 +56,33 @@ $step_for = static function ( $result, string $tool, ?string $subject = null ) {
 
 $profile = 'blaze-mcp-toolkit/store-profile';
 
+// Requested-period analytics check (audit F02), in both modes: a paid order 5 days ago missing from
+// wc_order_stats stops a last_7_days review but not one for yesterday.
+$wf_mode    = Commerce::is_standing_aside() ? 'standaside' : 'bundled';
+$wf_product = new WC_Product_Simple();
+$wf_product->set_name( 'Blzmcp workflow gap product' );
+$wf_product->set_regular_price( '10' );
+$wf_product->save();
+$wf_order = wc_create_order();
+$wf_order->add_product( $wf_product, 1 );
+$wf_order->calculate_totals();
+$wf_order->payment_complete();
+$wf_order->set_date_created( time() - 5 * DAY_IN_SECONDS );
+$wf_order->save();
+$wpdb->delete( $wpdb->prefix . 'wc_order_stats', array( 'order_id' => $wf_order->get_id() ) );
+\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
+$wf_weekly = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' );
+$wf_week   = null === $wf_weekly ? null : $wf_weekly->execute( array( 'period' => 'last_7_days' ) );
+$wf_text   = is_array( $wf_week ) ? $wf_week['instructions'] : '';
+blzmcp_it_assert( str_starts_with( $wf_text, '[ANALYTICS_UNAVAILABLE] ' ) && str_contains( substr( $wf_text, 0, 800 ), 'STOP' ), "{$wf_mode}: weekly review for last_7_days stops on a missing 5-day-old order" );
+blzmcp_it_assert( array() === array_filter( $tools_of( $wf_week ), static fn( $t ) => str_starts_with( (string) $t, 'wc-analytics/' ) ), "{$wf_mode}: no wc-analytics steps while that week is incomplete" );
+$wf_day  = null === $wf_weekly ? null : $wf_weekly->execute( array( 'period' => 'yesterday' ) );
+$wf_text = is_array( $wf_day ) ? $wf_day['instructions'] : '';
+blzmcp_it_assert( ! str_starts_with( $wf_text, '[ANALYTICS_UNAVAILABLE]' ), "{$wf_mode}: weekly review for yesterday (and the day before) is not stopped by it" );
+$wf_order->delete( true );
+$wf_product->delete( true );
+\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
+
 if ( Commerce::is_standing_aside() ) {
 	echo "Mode: stand-aside\n";
 	$settings = Settings::get();

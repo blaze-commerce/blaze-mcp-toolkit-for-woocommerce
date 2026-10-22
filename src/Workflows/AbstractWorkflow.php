@@ -163,8 +163,14 @@ abstract class AbstractWorkflow extends AbstractAbility {
 		$period = isset( $input['period'] ) && in_array( $input['period'], self::PERIODS, true ) ? $input['period'] : static::DEFAULT_PERIOD;
 
 		// Checked here, in both modes: while standing aside the analytics tools are WooCommerce for
-		// Claude's, which carry no such guard. Read-only and cached; never touches those tools.
-		$analytics_reason = AnalyticsGuard::unavailable_reason();
+		// Claude's, which carry no such guard. Checks the workflow's own period and the previous one
+		// (every plan compares). Read-only and cached; never touches those tools.
+		$analytics_reason = AnalyticsGuard::unavailable_reason(
+			array(
+				'period'  => $period,
+				'compare' => true,
+			)
+		);
 
 		$steps       = array();
 		$missing     = array();

@@ -243,7 +243,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $incomplete ), 'analytics_import_incomplete_is_reported: recent unsynced order returns blzmcp_analytics_unavailable' );
 	blzmcp_it_equals( 'orders_not_imported', is_wp_error( $incomplete ) ? ( $incomplete->get_error_data()['reason'] ?? null ) : null, 'recent gap: reason orders_not_imported' );
 	blzmcp_it_assert( is_wp_error( $incomplete ) && str_contains( $incomplete->get_error_message(), 'Scheduled Actions' ), 'recent gap: message points to Scheduled Actions' );
-	blzmcp_it_equals( 'orders_not_imported', get_transient( AnalyticsGuard::GAP_TRANSIENT ), 'recent gap: result cached' );
+	blzmcp_it_equals( 'orders_not_imported', AnalyticsGuard::cached_reason( $totals_input, 'wc-analytics/totals' ), 'recent gap: result cached for the requested window' );
 	blzmcp_it_equals( 999, has_action( 'wc-admin_import_batch_orders', array( AnalyticsGuard::class, 'clear_cache' ) ), 'import batch hook clears the cached probe' );
 	blzmcp_it_equals( 999, has_action( 'wc-admin_import_batch_init_orders', array( AnalyticsGuard::class, 'clear_cache' ) ), 'import batch init hook clears the cached probe' );
 	update_option( 'woocommerce_analytics_enabled', 'yes' === get_option( 'woocommerce_analytics_enabled' ) ? 'no' : 'yes' );
@@ -267,8 +267,13 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$recent->save();
 	$wpdb->delete( $stats_table, array( 'order_id' => $order_ids[0] ) );
 	AnalyticsGuard::clear_cache();
-	blzmcp_it_equals( null, AnalyticsGuard::sync_gap(), 'order inside the 1 h sync grace is not a gap' );
-	blzmcp_it_equals( 'none', get_transient( AnalyticsGuard::GAP_TRANSIENT ), 'no-gap result cached' );
+	// (A 7-day window: the 20-day-old partial-history order above is still missing on purpose.)
+	$week_window = array(
+		'period'  => 'last_7_days',
+		'compare' => false,
+	);
+	blzmcp_it_equals( null, AnalyticsGuard::sync_gap( AnalyticsGuard::windows( $week_window ) ), 'order inside the 1 h sync grace is not a gap' );
+	blzmcp_it_equals( 'none', AnalyticsGuard::cached_reason( $week_window ), 'no-gap result cached' );
 	AnalyticsGuard::clear_cache();
 
 	// Historical import queued: reported as in progress.
@@ -282,6 +287,95 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$clear_upstream_cache();
 	$again = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
 	blzmcp_it_assert( is_array( $again ), 'after import: totals return numbers again (' . $error_code( $again ) . ')' );
+
+	// Requested-window checks (audit F02), with HPOS on and off. The guard checks the dates the
+	// tool reads (period, plus the previous period when compare is on), not the oldest synced row.
+	$rows = wp_get_ability( 'wc-analytics/rows' );
+	$hpos_modes = array( 'yes', 'no' );
+	foreach ( $hpos_modes as $hpos_mode ) {
+		$force_mode = static function () use ( $hpos_mode ) {
+			return $hpos_mode;
+		};
+		add_filter( 'pre_option_woocommerce_custom_orders_table_enabled', $force_mode );
+		$label = 'yes' === $hpos_mode ? 'HPOS on' : 'HPOS off';
+		blzmcp_it_equals( 'yes' === $hpos_mode, \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled(), "{$label}: order storage mode forced" );
+
+		// A paid order created $days ago that never reached wc_order_stats.
+		$make_missing = static function ( int $days ) use ( $product, $wpdb, $stats_table ): int {
+			$o = wc_create_order();
+			$o->add_product( $product, 1 );
+			$o->calculate_totals();
+			$o->payment_complete();
+			$o->set_date_created( time() - $days * DAY_IN_SECONDS );
+			$o->save();
+			$wpdb->delete( $stats_table, array( 'order_id' => $o->get_id() ) );
+			return (int) $o->get_id();
+		};
+		$resolve = static function ( int $id ) use ( $clear_upstream_cache ): void {
+			\Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler::import( $id );
+			AnalyticsGuard::clear_cache();
+			$clear_upstream_cache();
+		};
+		$week_compare = array(
+			'subject' => 'revenue',
+			'period'  => 'last_7_days',
+			'compare' => true,
+		);
+		$week_only    = array( 'compare' => false ) + $week_compare;
+		$reason_of    = static function ( $value ) {
+			return is_wp_error( $value ) ? ( $value->get_error_data()['reason'] ?? null ) : null;
+		};
+		AnalyticsGuard::clear_cache();
+		$clear_upstream_cache();
+		$baseline = $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null;
+		blzmcp_it_assert( is_array( $baseline ), "{$label}: complete week with compare returns figures (" . $error_code( $baseline ) . ')' );
+
+		// The audit case: a paid order 5 days ago missing, last_7_days with compare.
+		$five = $make_missing( 5 );
+		AnalyticsGuard::clear_cache();
+		$blocked = $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null;
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $blocked ), "{$label}: missing 5-day-old order blocks last_7_days + compare" );
+		blzmcp_it_assert( is_wp_error( $blocked ) && str_contains( $blocked->get_error_message(), 'requested dates include orders' ) && str_contains( $blocked->get_error_message(), 'Import historical data' ) && str_contains( $blocked->get_error_message(), 'more recent period' ), "{$label}: message names the requested dates, the import and a more recent period" );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( $week_only ) : null ), "{$label}: missing 5-day-old order blocks last_7_days without compare too" );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $rows instanceof WP_Ability ? $rows->execute( array( 'entity' => 'orders', 'period' => 'last_7_days' ) ) : null ), "{$label}: rows for last_7_days is blocked too" );
+		blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( array( 'subject' => 'revenue', 'period' => 'yesterday', 'compare' => true ) ) : null ), "{$label}: yesterday + compare (does not reach 5 days back) still returns figures" );
+		$resolve( $five );
+
+		// Comparison window only: a paid order 10 days ago (inside the previous 7 days) missing.
+		$ten = $make_missing( 10 );
+		AnalyticsGuard::clear_cache();
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), "{$label}: gap only in the comparison period blocks last_7_days + compare" );
+		blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( $week_only ) : null ), "{$label}: the same gap does not block last_7_days without compare" );
+		blzmcp_it_assert( is_array( $rows instanceof WP_Ability ? $rows->execute( array( 'entity' => 'orders', 'period' => 'last_7_days' ) ) : null ), "{$label}: rows (no comparison period) for last_7_days is not blocked by it" );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( array( 'subject' => 'revenue', 'date_start' => wp_date( 'Y-m-d', time() - 12 * DAY_IN_SECONDS ), 'date_end' => wp_date( 'Y-m-d', time() - 8 * DAY_IN_SECONDS ), 'compare' => false ) ) : null ), "{$label}: custom dates covering the gap are blocked" );
+		$resolve( $ten );
+
+		// Complete recent window, missing order 20 days back: last_7_days (+compare) works.
+		$twenty = $make_missing( 20 );
+		AnalyticsGuard::clear_cache();
+		blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), "{$label}: missing 20-day-old order does not block last_7_days + compare" );
+		blzmcp_it_equals( 'none', AnalyticsGuard::cached_reason( $week_compare, 'wc-analytics/totals' ), "{$label}: no-gap result cached for that window" );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( array( 'subject' => 'revenue', 'period' => 'last_30_days', 'compare' => false ) ) : null ), "{$label}: the same order blocks last_30_days" );
+		blzmcp_it_equals( 'orders_not_imported', AnalyticsGuard::cached_reason( array( 'period' => 'last_30_days', 'compare' => false ), 'wc-analytics/totals' ), "{$label}: gap cached for last_30_days only" );
+		blzmcp_it_equals( 'none', AnalyticsGuard::cached_reason( $week_compare, 'wc-analytics/totals' ), "{$label}: last_7_days cache entry unaffected" );
+		$resolve( $twenty );
+
+		foreach ( array( $five, $ten, $twenty ) as $id ) {
+			$o = wc_get_order( $id );
+			if ( $o ) {
+				$o->delete( true );
+			}
+		}
+		remove_filter( 'pre_option_woocommerce_custom_orders_table_enabled', $force_mode );
+	}
+	AnalyticsGuard::clear_cache();
+
+	// Resolver fallback: unknown period resolves to the package default (last 30 days).
+	$default_windows = AnalyticsGuard::windows( array( 'compare' => false ) );
+	blzmcp_it_equals( 1, count( $default_windows ), 'no period, compare off: one window' );
+	blzmcp_it_assert( abs( ( time() - (int) $default_windows[0]['from'] ) - 30 * DAY_IN_SECONDS ) <= DAY_IN_SECONDS, 'no period: the resolver default (last 30 days)' );
+	blzmcp_it_equals( 2, count( AnalyticsGuard::windows( array( 'period' => 'last_7_days' ) ) ), 'compare defaults to on, as in the tools' );
+	blzmcp_it_equals( 1, count( AnalyticsGuard::windows( array( 'period' => 'last_7_days' ), 'wc-analytics/rows' ) ), 'rows has no comparison window' );
 
 	if ( null === $before ) {
 		delete_option( 'woocommerce_analytics_enabled' );
