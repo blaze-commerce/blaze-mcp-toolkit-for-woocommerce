@@ -131,6 +131,7 @@ final class ErrorGrouper {
 		$current = null; // Index into $entries, or null when the last entry was skipped/none.
 		$cont    = 0;
 		$in_pem  = false;
+		$cookie  = null; // Inside a multi-line Cookie / Set-Cookie value: Redactor::cookie_block_* state.
 
 		foreach ( $lines as $line ) {
 			if ( ! is_string( $line ) || '' === trim( $line ) ) {
@@ -146,9 +147,11 @@ final class ErrorGrouper {
 				$current = null;
 				$cont    = 0;
 				$in_pem  = false;
+				$cookie  = null;
 				if ( null === $head['severity'] || $head['ts'] < $since_ts ) {
 					continue;
 				}
+				$cookie = Redactor::cookie_block_open( $head['body'] );
 				$in_pem = self::opens_pem( $head['body'] );
 				$body   = Redactor::redact( $head['body'] );
 				$body = (string) preg_replace( self::PHP_LEVEL, '', $body );
@@ -173,11 +176,18 @@ final class ErrorGrouper {
 			if ( self::opens_pem( $line ) ) {
 				$in_pem = true;
 			}
+			// Multi-line cookie values: redaction is per line, so the block is tracked here.
+			if ( null !== $cookie ) {
+				list( $clean, $cookie ) = Redactor::cookie_block_line( $line, $cookie );
+			} else {
+				$clean  = trim( Redactor::redact( $line ) );
+				$cookie = Redactor::cookie_block_open( $line );
+			}
 			if ( null === $current || $cont >= self::MAX_CONT_LINES ) {
 				continue;
 			}
 			++$cont;
-			$entries[ $current ]['text'] .= ' ' . trim( Redactor::redact( $line ) );
+			$entries[ $current ]['text'] .= ' ' . $clean;
 			// Bound memory: component scanning never needs more than a few KB.
 			if ( strlen( $entries[ $current ]['text'] ) > 20000 ) {
 				$entries[ $current ]['text'] = substr( $entries[ $current ]['text'], 0, 20000 );

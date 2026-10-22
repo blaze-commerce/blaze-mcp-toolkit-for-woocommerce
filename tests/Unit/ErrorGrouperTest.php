@@ -242,4 +242,103 @@ final class ErrorGrouperTest extends TestCase {
 		$this->assertCount( 50, $kept );
 		$this->assertSame( 2, $sev['fatal'] ?? 0 );
 	}
+	/**
+	 * Multi-line cookie arrays in one log entry (review I2).
+	 *
+	 * @return array<string,array{0:array<int,string>}>
+	 */
+	public static function multiline_cookie_dumps(): array {
+		$h = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Warning: API response ';
+		return array(
+			'print_r'      => array(
+				array(
+					$h . 'Array',
+					'(',
+					'    [headers] => Array',
+					'        (',
+					'            [set-cookie] => Array',
+					'                (',
+					'                    [0] => zz_auth=SYNTH_A; path=/; HttpOnly',
+					'                    [1] => other=SYNTH_B',
+					'                )',
+					'',
+					'            [content-type] => text/html',
+					'        )',
+					')',
+				),
+			),
+			'var_export'   => array(
+				array(
+					$h . 'array (',
+					"  'headers' => ",
+					'  array (',
+					"    'Set-Cookie' => ",
+					'    array (',
+					"      0 => 'zz_auth=SYNTH_A; path=/',",
+					"      1 => 'other=SYNTH_B',",
+					'    ),',
+					"    'content-type' => 'text/html',",
+					'  ),',
+					')',
+				),
+			),
+			'pretty json'  => array(
+				array(
+					$h . '{',
+					'    "headers": {',
+					'        "set-cookie": [',
+					'            "zz_auth=SYNTH_A; path=/; HttpOnly",',
+					'            "other=SYNTH_B"',
+					'        ],',
+					'        "content-type": "text/html"',
+					'    }',
+					'}',
+				),
+			),
+			'json object'  => array(
+				array(
+					$h . '{',
+					'    "cookies": 1,',
+					'    "Cookie": {',
+					'        "zz_auth": "SYNTH_A",',
+					'        "other": "SYNTH_B"',
+					'    },',
+					'    "content-type": "text/html"',
+					'}',
+				),
+			),
+			'server dump'  => array(
+				array(
+					$h . 'Array',
+					'(',
+					'    [HTTP_COOKIE] => zz_auth=SYNTH_A; other=SYNTH_B',
+					'    [HTTP_HOST] => example.com',
+					')',
+				),
+			),
+			'unclosed'     => array(
+				array(
+					$h . '"set-cookie": [',
+					'    "zz_auth=SYNTH_A",',
+					'    "other=SYNTH_B"',
+				),
+			),
+		);
+	}
+
+	/**
+	 * @dataProvider multiline_cookie_dumps
+	 * @param array<int,string> $lines Lines.
+	 */
+	public function test_multiline_cookie_values_are_redacted( array $lines ): void {
+		$groups = ErrorGrouper::group_all( $lines, 0, 'wp_debug' );
+		$this->assertCount( 1, $groups );
+		$this->assertStringNotContainsString( 'SYNTH_', $groups[0]['message'] );
+		$this->assertStringContainsString( '[secret]', $groups[0]['message'] );
+	}
+
+	public function test_multiline_cookie_block_keeps_following_fields(): void {
+		$groups = ErrorGrouper::group_all( self::multiline_cookie_dumps()['print_r'][0], 0, 'wp_debug' );
+		$this->assertStringContainsString( '[content-type] => text/html', $groups[0]['message'] );
+	}
 }

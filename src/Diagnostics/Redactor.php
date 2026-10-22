@@ -59,6 +59,67 @@ final class Redactor {
 	}
 
 	/**
+	 * Whether a raw log line opens a multi-line Cookie / Set-Cookie value (an array or object
+	 * dumped over several lines by print_r, var_export or pretty JSON).
+	 *
+	 * Returns null when it does not, 0 when the key's value starts on the next line ("=> Array",
+	 * "=>" at the end of a var_export line), or the open bracket depth after this line ("=> [",
+	 * "\": [", "\": {", "=> array (").
+	 *
+	 * @param string $line Raw line.
+	 */
+	public static function cookie_block_open( string $line ): ?int {
+		$m = array();
+		if ( 1 !== preg_match( '/' . self::COOKIE_KEY . '\s*(?:=>|=(?!>)|:(?!:))\s*(.*)$/i', $line, $m ) ) {
+			return null;
+		}
+		$rest = trim( $m[1] );
+		if ( '' === $rest || 1 === preg_match( '/^array$/i', $rest ) ) {
+			return 0;
+		}
+		if ( 1 === preg_match( '/^(?:array\s*\(|\[|\{)/i', $rest ) ) {
+			$depth = self::bracket_delta( $rest );
+			return $depth > 0 ? $depth : null;
+		}
+		return null;
+	}
+
+	/**
+	 * Redact one continuation line inside a multi-line cookie value and track its brackets.
+	 *
+	 * Fail closed: every line inside the block becomes "[secret]" except lines made only of
+	 * closing brackets; the block ends when its brackets balance (or with the log entry).
+	 *
+	 * @param string $line  Raw line.
+	 * @param int    $depth State from cookie_block_open() or a previous call (0 = value pending).
+	 * @return array{0:string,1:?int} Redacted line, and the new state (null once the block has ended).
+	 */
+	public static function cookie_block_line( string $line, int $depth ): array {
+		$trim = trim( $line );
+		if ( 0 === $depth ) {
+			if ( 1 === preg_match( '/^(?:array\s*\(|\(|\[|\{)/i', $trim ) ) {
+				$depth = self::bracket_delta( $trim );
+				return array( $depth > 0 ? $trim : '[secret]', $depth > 0 ? $depth : null );
+			}
+			// The value itself sits on this line.
+			return array( '[secret]', null );
+		}
+		$depth += self::bracket_delta( $trim );
+		$kept   = 1 === preg_match( '/^[)\]}]+[,;]?$/', $trim ) ? $trim : '[secret]';
+		return array( $kept, $depth > 0 ? $depth : null );
+	}
+
+	/**
+	 * Open minus close brackets, ignoring quoted strings.
+	 *
+	 * @param string $text Text.
+	 */
+	private static function bracket_delta( string $text ): int {
+		$bare = (string) preg_replace( '/"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'/', '', $text );
+		return preg_match_all( '/[(\[{]/', $bare ) - preg_match_all( '/[)\]}]/', $bare );
+	}
+
+	/**
 	 * Preg replace that throws on a PCRE error instead of returning null.
 	 *
 	 * @param string|array<int,string> $pattern     Pattern(s).
