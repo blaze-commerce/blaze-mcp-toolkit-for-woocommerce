@@ -30,7 +30,10 @@ final class Redactor {
 	private const PII_STRUCTURED = '(?:billing_|shipping_|customer_)?(?:name|state)';
 
 	/** A Cookie / Set-Cookie key, optionally $_SERVER-style (HTTP_COOKIE), quoted or bracketed. */
-	private const COOKIE_KEY = '(?:\\\\?["\']|\[)?(?<![\w-])(?:HTTP_)?(?:Set[-_]Cookie|Cookie)(?![\w-])(?:\\\\?["\']\]?|\])?';
+	private const COOKIE_KEY = '(?:(?:\\\\?["\']|\[)?(?<![\w-])(?:HTTP_)?(?:Set[-_]Cookie|Cookie)(?![\w-])(?:\\\\?["\']\]?|\])?|(?:\\\\?["\']|\[)(?<![\w-])cookies(?![\w-])(?:\\\\?["\']\]?|\]))';
+
+	/** A dumped cookie object: WP_Http_Cookie, WpOrg\Requests\Cookie, Requests_Cookie (print_r, var_dump, var_export). */
+	private const COOKIE_OBJECT = '(?:[\w\\\\]*Cookie\s+Object\b|object\(\\\\?[\w\\\\]*Cookie\)|[\w\\\\]*Cookie::__set_state)';
 
 	/** A bare structural token that opens a dumped array or object: "(", "[", "{", "array (", "array(2) {". */
 	private const BLOCK_OPENER = '(?:\(|\[|\{|array\s*\(|array\(\d+\)\s*\{|object\([^)]*\)#\d+\s*\(\d+\)\s*\{)';
@@ -77,12 +80,19 @@ final class Redactor {
 	 * @return array{indent:int,opened:bool}|null
 	 */
 	public static function cookie_block_open( string $line, bool $is_head = false ): ?array {
-		$m = array();
+		$m      = array();
+		$indent = $is_head ? 0 : strlen( $line ) - strlen( ltrim( $line ) );
+		// A cookie object dumped over several lines: "[0] => WP_Http_Cookie Object" then "(".
+		if ( 1 === preg_match( '/(?:^|=>|[:=])\s*(' . self::COOKIE_OBJECT . ')(?:\s*\(array\(|#\d+\s*\(\d+\)\s*\{)?\s*$/i', trim( $line ), $m ) ) {
+			return array(
+				'indent' => $indent,
+				'opened' => 1 !== preg_match( '/Object$/i', $m[1] ),
+			);
+		}
 		if ( 1 !== preg_match( '/' . self::COOKIE_KEY . '\s*(?:=>|=(?!>)|:(?!:))\s*(.*)$/i', $line, $m ) ) {
 			return null;
 		}
-		$rest   = trim( $m[1] );
-		$indent = $is_head ? 0 : strlen( $line ) - strlen( ltrim( $line ) );
+		$rest = trim( $m[1] );
 		if ( '' === $rest || 1 === preg_match( '/^(?:Array|[\w\\\\]*Cookie\s+Object)$/i', $rest ) ) {
 			// The opening bracket (or a scalar value) is on the next line.
 			return array(
@@ -260,6 +270,10 @@ final class Redactor {
 			'${1}[secret]',
 			$out
 		);
+		// The value of a dumped cookie object (WP_Http_Cookie, Requests' Cookie) is the cookie itself.
+		if ( 1 === preg_match( '/' . self::COOKIE_OBJECT . '/i', $out ) ) {
+			$out = self::replace_values( '(?:\[\s*["\']?|\\\\?["\'])value(?::\w+)?(?:\\\\?["\'])?\s*\]?', '[secret]', $out );
+		}
 		$out = self::sub(
 			'/\b(?:wordpress_[\w-]*|wp_woocommerce_session_[\w-]*|woocommerce_(?:items_in_cart|cart_hash|recently_viewed)|wp-settings(?:-time)?-\d+|PHPSESSID|JSESSIONID|ASP\.NET_SessionId|connect\.sid|session_?id|sess_?id|[\w-]*_session)=[^;\s"\',]+/i',
 			'[secret]',

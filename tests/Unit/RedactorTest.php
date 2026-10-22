@@ -396,4 +396,36 @@ final class RedactorTest extends TestCase {
 		);
 		$this->assertSame( 'use_cookie: true, cookies: 3', $this->redact( 'use_cookie: true, cookies: 3' ) );
 	}
+	/**
+	 * Cookie objects and "cookies" arrays on one line (review N1).
+	 *
+	 * @return array<string,array{0:string}>
+	 */
+	public static function cookie_objects_single_line(): array {
+		return array(
+			'wp_remote_get cookies'   => array( '[cookies] => Array ( [0] => WP_Http_Cookie Object ( [name] => zz_auth [value] => SYNTH_A [expires] => 1700000000 ) )' ),
+			'WP_Http_Cookie'          => array( 'WP_Http_Cookie Object ( [name] => zz_auth [value] => SYNTH_A [expires] => 1700000000 [path] => / )' ),
+			'Requests Cookie'         => array( 'WpOrg\Requests\Cookie Object ( [name] => zz_auth [value] => SYNTH_A [attributes] => x )' ),
+			'Requests_Cookie'         => array( 'Requests_Cookie Object ( [name] => zz_auth [value] => SYNTH_A )' ),
+			'var_dump object'         => array( 'object(WP_Http_Cookie)#12 (6) { ["name"]=> string(7) "zz_auth" ["value"]=> string(7) "SYNTH_A" }' ),
+			'var_export object'       => array( "\\WP_Http_Cookie::__set_state(array( 'name' => 'zz_auth', 'value' => 'SYNTH_A', ))" ),
+			'json cookies object'     => array( '{"cookies":{"zz_auth":"SYNTH_A"},"ok":1}' ),
+			'json cookies array'      => array( '{"cookies":[{"name":"zz_auth","value":"SYNTH_A"}],"ok":1}' ),
+			'quoted cookies print_r'  => array( "'cookies' => array ( 0 => 'zz_auth=SYNTH_A', )" ),
+		);
+	}
+
+	/**
+	 * @dataProvider cookie_objects_single_line
+	 */
+	public function test_cookie_objects_single_line_redacted( string $line ): void {
+		$out = $this->redact( $line );
+		$this->assertStringNotContainsString( 'SYNTH_', $out );
+		$this->assertStringContainsString( '[secret]', $out );
+	}
+
+	public function test_cookies_array_keeps_following_json_fields(): void {
+		$this->assertSame( '{"cookies":[secret],"ok":1}', $this->redact( '{"cookies":{"zz_auth":"SYNTH_A"},"ok":1}' ) );
+		$this->assertSame( '{"cookies":[secret],"ok":1}', $this->redact( '{"cookies":[{"name":"zz_auth","value":"SYNTH_A"}],"ok":1}' ) );
+	}
 }

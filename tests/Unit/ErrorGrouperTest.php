@@ -371,6 +371,76 @@ final class ErrorGrouperTest extends TestCase {
 					'}',
 				),
 			),
+			'wp_remote_get cookies' => array(
+				array(
+					$h . 'Array',
+					'(',
+					'    [headers] => WpOrg\\Requests\\Utility\\CaseInsensitiveDictionary Object',
+					'        (',
+					'            [data:protected] => Array',
+					'                (',
+					'                    [content-type] => text/html',
+					'                )',
+					'        )',
+					'',
+					'    [body] => ok',
+					'    [cookies] => Array',
+					'        (',
+					'            [0] => WP_Http_Cookie Object',
+					'                (',
+					'                    [name] => zz_auth',
+					'                    [value] => SYNTH_A',
+					'                    [expires] => 1700000000',
+					'                )',
+					'',
+					'        )',
+					'',
+					'    [filename] => ',
+					')',
+				),
+			),
+			'requests cookie'       => array(
+				array(
+					$h . 'Array',
+					'(',
+					'    [0] => WpOrg\\Requests\\Cookie Object',
+					'        (',
+					'            [name] => zz_auth',
+					'            [value] => SYNTH_A',
+					'            [attributes] => WpOrg\\Requests\\Utility\\CaseInsensitiveDictionary Object',
+					'                (',
+					'                    [data:protected] => Array',
+					'                        (',
+					'                        )',
+					'                )',
+					'        )',
+					'',
+					')',
+				),
+			),
+			'json cookies object'   => array(
+				array(
+					$h . '{',
+					'    "cookies": {',
+					'        "zz_auth": "SYNTH_A"',
+					'    },',
+					'    "ok": 1',
+					'}',
+				),
+			),
+			'json cookies array'    => array(
+				array(
+					$h . '{',
+					'    "cookies": [',
+					'        {',
+					'            "name": "zz_auth",',
+					'            "value": "SYNTH_A"',
+					'        }',
+					'    ],',
+					'    "ok": 1',
+					'}',
+				),
+			),
 			'unclosed'     => array(
 				array(
 					$h . '"set-cookie": [',
@@ -401,5 +471,7 @@ final class ErrorGrouperTest extends TestCase {
 		$this->assertStringContainsString( "'content-type' => 'text/html'", ErrorGrouper::group_all( $dumps['var_export'][0], 0, 'wp_debug' )[0]['message'] );
 		$this->assertStringContainsString( '"content-type": "text/html"', ErrorGrouper::group_all( $dumps['pretty json'][0], 0, 'wp_debug' )[0]['message'] );
 		$this->assertStringContainsString( 'string(9) "text/html"', ErrorGrouper::group_all( $dumps['var_dump'][0], 0, 'wp_debug' )[0]['message'] );
+		$this->assertStringContainsString( '[filename] =>', ErrorGrouper::group_all( $dumps['wp_remote_get cookies'][0], 0, 'wp_debug' )[0]['message'] );
+		$this->assertStringContainsString( '"ok": 1', ErrorGrouper::group_all( $dumps['json cookies array'][0], 0, 'wp_debug' )[0]['message'] );
 	}
 }
