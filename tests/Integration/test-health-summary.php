@@ -284,7 +284,9 @@ $clear_cache();
 $broken = $ability->execute( array( 'since_hours' => 24 ) );
 remove_filter( 'query', $jobs_breaker );
 $wpdb->suppress_errors( $suppressed );
-$broken_json = (string) wp_json_encode( $broken );
+// Only what JobsHealth produced: php_errors legitimately carries debug.log text, which may hold
+// database errors from anywhere on the site.
+$broken_json = (string) wp_json_encode( array( $broken['background_jobs'] ?? null, $broken['notes'] ?? null ) );
 blzmcp_it_equals( false, $broken['background_jobs']['available'] ?? null, 'jobs read failure: background_jobs.available is false' );
 blzmcp_it_assert( in_array( $broken['background_jobs']['status'] ?? null, array( 'amber', 'red' ), true ) && 'green' !== ( $broken['overall'] ?? 'green' ), 'jobs read failure: status amber, never green' );
 blzmcp_it_assert( (bool) preg_grep( "/Background jobs couldn't be read/", (array) ( $broken['notes'] ?? array() ) ), 'jobs read failure: note says background jobs could not be read' );
