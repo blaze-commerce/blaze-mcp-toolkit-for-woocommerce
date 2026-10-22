@@ -14,7 +14,7 @@ Ask Claude or ChatGPT how your WooCommerce store is doing: sales, errors, failed
 
 Blaze MCP Toolkit for WooCommerce connects your WooCommerce store to Claude or ChatGPT so you can ask plain questions and get straight answers: How did we do this week? Why did sales drop on Tuesday? Is anything broken? WooCommerce's own AI connection can look up products and orders. This plugin adds what it can't see: sales totals that match your WooCommerce reports, PHP errors, failed background jobs, recent plugin updates, and who has API access to your store.
 
-It's read-only by default: out of the box it never changes your store, never sends customer names, emails or addresses to the AI, and adds nothing to the pages your customers load. It's a weekly check-up you can run in two minutes, so you spot problems before your customers do.
+It's read-only by default: out of the box it never changes your store, never sends customer names, emails or addresses from your orders to the AI, and adds nothing to the pages your customers load. It's a weekly check-up you can run in two minutes, so you spot problems before your customers do.
 
 One thing to know up front: the same connection also carries tools from WooCommerce itself and from Enable Abilities for MCP, and some of those can edit orders and products or return customer details. The plugin's setup screen lists them and shows where to switch them off.
 

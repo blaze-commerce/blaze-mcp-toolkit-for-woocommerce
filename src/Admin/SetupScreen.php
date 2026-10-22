@@ -102,7 +102,7 @@ final class SetupScreen {
 			}
 		}
 
-		echo '<p>' . esc_html__( 'Connect Claude or ChatGPT to your store so you can ask questions about orders, products and store health. The tools in this plugin are read-only and never return customer names, emails, phone numbers or addresses.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</p>';
+		echo '<p>' . esc_html__( 'Connect Claude or ChatGPT to your store so you can ask questions about orders, products and store health. The tools in this plugin are read-only and never return customer names, emails, phone numbers or addresses from your orders.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</p>';
 
 		if ( Commerce::is_standing_aside() ) {
 			echo '<div class="notice notice-info inline"><p>' . esc_html__( 'WooCommerce for Claude is active, so the analytics and store tools come from it and this plugin does not add its own copies. Our store health, update history, access check and workflow tools still work.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</p></div>';
