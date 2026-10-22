@@ -372,6 +372,10 @@ final class RedactorTest extends TestCase {
 			'env plain'        => array( 'HTTP_COOKIE=zz_auth=SYNTH_A; b=SYNTH_B', 'HTTP_COOKIE=[secret]' ),
 			'set cookie key'   => array( '[HTTP_SET_COOKIE] => zz_auth=SYNTH_A', '[HTTP_SET_COOKIE] => [secret]' ),
 			'cookie equals'    => array( 'Cookie = zz_auth=SYNTH_A', 'Cookie = [secret]' ),
+			'cookie2 header'   => array( 'Cookie2: $Version="1"; zz_auth=SYNTH_A', 'Cookie2: [secret]' ),
+			'redirect key'     => array( '[REDIRECT_HTTP_COOKIE] => zz_auth=SYNTH_A', '[REDIRECT_HTTP_COOKIE] => [secret]' ),
+			'x_ key'           => array( '"X_HTTP_COOKIE":"zz_auth=SYNTH_A"', '"X_HTTP_COOKIE":[secret]' ),
+			'redirect set'     => array( "'REDIRECT_HTTP_SET_COOKIE' => 'zz_auth=SYNTH_A'", "'REDIRECT_HTTP_SET_COOKIE' => [secret]" ),
 			'lowercase header' => array( 'cookie: zz_auth=SYNTH_A', 'cookie: [secret]' ),
 		);
 	}

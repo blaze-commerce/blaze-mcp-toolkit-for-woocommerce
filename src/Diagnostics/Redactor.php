@@ -29,8 +29,8 @@ final class Redactor {
 	/** PII keys too generic for free text: only as a quoted or bracketed key ("name": / [name] =>). */
 	private const PII_STRUCTURED = '(?:billing_|shipping_|customer_)?(?:name|state)';
 
-	/** A Cookie / Set-Cookie key, optionally $_SERVER-style (HTTP_COOKIE), quoted or bracketed. */
-	private const COOKIE_KEY = '(?:(?:\\\\?["\']|\[)?(?<![\w-])(?:HTTP_)?(?:Set[-_]Cookie|Cookie)(?![\w-])(?:\\\\?["\']\]?|\])?|(?:\\\\?["\']|\[)(?<![\w-])cookies(?![\w-])(?:\\\\?["\']\]?|\]))';
+	/** A Cookie / Cookie2 / Set-Cookie key, also any $_SERVER-style *HTTP_(SET_)COOKIE, or a quoted/bracketed 'cookies' key. */
+	private const COOKIE_KEY = '(?:(?:\\\\?["\']|\[)?(?<![\w-])(?:[A-Za-z_]*HTTP_)?(?:Set[-_]Cookie|Cookie)2?(?![\w-])(?:\\\\?["\']\]?|\])?|(?:\\\\?["\']|\[)(?<![\w-])cookies(?![\w-])(?:\\\\?["\']\]?|\]))';
 
 	/** A dumped cookie object: WP_Http_Cookie, WpOrg\Requests\Cookie, Requests_Cookie (print_r, var_dump, var_export). */
 	private const COOKIE_OBJECT = '(?:[\w\\\\]*Cookie\s+Object\b|object\(\\\\?[\w\\\\]*Cookie\)|[\w\\\\]*Cookie::__set_state)';
