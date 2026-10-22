@@ -163,6 +163,9 @@ blzmcp_it_cleanup(
 	}
 );
 $job_id = as_schedule_single_action( time() - 120, 'blzmcp_it_stock_sync', array(), 'blzmcp-it' );
+// As the queue runner does: log_execution() records the attempt, then mark_failure(). (Action
+// Scheduler 3.9 in WooCommerce 10.9 only sets last_attempt_gmt in log_execution().)
+ActionScheduler::store()->log_execution( $job_id );
 ActionScheduler::store()->mark_failure( $job_id );
 $clear_cache();
 $jobs_result = $ability->execute( array( 'since_hours' => 24 ) );
@@ -179,6 +182,9 @@ if ( ActionScheduler::store() instanceof ActionScheduler_DBStore ) {
 ActionScheduler::store()->delete_action( $job_id );
 
 $job_id = as_schedule_single_action( time() - 120, 'blzmcp_it_plain_job', array(), 'blzmcp-it' );
+// As the queue runner does: log_execution() records the attempt, then mark_failure(). (Action
+// Scheduler 3.9 in WooCommerce 10.9 only sets last_attempt_gmt in log_execution().)
+ActionScheduler::store()->log_execution( $job_id );
 ActionScheduler::store()->mark_failure( $job_id );
 $clear_cache();
 $jobs_result = $ability->execute( array( 'since_hours' => 24 ) );
