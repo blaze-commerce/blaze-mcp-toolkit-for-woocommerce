@@ -36,24 +36,31 @@ blzmcp_it_assert( str_contains( $ability->get_description(), 'hook names and plu
 // Append a fatal line (with an email in it) to wp-content/debug.log; restore the file afterwards.
 $log      = WP_CONTENT_DIR . '/debug.log';
 $existed  = file_exists( $log );
-$old_size = $existed ? (int) filesize( $log ) : 0;
 $original_log = $existed ? (string) file_get_contents( $log ) : null;
-// Restore debug.log exactly, even if an assertion fatals half way.
-blzmcp_it_cleanup(
-	static function () use ( $log, $original_log ): void {
-		if ( null === $original_log ) {
-			if ( file_exists( $log ) ) {
-				unlink( $log );
-			}
-		} else {
-			file_put_contents( $log, $original_log );
-		}
-	}
-);
 $marker   = 'blzmcp_it_' . wp_generate_password( 8, false );
+// Remove only the lines this test added (they all carry $marker), so lines other processes write
+// to debug.log during the run are kept. Also runs if an assertion fatals half way.
+$strip_ours = static function () use ( $log, $marker, $existed ): void {
+	if ( ! file_exists( $log ) ) {
+		return;
+	}
+	$kept = array_filter(
+		(array) file( $log ),
+		static fn( $l ) => ! str_contains( (string) $l, $marker )
+	);
+	if ( ! $existed && array() === $kept ) {
+		unlink( $log );
+		return;
+	}
+	file_put_contents( $log, implode( '', $kept ), LOCK_EX );
+};
+blzmcp_it_cleanup( $strip_ours );
 $line     = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Fatal error:  Uncaught Exception: ' . $marker . ' payment failed for jane.doe@example.com in /var/www/html/wp-content/plugins/fake-gateway/gateway.php:42' . "\n"
 	. '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Fatal error:  Uncaught Error: ' . $marker . '_phar in phar:///usr/local/bin/wp/vendor/wp-cli/eval-command/src/EvalFile_Command.php(85) : eval()\'d code:21' . "\n";
 file_put_contents( $log, $line, FILE_APPEND );
+// Another process writing to debug.log during the run: its lines must survive the cleanup.
+$concurrent = array( 'blzmcp_concurrent_' . wp_generate_password( 8, false ) );
+file_put_contents( $log, '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Notice:  ' . $concurrent[0] . "\n", FILE_APPEND );
 
 $admins = get_users( array( 'role' => 'administrator', 'number' => 1 ) );
 wp_set_current_user( $admins[0]->ID );
@@ -222,7 +229,33 @@ $clear_cache();
 
 // Totals and status come from every group, not the 50 listed (audit F04). Fresh debug.log content.
 // Only debug.log in play: today's WooCommerce fatal logs (from other runs) are moved aside and put back.
-$saved_log  = (string) file_get_contents( $log );
+// debug.log itself is moved aside too (not overwritten): the test's lines go into a fresh file, and
+// anything else written there meanwhile is carried back to the original afterwards.
+$f04_log_aside = $log . '.blzmcp-f04';
+if ( file_exists( $log ) ) {
+	rename( $log, $f04_log_aside );
+} else {
+	touch( $f04_log_aside );
+}
+$f04_carry = static function ( bool $restore ) use ( $log, $f04_log_aside, $marker ): void {
+	if ( ! file_exists( $f04_log_aside ) ) {
+		return;
+	}
+	$others = file_exists( $log ) ? array_filter( (array) file( $log ), static fn( $l ) => ! str_contains( (string) $l, $marker ) ) : array();
+	if ( $others ) {
+		file_put_contents( $f04_log_aside, implode( '', $others ), FILE_APPEND | LOCK_EX );
+	}
+	if ( $restore ) {
+		rename( $f04_log_aside, $log );
+	} else {
+		file_put_contents( $log, '' );
+	}
+};
+blzmcp_it_cleanup(
+	static function () use ( $f04_carry ): void {
+		$f04_carry( true );
+	}
+);
 $f04_aside  = array();
 foreach ( (array) glob( trailingslashit( WC_LOG_DIR ) . 'fatal-errors-*.log' ) as $wc_file ) {
 	if ( rename( $wc_file, $wc_file . '.blzmcp-aside' ) ) {
@@ -257,7 +290,12 @@ blzmcp_it_equals( 'amber', $f04['php_errors']['status'] ?? null, '60 distinct wa
 blzmcp_it_equals( true, $f04['php_errors']['groups_truncated'] ?? null, '60 distinct warnings: groups_truncated is true' );
 blzmcp_it_equals( 50, count( (array) ( $f04['php_errors']['groups'] ?? array() ) ), '60 distinct warnings: 50 groups listed' );
 blzmcp_it_assert( (bool) preg_grep( '/distinct error groups were found/', (array) ( $f04['notes'] ?? array() ) ), '60 distinct warnings: truncation note' );
-file_put_contents( $log, $f04_lines( 'Deprecated', 'dep', 50, 2 ) . $f04_lines( 'Warning', 'warn', 21 ) );
+// Another process writes while the test-only file is in place.
+$concurrent[] = 'blzmcp_concurrent_' . wp_generate_password( 8, false );
+file_put_contents( $log, '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Notice:  ' . end( $concurrent ) . "\n", FILE_APPEND );
+// Keep only the test's lines for the next exact count; anything else is carried over to the original.
+$f04_carry( false );
+file_put_contents( $log, $f04_lines( 'Deprecated', 'dep', 50, 2 ) . $f04_lines( 'Warning', 'warn', 21 ), FILE_APPEND );
 $clear_cache();
 $f04 = $ability->execute( array( 'since_hours' => 24 ) );
 blzmcp_it_equals(
@@ -273,7 +311,7 @@ blzmcp_it_equals(
 );
 blzmcp_it_equals( 71, $f04['php_errors']['groups_total'] ?? null, '21 warnings among 100 deprecations: groups_total is 71' );
 blzmcp_it_equals( 'amber', $f04['php_errors']['status'] ?? null, '21 warnings among 100 deprecations: php_errors is amber' );
-file_put_contents( $log, $saved_log );
+$f04_carry( true );
 foreach ( $f04_aside as $wc_file ) {
 	rename( $wc_file . '.blzmcp-aside', $wc_file );
 }
@@ -418,16 +456,12 @@ if ( getenv( 'BLZMCP_SAMPLE' ) ) {
 }
 
 // Cleanup: restore debug.log, users, cache, audit rows from this run.
-if ( $existed ) {
-	$fh = fopen( $log, 'r+' );
-	if ( $fh ) {
-		ftruncate( $fh, $old_size );
-		fclose( $fh );
-	}
-} else {
-	unlink( $log );
-}
+$strip_ours();
 blzmcp_it_assert( ! file_exists( $log ) || ! str_contains( (string) file_get_contents( $log ), $marker ), 'test line removed from debug.log' );
+foreach ( $concurrent as $i => $other ) {
+	blzmcp_it_assert( file_exists( $log ) && str_contains( (string) file_get_contents( $log ), $other ), "a line another process wrote during the run (#{$i}) is kept in debug.log" );
+}
+blzmcp_it_assert( null === $original_log || str_starts_with( (string) file_get_contents( $log ), $original_log ), 'debug.log content from before the run is intact' );
 require_once ABSPATH . 'wp-admin/includes/user.php';
 foreach ( $created as $user_id ) {
 	wp_delete_user( $user_id );
