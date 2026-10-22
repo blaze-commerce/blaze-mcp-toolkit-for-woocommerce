@@ -175,10 +175,12 @@ final class SetupChecks {
 
 		foreach ( Registrar::abilities() as $class_name ) {
 			$name = $class_name::NAME;
-			if ( ! function_exists( 'wp_has_ability' ) || ! wp_has_ability( $name ) ) {
-				$missing[] = $name;
-			} elseif ( in_array( $name, $denylist, true ) ) {
+			// Denylist first: Enable Abilities unregisters switched-off tools at the end of
+			// wp_abilities_api_init, so they also look unregistered.
+			if ( in_array( $name, $denylist, true ) ) {
 				$disabled[] = $name;
+			} elseif ( ! function_exists( 'wp_has_ability' ) || ! wp_has_ability( $name ) ) {
+				$missing[] = $name;
 			}
 		}
 

@@ -171,6 +171,23 @@ blzmcp_it_equals( true, SetupChecks::is_write( 'ewpa/update-thing', array() ), '
 	}
 	echo "---------------------------\n";
 
+	// Audit F06: after Enable Abilities' real unregister hook has run, a denylisted tool is
+	// "switched off" (settings advice), not "not registered". Last in this file: it unregisters.
+	$switched = 'blaze-mcp-toolkit/health-summary';
+	update_option( 'ewpa_thirdparty_disabled', array( $switched ) );
+	blzmcp_it_assert( function_exists( 'ewpa_tp_enforce' ), 'Enable Abilities unregister hook is loaded' );
+	ewpa_tp_enforce();
+	blzmcp_it_assert( ! wp_has_ability( $switched ), 'Enable Abilities unregistered the denylisted tool' );
+	$by = array_column( SetupChecks::run(), null, 'id' );
+	blzmcp_it_equals( 'warn', $by['tools_visible']['status'] ?? null, 'switched-off tool (unregistered by Enable Abilities): tools_visible warns, not fails' );
+	blzmcp_it_assert( str_contains( $by['tools_visible']['fix'] ?? '', $switched ) && str_contains( $by['tools_visible']['fix'] ?? '', 'Settings > WP Abilities' ), 'switched-off tool: names it and points to Settings > WP Abilities' );
+	blzmcp_it_assert( ! str_contains( $by['tools_visible']['fix'] ?? '', 'reactivate' ), 'switched-off tool: no deactivate/reactivate advice' );
+	// Off the denylist but still missing: a real registration failure.
+	update_option( 'ewpa_thirdparty_disabled', array() );
+	$by = array_column( SetupChecks::run(), null, 'id' );
+	blzmcp_it_equals( 'fail', $by['tools_visible']['status'] ?? null, 'missing tool that is not denylisted: tools_visible fails' );
+	blzmcp_it_assert( str_contains( $by['tools_visible']['fix'] ?? '', $switched ) && str_contains( $by['tools_visible']['fix'] ?? '', 'reactivate' ), 'missing tool: registration advice' );
+
 	require_once ABSPATH . 'wp-admin/includes/user.php';
 	wp_delete_user( $sm_id );
 	$sm_id = 0;
