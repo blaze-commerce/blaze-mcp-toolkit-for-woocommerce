@@ -61,31 +61,26 @@ jobs:
       - run: if [ "${{ matrix.env }}" = "min" ]; then cp .wp-env.min.json .wp-env.override.json; fi
       - run: npx wp-env start
       - run: npx wp-env run cli wp plugin activate woocommerce mcp-adapter enable-abilities-for-mcp plugin-check blaze-mcp-toolkit-for-woocommerce
+      # The canonical runner: every test file with BLZMCP_SKIP_HTTP=1 in the container, the
+      # bundled/workflow files again in stand-aside mode, then the host-side front-end curl check
+      # (the runner reaches wp-env's published localhost:8888). Exits nonzero if any stage fails.
       - name: Integration tests
+        shell: bash
+        run: bash scripts/run-integration.sh
+      - name: Plugin Check (built zip)
         shell: bash
         run: |
           set -euo pipefail
-          for f in tests/Integration/test-*.php; do
-            npx wp-env run cli wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f"
-          done
-      - name: Plugin Check (built zip)
-        if: matrix.env == 'current'
-        shell: bash
-        run: |
-          set -o pipefail
           ./scripts/build-zip.sh
-          cat > .wp-env.override.json <<'JSON'
-          {
-            "plugins": [
-              "https://downloads.wordpress.org/plugin/woocommerce.zip",
-              "https://downloads.wordpress.org/plugin/mcp-adapter.zip",
-              "https://downloads.wordpress.org/plugin/enable-abilities-for-mcp.zip",
-              "https://downloads.wordpress.org/plugin/plugin-check.zip",
-              "./dist/blaze-mcp-toolkit-for-woocommerce"
-            ],
-            "mappings": {}
-          }
-          JSON
+          # Same environment as this matrix entry, with the built plugin instead of the dev tree.
+          # Written as the whole config (not an override): wp-env merges override mappings into
+          # the base ones, which would keep the dev-tree mapping.
+          base=.wp-env.json
+          if [ "${{ matrix.env }}" = "min" ]; then base=.wp-env.min.json; fi
+          jq '.plugins |= map(if . == "." then "./dist/blaze-mcp-toolkit-for-woocommerce" else . end) | .mappings = {}' "$base" > "$RUNNER_TEMP/wp-env.json"
+          mv "$RUNNER_TEMP/wp-env.json" .wp-env.json
+          rm -f .wp-env.override.json
+          cat .wp-env.json
           npx wp-env start --update
           npx wp-env run cli wp plugin check blaze-mcp-toolkit-for-woocommerce --format=json | tee plugin-check.txt
           if grep -q '"type":"ERROR"' plugin-check.txt; then
