@@ -313,4 +313,46 @@ final class RedactorTest extends TestCase {
 		$this->assertSame( 'mysql://[secret]@h/db', $this->redact( 'mysql://u:pa/ss@h/db' ) );
 		$this->assertSame( 'https://shop.example.com/x?e=[email]', $this->redact( 'https://shop.example.com/x?e=a@b.com' ) );
 	}
+	/**
+	 * Cookie headers in structured dumps (audit F01). Generic session cookie names.
+	 *
+	 * @return array<string,array{0:string,1:string}>
+	 */
+	public static function structured_cookie_headers(): array {
+		return array(
+			'plain'                  => array( 'PHP Warning: Cookie: sessionid=SYNTH_SESSION_VALUE; csrftoken=SYNTH_CSRF', 'PHP Warning: Cookie: [secret]' ),
+			'json'                   => array( '{"Cookie":"sessionid=SYNTH_SESSION_VALUE","x":1}', '{"Cookie":[secret],"x":1}' ),
+			'json spaced lowercase'  => array( '{"cookie" : "PHPSESSID=SYNTH_SESSION_VALUE; other=SYNTH_OTHER", "ok": "kept"}', '{"cookie" : [secret], "ok": "kept"}' ),
+			'escaped json'           => array( '{\"Cookie\":\"sessionid=SYNTH_SESSION_VALUE; b=SYNTH_OTHER\",\"x\":1}', '{\"Cookie\":[secret],\"x\":1}' ),
+			'print_r'                => array( '[Cookie] => sessionid=SYNTH_SESSION_VALUE; b=SYNTH_OTHER', '[Cookie] => [secret]' ),
+			'print_r array'          => array( '[Set-Cookie] => Array ( [0] => sessionid=SYNTH_SESSION_VALUE [1] => b=SYNTH_OTHER )', '[Set-Cookie] => [secret]' ),
+			'var_export'             => array( "'Cookie' => 'sessionid=SYNTH_SESSION_VALUE; b=SYNTH_OTHER', 'Host' => 'kept'", "'Cookie' => [secret], 'Host' => 'kept'" ),
+			'set-cookie json'        => array( '{"Set-Cookie":"sessionid=SYNTH_SESSION_VALUE; HttpOnly; Path=/"}', '{"Set-Cookie":[secret]}' ),
+			'set-cookie json array'  => array( '{"Set-Cookie":["sessionid=SYNTH_SESSION_VALUE; HttpOnly","b=SYNTH_OTHER"],"ok":1}', '{"Set-Cookie":[secret],"ok":1}' ),
+			'set-cookie single-quoted escaped' => array( "{'set-cookie': 'JSESSIONID=SYNTH_SESSION_VALUE; Secure'}", "{'set-cookie': [secret]}" ),
+		);
+	}
+
+	/**
+	 * @dataProvider structured_cookie_headers
+	 */
+	public function test_structured_cookie_headers_redacted( string $line, string $expected ): void {
+		$out = $this->redact( $line );
+		$this->assertStringNotContainsString( 'SYNTH_', $out );
+		$this->assertSame( $expected, $out );
+	}
+
+	public function test_generic_session_cookie_pairs_redacted_without_header_name(): void {
+		foreach ( array( 'PHPSESSID', 'sessionid', 'JSESSIONID', 'session_id', 'laravel_session' ) as $name ) {
+			$out = $this->redact( "[0] => {$name}=SYNTH_SESSION_VALUE; path=/" );
+			$this->assertStringNotContainsString( 'SYNTH_', $out, $name );
+		}
+	}
+
+	public function test_cookie_redaction_keeps_ordinary_error_useful(): void {
+		$this->assertSame(
+			'PHP Warning: Undefined index: cookie_consent in wp-content/plugins/foo/bar.php on line 3',
+			$this->redact( 'PHP Warning: Undefined index: cookie_consent in /www/site_123/public/wp-content/plugins/foo/bar.php on line 3' )
+		);
+	}
 }

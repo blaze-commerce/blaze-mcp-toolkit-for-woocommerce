@@ -157,9 +157,16 @@ final class Redactor {
 		$out = self::sub( '/\b(Authorization|Proxy-Authorization)(\\\\?["\'\]]*\s*(?:=>|[:=](?!>))\s*)\\\\?["\']?(?:(?:Bearer|Basic|Token|Digest|OAuth)\s+)?(?:\[secret\]|[^\s"\',;\\\\})]+)(?:\\\\?["\'])?/i', '${1}${2}[secret]', $out );
 		$out = self::sub( '/\bBearer\s+[^\s"\',;]{8,}/', '[secret]', $out );
 		$out = self::sub( '/\bBasic\s+(?=[A-Za-z0-9+\/]*[\d+\/=])[A-Za-z0-9+\/]{8,}={0,2}/', '[secret]', $out );
-		$out = self::sub( '/\b(Set-Cookie|Cookie)(\s*:\s*)[^\r\n]*/i', '${1}${2}[secret]', $out );
+		// Cookie / Set-Cookie with a bare, quoted, escaped-quoted or bracketed name ("Cookie":,
+		// \"Cookie\":, [Cookie] =>, 'Cookie' =>). A quoted value goes up to its closing quote, a
+		// JSON array up to its closing bracket, anything else to the end of the line.
 		$out = self::sub(
-			'/\b(?:wordpress_[\w-]*|wp_woocommerce_session_[\w-]*|woocommerce_(?:items_in_cart|cart_hash|recently_viewed)|wp-settings(?:-time)?-\d+)=[^;\s"\',]+/',
+			'/((?:\\\\?["\']|\[)?\b(?:Set-Cookie|Cookie)(?:\\\\?["\']|\])?\s*(?:=>|:)\s*+)(?:\\\\"(?:(?!\\\\").)*(?:\\\\"|$)|"(?:[^"\\\\]|\\\\.)*(?:"|$)|\'(?:[^\'\\\\]|\\\\.)*(?:\'|$)|\[(?!secret\])[^\]\r\n]*(?:\]|$)|(?!\[secret\])[^\r\n]*)/i',
+			'${1}[secret]',
+			$out
+		);
+		$out = self::sub(
+			'/\b(?:wordpress_[\w-]*|wp_woocommerce_session_[\w-]*|woocommerce_(?:items_in_cart|cart_hash|recently_viewed)|wp-settings(?:-time)?-\d+|PHPSESSID|JSESSIONID|ASP\.NET_SessionId|connect\.sid|session_?id|sess_?id|[\w-]*_session)=[^;\s"\',]+/i',
 			'[secret]',
 			$out
 		);

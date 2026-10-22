@@ -98,6 +98,35 @@ foreach ( (array) ( $result['php_errors']['groups'] ?? array() ) as $group ) {
 }
 blzmcp_it_equals( 2, $marker_groups, 'the same file is read once (each appended fatal counted once)' );
 
+// Structured Cookie / Set-Cookie headers never reach the output (audit F01), generic cookie names.
+$cookie_secret = 'SYNTHSESS' . wp_generate_password( 10, false );
+$cookie_stamp  = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] PHP Warning:  ' . $marker . '_cookie ';
+$cookie_lines  = array(
+	'plain'           => 'Cookie: sessionid=' . $cookie_secret . '; csrftoken=' . $cookie_secret,
+	'json'            => '{"Cookie":"sessionid=' . $cookie_secret . '"}',
+	'escaped json'    => '{\"Cookie\":\"PHPSESSID=' . $cookie_secret . '; other=' . $cookie_secret . '\"}',
+	'print_r'         => '[Cookie] => sessionid=' . $cookie_secret . '; b=' . $cookie_secret,
+	'var_export'      => "'Cookie' => 'sessionid=" . $cookie_secret . "'",
+	'set-cookie json' => '{"Set-Cookie":"sessionid=' . $cookie_secret . '; HttpOnly"}',
+);
+$cookie_payload = '';
+foreach ( $cookie_lines as $form => $text ) {
+	$cookie_payload .= $cookie_stamp . $form . ' ' . $text . "\n";
+}
+file_put_contents( $log, $cookie_payload, FILE_APPEND );
+$clear_cache();
+$cookie_result = $ability->execute( array( 'since_hours' => 24 ) );
+$cookie_json   = (string) wp_json_encode( $cookie_result );
+blzmcp_it_assert( str_contains( $cookie_json, $marker . '_cookie' ), 'cookie test lines reach the health output' );
+blzmcp_it_assert( ! str_contains( $cookie_json, $cookie_secret ), 'no cookie value survives in health output (plain, JSON, escaped JSON, print_r, var_export, Set-Cookie)' );
+$cookie_groups = 0;
+foreach ( (array) ( $cookie_result['php_errors']['groups'] ?? array() ) as $group ) {
+	if ( str_contains( (string) ( $group['untrusted_text'] ?? '' ), $marker . '_cookie' ) ) {
+		$cookie_groups += str_contains( (string) $group['untrusted_text'], '[secret]' ) ? 1 : 0;
+	}
+}
+blzmcp_it_equals( count( $cookie_lines ), $cookie_groups, 'each cookie line is kept as a useful group with [secret] in place of the value' );
+
 blzmcp_it_assert( in_array( $result['background_jobs']['status'] ?? null, array( 'red', 'amber', 'green' ), true ), 'background_jobs has a status' );
 blzmcp_it_assert( is_int( $result['background_jobs']['failed'] ?? null ) && is_int( $result['background_jobs']['past_due'] ?? null ), 'background_jobs has counts' );
 blzmcp_it_assert( in_array( $result['updates']['status'] ?? null, array( 'red', 'amber', 'green' ), true ), 'updates has a status' );
