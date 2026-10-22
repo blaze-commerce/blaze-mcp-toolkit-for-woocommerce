@@ -268,11 +268,12 @@ final class AnalyticsGuard {
 	/**
 	 * Probe for orders that should be in wc_order_stats but are not, inside the requested windows.
 	 *
-	 * Each window is checked from its start up to its end or an hour ago, whichever is earlier (new
-	 * orders sync asynchronously). There is no clamp to the oldest synced order: a store that imported
+	 * Orders are matched on the date the tools report them by (see date_basis()). Each window is
+	 * checked from its start up to its end or an hour ago, whichever is earlier (new orders sync
+	 * asynchronously). There is no clamp to the oldest synced order: a store that imported
 	 * only recent history still works for queries inside the imported range, and a query reaching
 	 * into un-imported dates is refused. Uses the type/status/date indexes with LIMIT 1. Cached per
-	 * set of windows: "no gap" for 6 hours (15 minutes when a window reaches into the last hour), a
+	 * set of windows and date basis: "no gap" for 6 hours (15 minutes when a window reaches into the last hour), a
 	 * gap for 15 minutes, a failed read (analytics_unreadable) for 5 minutes; cleared when import
 	 * batches run.
 	 *
@@ -281,7 +282,8 @@ final class AnalyticsGuard {
 	 */
 	public static function sync_gap( ?array $windows = null ): ?string {
 		$windows = $windows ?? self::windows();
-		$hash    = md5( implode( '|', array_column( $windows, 'key' ) ) );
+		$basis   = self::date_basis();
+		$hash    = self::cache_key( $windows, $basis );
 		$now     = time();
 
 		$cache = get_transient( self::GAP_TRANSIENT );
@@ -309,7 +311,7 @@ final class AnalyticsGuard {
 				if ( (int) $window['from'] >= $to ) {
 					continue;
 				}
-				$missing = self::recent_order_missing( (int) $window['from'], $to );
+				$missing = self::recent_order_missing( (int) $window['from'], $to, $basis );
 				if ( null === $missing ) {
 					$reason = 'analytics_unreadable';
 					break;
@@ -375,60 +377,111 @@ final class AnalyticsGuard {
 	 */
 	public static function cached_reason( array $input = array(), string $ability = '' ): ?string {
 		$cache = get_transient( self::GAP_TRANSIENT );
-		$hash  = md5( implode( '|', array_column( self::windows( $input, $ability ), 'key' ) ) );
+		$hash  = self::cache_key( self::windows( $input, $ability ), self::date_basis() );
 		return is_array( $cache ) && isset( $cache[ $hash ]['reason'] ) ? (string) $cache[ $hash ]['reason'] : null;
 	}
 
 	/**
-	 * Whether a counted order created between two GMT timestamps is missing from wc_order_stats.
+	 * The date the analytics tools report orders on: WooCommerce Analytics' "Date type" setting,
+	 * read through the bundled package's resolver so the guard and the tools always agree.
+	 *
+	 * @return string date_created, date_paid or date_completed.
+	 */
+	public static function date_basis(): string {
+		$service = self::SERVICE_CLASS;
+		if ( class_exists( $service ) && method_exists( $service, 'get_date_column' ) ) {
+			$basis = (string) $service::get_date_column();
+		} else {
+			$basis = (string) get_option( 'woocommerce_date_type', 'date_paid' );
+		}
+		return in_array( $basis, array( 'date_created', 'date_paid', 'date_completed' ), true ) ? $basis : 'date_paid';
+	}
+
+	/**
+	 * Statuses whose report date is the paid/completed date (the rest use the creation date), as
+	 * the bundled package defines them: WooCommerce's paid statuses plus refunded.
+	 *
+	 * @return array<int, string> Prefixed statuses (wc-processing, ...).
+	 */
+	private static function dated_statuses(): array {
+		$service = self::SERVICE_CLASS;
+		if ( class_exists( $service ) && method_exists( $service, 'get_paid_statuses' ) ) {
+			$paid = (array) $service::get_paid_statuses();
+		} else {
+			$paid = array_map(
+				static function ( $status ): string {
+					return 'wc-' . $status;
+				},
+				function_exists( 'wc_get_is_paid_statuses' ) ? wc_get_is_paid_statuses() : array( 'processing', 'completed' )
+			);
+		}
+		return array_values( array_unique( array_map( 'strval', array_merge( $paid, array( 'wc-refunded' ) ) ) ) );
+	}
+
+	/**
+	 * Gap-cache key for a set of windows: the windows, the date basis and the dated statuses, so a
+	 * changed "Date type" setting (or paid-status filter) is never answered from the old result.
+	 * Public for tests and diagnostics.
+	 *
+	 * @param array<int, array{key: string, from: int, to: int}> $windows Windows.
+	 * @param string                                             $basis   Date basis.
+	 */
+	public static function cache_key( array $windows, string $basis ): string {
+		return md5( implode( '|', array_column( $windows, 'key' ) ) . '#' . $basis . '#' . implode( ',', self::dated_statuses() ) );
+	}
+
+	/**
+	 * Whether a counted order whose report date falls between two GMT timestamps is missing from
+	 * wc_order_stats. Matches the bundled package's date semantics: under date_paid / date_completed,
+	 * paid and refunded orders are dated by that column (an order without one is not in the report)
+	 * and other counted statuses (on-hold) by their creation date. Paid/completed dates have no index,
+	 * so those bases scan the store's counted orders; the result is cached by the caller.
 	 * (With wc_order_stats empty this is simply "any counted order in the window".)
 	 *
-	 * @param int $from_gmt Lower bound, Unix timestamp (inclusive).
-	 * @param int $to_gmt   Upper bound, Unix timestamp (exclusive).
+	 * @param int    $from_gmt Lower bound, Unix timestamp (inclusive).
+	 * @param int    $to_gmt   Upper bound, Unix timestamp (exclusive).
+	 * @param string $basis    Date basis (see date_basis()).
 	 * @return bool|null Null when the query failed (a failed get_var() also returns null).
 	 */
-	private static function recent_order_missing( int $from_gmt, int $to_gmt ): ?bool {
+	private static function recent_order_missing( int $from_gmt, int $to_gmt, string $basis ): ?bool {
 		global $wpdb;
 
 		$stats = $wpdb->prefix . 'wc_order_stats';
 		$hpos  = class_exists( \Automattic\WooCommerce\Utilities\OrderUtil::class )
 			&& \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
 
-		list( $s1, $s2, $s3, $s4 ) = self::COUNTED_STATUSES;
+		$counted   = self::COUNTED_STATUSES;
+		$counted_p = implode( ', ', array_fill( 0, count( $counted ), '%s' ) );
+		$from      = gmdate( 'Y-m-d H:i:s', $from_gmt );
+		$to        = gmdate( 'Y-m-d H:i:s', $to_gmt );
+		// post_date (site-local) is the indexed column in posts.type_status_date.
+		$from_local = get_date_from_gmt( $from );
+		$to_local   = get_date_from_gmt( $to );
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- cached by the caller.
-		if ( $hpos ) {
-			$found = $wpdb->get_var(
-				$wpdb->prepare(
-					'SELECT o.id FROM %i o LEFT JOIN %i s ON s.order_id = o.id WHERE s.order_id IS NULL AND o.type = %s AND o.status IN (%s, %s, %s, %s) AND o.date_created_gmt >= %s AND o.date_created_gmt < %s LIMIT 1',
-					$wpdb->prefix . 'wc_orders',
-					$stats,
-					'shop_order',
-					$s1,
-					$s2,
-					$s3,
-					$s4,
-					gmdate( 'Y-m-d H:i:s', $from_gmt ),
-					gmdate( 'Y-m-d H:i:s', $to_gmt )
-				)
-			);
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQL.NotPrepared -- only %s placeholder lists are interpolated; $sql is prepared below.
+		if ( 'date_created' === $basis ) {
+			if ( $hpos ) {
+				$sql  = "SELECT o.id FROM %i o LEFT JOIN %i s ON s.order_id = o.id WHERE s.order_id IS NULL AND o.type = %s AND o.status IN ({$counted_p}) AND o.date_created_gmt >= %s AND o.date_created_gmt < %s LIMIT 1";
+				$args = array_merge( array( $wpdb->prefix . 'wc_orders', $stats, 'shop_order' ), $counted, array( $from, $to ) );
+			} else {
+				$sql  = "SELECT p.ID FROM %i p LEFT JOIN %i s ON s.order_id = p.ID WHERE s.order_id IS NULL AND p.post_type = %s AND p.post_status IN ({$counted_p}) AND p.post_date >= %s AND p.post_date < %s LIMIT 1";
+				$args = array_merge( array( $wpdb->posts, $stats, 'shop_order' ), $counted, array( $from_local, $to_local ) );
+			}
 		} else {
-			// post_date (site-local) is the indexed column in posts.type_status_date.
-			$found = $wpdb->get_var(
-				$wpdb->prepare(
-					'SELECT p.ID FROM %i p LEFT JOIN %i s ON s.order_id = p.ID WHERE s.order_id IS NULL AND p.post_type = %s AND p.post_status IN (%s, %s, %s, %s) AND p.post_date >= %s AND p.post_date < %s LIMIT 1',
-					$wpdb->posts,
-					$stats,
-					'shop_order',
-					$s1,
-					$s2,
-					$s3,
-					$s4,
-					get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $from_gmt ) ),
-					get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $to_gmt ) )
-				)
-			);
+			$dated   = self::dated_statuses();
+			$dated_p = implode( ', ', array_fill( 0, count( $dated ), '%s' ) );
+			if ( $hpos ) {
+				$sql  = "SELECT o.id FROM %i o LEFT JOIN %i s ON s.order_id = o.id LEFT JOIN %i d ON d.order_id = o.id WHERE s.order_id IS NULL AND o.type = %s AND o.status IN ({$counted_p}) AND ( ( o.status IN ({$dated_p}) AND d.%i >= %s AND d.%i < %s ) OR ( o.status NOT IN ({$dated_p}) AND o.date_created_gmt >= %s AND o.date_created_gmt < %s ) ) LIMIT 1";
+				$col  = $basis . '_gmt';
+				$args = array_merge( array( $wpdb->prefix . 'wc_orders', $stats, $wpdb->prefix . 'wc_order_operational_data', 'shop_order' ), $counted, $dated, array( $col, $from, $col, $to ), $dated, array( $from, $to ) );
+			} else {
+				// _date_paid / _date_completed hold Unix timestamps (WooCommerce 3.0+).
+				$sql  = "SELECT p.ID FROM %i p LEFT JOIN %i s ON s.order_id = p.ID LEFT JOIN %i m ON m.post_id = p.ID AND m.meta_key = %s WHERE s.order_id IS NULL AND p.post_type = %s AND p.post_status IN ({$counted_p}) AND ( ( p.post_status IN ({$dated_p}) AND m.meta_value REGEXP '^[0-9]+$' AND CAST(m.meta_value AS UNSIGNED) >= %d AND CAST(m.meta_value AS UNSIGNED) < %d ) OR ( p.post_status NOT IN ({$dated_p}) AND p.post_date >= %s AND p.post_date < %s ) ) LIMIT 1";
+				$args = array_merge( array( $wpdb->posts, $stats, $wpdb->postmeta, '_' . $basis, 'shop_order' ), $counted, $dated, array( $from_gmt, $to_gmt ), $dated, array( $from_local, $to_local ) );
+			}
 		}
+		$found = $wpdb->get_var( $wpdb->prepare( $sql, $args ) );
 		// phpcs:enable
 
 		if ( '' !== $wpdb->last_error ) {

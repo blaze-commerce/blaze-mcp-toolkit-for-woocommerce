@@ -292,6 +292,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$stats_table = $wpdb->prefix . 'wc_order_stats';
 	$anchor      = wc_get_order( $order_ids[1] );
 	$anchor->set_date_created( time() - 3 * DAY_IN_SECONDS );
+	$anchor->set_date_paid( time() - 3 * DAY_IN_SECONDS ); // Reports date paid orders by date paid (default Date type).
 	$anchor->save();
 	\Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler::import( $order_ids[1] );
 
@@ -302,6 +303,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$pre_window->calculate_totals();
 	$pre_window->payment_complete();
 	$pre_window->set_date_created( time() - 20 * DAY_IN_SECONDS );
+	$pre_window->set_date_paid( time() - 20 * DAY_IN_SECONDS ); // Reports date paid orders by date paid (default Date type).
 	$pre_window->save();
 	$order_ids[] = $pre_window->get_id();
 	$wpdb->delete( $stats_table, array( 'order_id' => $pre_window->get_id() ) );
@@ -318,6 +320,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	// Recent gap: an order two days old (inside the synced window, past the 1 h grace) missing from stats.
 	$recent = wc_get_order( $order_ids[0] );
 	$recent->set_date_created( time() - 2 * DAY_IN_SECONDS );
+	$recent->set_date_paid( time() - 2 * DAY_IN_SECONDS ); // Reports date paid orders by date paid (default Date type).
 	$recent->save();
 	$wpdb->delete( $stats_table, array( 'order_id' => $order_ids[0] ) );
 	delete_transient( AnalyticsGuard::GAP_TRANSIENT );
@@ -347,6 +350,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 
 	// A young order (inside the 1 h grace) missing from stats is not a gap.
 	$recent->set_date_created( time() - 10 * MINUTE_IN_SECONDS );
+	$recent->set_date_paid( time() - 10 * MINUTE_IN_SECONDS ); // Reports date paid orders by date paid (default Date type).
 	$recent->save();
 	$wpdb->delete( $stats_table, array( 'order_id' => $order_ids[0] ) );
 	AnalyticsGuard::clear_cache();
@@ -385,13 +389,20 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		blzmcp_it_equals( $hpos_on, \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled(), "{$label}: order storage switched" );
 		blzmcp_it_sync_analytics();
 
-		// A paid order created $days ago that never reached wc_order_stats.
-		$make_missing = static function ( int $days ) use ( $product, $wpdb, $stats_table, &$order_ids ): int {
-			$o = wc_create_order();
+		// A paid order created $days ago that never reached wc_order_stats. Its paid date (and, when
+		// $complete, its completed date) is set on its own: $paid_days ago, or with the creation date.
+		$make_missing = static function ( int $days, ?int $paid_days = null, bool $complete = false ) use ( $product, $wpdb, $stats_table, &$order_ids ): int {
+			$paid_at = time() - ( $paid_days ?? $days ) * DAY_IN_SECONDS;
+			$o       = wc_create_order();
 			$o->add_product( $product, 1 );
 			$o->calculate_totals();
 			$o->payment_complete();
+			if ( $complete ) {
+				$o->set_status( 'completed' );
+				$o->set_date_completed( $paid_at );
+			}
 			$o->set_date_created( time() - $days * DAY_IN_SECONDS );
+			$o->set_date_paid( $paid_at );
 			$o->save();
 			$order_ids[] = (int) $o->get_id();
 			$wpdb->delete( $stats_table, array( 'order_id' => $o->get_id() ) );
@@ -446,7 +457,56 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		blzmcp_it_equals( 'none', AnalyticsGuard::cached_reason( $week_compare, 'wc-analytics/totals' ), "{$label}: last_7_days cache entry unaffected" );
 		$resolve( $twenty );
 
-		foreach ( array( $five, $ten, $twenty ) as $id ) {
+		// Report-date basis (audit R1): the guard checks the date the tools report on, not just the
+		// creation date. Old-created orders paid/completed recently are in this week's figures.
+		$date_type   = get_option( 'woocommerce_date_type', false );
+		$basis_cases = array();
+		update_option( 'woocommerce_date_type', 'date_paid' );
+		AnalyticsGuard::clear_cache();
+		$paid_now = $make_missing( 20, 2 );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( $week_only ) : null ), "{$label}: date_paid: order created 20 days ago, paid 2 days ago blocks last_7_days" );
+		$resolve( $paid_now );
+		$paid_prev = $make_missing( 20, 10 );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), "{$label}: date_paid: paid 10 days ago blocks last_7_days + compare" );
+		blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( $week_only ) : null ), "{$label}: date_paid: paid 10 days ago does not block last_7_days without compare" );
+		$resolve( $paid_prev );
+
+		// date_completed, switched without flushing the guard cache.
+		update_option( 'woocommerce_date_type', 'date_completed' );
+		$done_now = $make_missing( 20, 2, true );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( $week_only ) : null ), "{$label}: date_completed: order created 20 days ago, completed 2 days ago blocks last_7_days" );
+		$resolve( $done_now );
+		$done_prev = $make_missing( 20, 10, true );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), "{$label}: date_completed: completed 10 days ago blocks last_7_days + compare" );
+		blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( $week_only ) : null ), "{$label}: date_completed: completed 10 days ago does not block last_7_days without compare" );
+		$resolve( $done_prev );
+		$paid_only = $make_missing( 20, 2 );
+		blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), "{$label}: date_completed: a processing order (no completed date) paid 2 days ago is not in the report and does not block" );
+		$basis_cases[] = $paid_only;
+
+		// date_created: the same old-created orders don't block a complete week (+compare).
+		update_option( 'woocommerce_date_type', 'date_created' );
+		$basis_cases[] = $make_missing( 20, 2 );
+		$basis_cases[] = $make_missing( 20, 2, true );
+		blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), "{$label}: date_created: orders created 20 days ago (paid/completed 2 days ago) do not block last_7_days + compare" );
+		blzmcp_it_equals( 'none', AnalyticsGuard::cached_reason( $week_compare, 'wc-analytics/totals' ), "{$label}: date_created: no-gap result cached" );
+
+		// Setting changed back to date_paid with no cache flush: the cached "none" is not reused.
+		update_option( 'woocommerce_date_type', 'date_paid' );
+		blzmcp_it_equals( null, AnalyticsGuard::cached_reason( $week_compare, 'wc-analytics/totals' ), "{$label}: changing Date type leaves no cached result for the new basis" );
+		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), "{$label}: after switching to date_paid without a flush, the paid-2-days-ago orders block" );
+
+		if ( false === $date_type ) {
+			delete_option( 'woocommerce_date_type' );
+		} else {
+			update_option( 'woocommerce_date_type', $date_type );
+		}
+		foreach ( $basis_cases as $id ) {
+			$resolve( $id );
+		}
+		AnalyticsGuard::clear_cache();
+
+		foreach ( array_merge( array( $five, $ten, $twenty, $paid_now, $paid_prev, $done_now, $done_prev ), $basis_cases ) as $id ) {
 			blzmcp_it_delete_order( $id );
 		}
 	}
@@ -490,7 +550,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	// that ended before the grace keeps the 6-hour cache.
 	blzmcp_it_sync_analytics();
 	$ttl_of = static function ( array $input ): int {
-		$hash = md5( implode( '|', array_column( AnalyticsGuard::windows( $input ), 'key' ) ) );
+		$hash = AnalyticsGuard::cache_key( AnalyticsGuard::windows( $input ), AnalyticsGuard::date_basis() );
 		$map  = get_transient( AnalyticsGuard::GAP_TRANSIENT );
 		return is_array( $map ) && isset( $map[ $hash ]['expires'] ) ? (int) $map[ $hash ]['expires'] - time() : -1;
 	};

@@ -78,6 +78,7 @@ $wf_order->add_product( $wf_product, 1 );
 $wf_order->calculate_totals();
 $wf_order->payment_complete();
 $wf_order->set_date_created( time() - 5 * DAY_IN_SECONDS );
+$wf_order->set_date_paid( time() - 5 * DAY_IN_SECONDS ); // Reports date paid orders by date paid (default Date type).
 $wf_order->save();
 $wpdb->delete( $wpdb->prefix . 'wc_order_stats', array( 'order_id' => $wf_order->get_id() ) );
 \Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
