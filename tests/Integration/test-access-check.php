@@ -190,6 +190,41 @@ blzmcp_it_equals( array( 'rest_keys' => false, 'webhooks' => false, 'application
 blzmcp_it_assert( ( $summary['write_keys'] ?? 0 ) >= 1, 'summary counts write keys' );
 blzmcp_it_assert( ( $summary['stale_write_keys'] ?? 0 ) >= 1, 'summary counts stale write keys' );
 blzmcp_it_assert( ( $summary['order_webhooks_external'] ?? 0 ) >= 1, 'summary counts external order webhooks' );
+blzmcp_it_equals( array( 'rest_keys' => true, 'webhooks' => true, 'application_passwords' => true ), $result['available'] ?? null, 'every list was readable' );
+
+// A failed read is unknown, not "no keys" (audit F03). Break each list's query in turn.
+$break_query = static function ( string $needle ) {
+	return static function ( $query ) use ( $needle ) {
+		return is_string( $query ) && str_contains( $query, $needle ) ? 'SELECT key_id FROM blzmcp_it_missing_table_xyz' : $query;
+	};
+};
+$suppressed = $wpdb->suppress_errors( true );
+foreach ( array(
+	'rest_keys' => 'woocommerce_api_keys',
+	'webhooks'  => 'wc_webhooks',
+) as $list => $needle ) {
+	$breaker = $break_query( $needle );
+	add_filter( 'query', $breaker );
+	$clear_cache();
+	$broken = $ability->execute( array() );
+	remove_filter( 'query', $breaker );
+	$broken_json = (string) wp_json_encode( $broken );
+	blzmcp_it_assert( is_array( $broken ), "{$list} read failure: still a result, not an error" . ( is_wp_error( $broken ) ? ' (' . $broken->get_error_message() . ')' : '' ) );
+	blzmcp_it_equals( false, $broken['available'][ $list ] ?? null, "{$list} read failure: available.{$list} is false" );
+	blzmcp_it_equals( array(), $broken[ $list ] ?? null, "{$list} read failure: no rows listed" );
+	blzmcp_it_assert( ! str_contains( $broken_json, 'blzmcp_it_missing_table_xyz' ) && ! str_contains( $broken_json, "doesn't exist" ) && ! str_contains( $broken_json, 'SELECT' ), "{$list} read failure: no SQL or database error text in output" );
+	$other = 'rest_keys' === $list ? 'webhooks' : 'rest_keys';
+	blzmcp_it_equals( true, $broken['available'][ $other ] ?? null, "{$list} read failure: {$other} still readable" );
+	if ( 'rest_keys' === $list ) {
+		blzmcp_it_equals( null, array_key_exists( 'write_keys', (array) ( $broken['summary'] ?? array() ) ) ? $broken['summary']['write_keys'] : 'missing', 'rest_keys read failure: write_keys is null, not 0' );
+		blzmcp_it_equals( null, array_key_exists( 'stale_write_keys', (array) ( $broken['summary'] ?? array() ) ) ? $broken['summary']['stale_write_keys'] : 'missing', 'rest_keys read failure: stale_write_keys is null, not 0' );
+		blzmcp_it_assert( is_int( $broken['summary']['order_webhooks_external'] ?? null ), 'rest_keys read failure: webhook count still reported' );
+	} else {
+		blzmcp_it_equals( null, array_key_exists( 'order_webhooks_external', (array) ( $broken['summary'] ?? array() ) ) ? $broken['summary']['order_webhooks_external'] : 'missing', 'webhooks read failure: order_webhooks_external is null, not 0' );
+	}
+}
+$wpdb->suppress_errors( $suppressed );
+$clear_cache();
 
 $apps = $result['application_passwords'] ?? array();
 blzmcp_it_assert( count( $apps ) >= 1, 'application password listed' );

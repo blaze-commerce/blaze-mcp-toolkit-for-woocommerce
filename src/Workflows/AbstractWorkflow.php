@@ -196,7 +196,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 		$instructions = self::preamble( $missing, $denied, $has_profile ) . "\n\n" . static::guidance( $period );
 		if ( null !== $analytics_reason ) {
 			$instructions = AnalyticsGuard::MESSAGE_TOKEN . ' ' . AnalyticsGuard::message( $analytics_reason )
-				. "\n\nSTOP: WooCommerce Analytics data is not complete on this store, so the analytics steps were left out. Explain the message above to the merchant in plain words, say the figures would be incomplete until it is fixed, and stop: do not run the steps below, report any numbers or write the review.\n\n"
+				. "\n\nSTOP: WooCommerce Analytics data for this period is not complete (or could not be checked) on this store, so the analytics steps were left out. Explain the message above to the merchant in plain words, say the figures would be incomplete until it is fixed, and stop: do not run the steps below, report any numbers or write the review.\n\n"
 				. $instructions;
 		}
 

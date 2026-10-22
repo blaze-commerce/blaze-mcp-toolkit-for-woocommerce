@@ -149,6 +149,8 @@ final class AnalyticsGuard {
 		switch ( $reason ) {
 			case 'analytics_disabled':
 				return __( 'WooCommerce Analytics is turned off, so these figures would be incomplete. Turn on Analytics under WooCommerce > Settings > Advanced > Features, then try again.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'analytics_unreadable':
+				return __( 'WooCommerce Analytics data couldn\'t be read just now, so these figures can\'t be checked for completeness. Try again in a few minutes; if it keeps happening, ask your developer or host to check the store\'s database.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'import_in_progress':
 			case 'import_not_run':
 				return __( 'WooCommerce Analytics hasn\'t finished importing your orders, so these figures would be incomplete. Wait for the import to finish (or start it under Analytics > Settings > Import historical data), then try again.', 'blaze-mcp-toolkit-for-woocommerce' );
@@ -162,7 +164,7 @@ final class AnalyticsGuard {
 	 *
 	 * @param array<string, mixed> $input   The analytics call's input; empty uses the resolver's default period.
 	 * @param string               $ability Ability name, when known (decides whether compare applies).
-	 * @return string|null One of analytics_disabled, import_in_progress, import_not_run, orders_not_imported.
+	 * @return string|null One of analytics_disabled, import_in_progress, import_not_run, orders_not_imported, analytics_unreadable.
 	 */
 	public static function unavailable_reason( array $input = array(), string $ability = '' ): ?string {
 		if ( 'yes' !== get_option( 'woocommerce_analytics_enabled', 'yes' ) ) {
@@ -270,10 +272,11 @@ final class AnalyticsGuard {
 	 * orders sync asynchronously). There is no clamp to the oldest synced order: a store that imported
 	 * only recent history still works for queries inside the imported range, and a query reaching
 	 * into un-imported dates is refused. Uses the type/status/date indexes with LIMIT 1. Cached per
-	 * set of windows: "no gap" for 6 hours, a gap for 15 minutes; cleared when import batches run.
+	 * set of windows: "no gap" for 6 hours, a gap for 15 minutes, a failed read (analytics_unreadable)
+	 * for 5 minutes; cleared when import batches run.
 	 *
 	 * @param array<int, array{key: string, from: int, to: int}>|null $windows Windows to check; null for the default period.
-	 * @return string|null import_not_run, orders_not_imported, or null.
+	 * @return string|null import_not_run, orders_not_imported, analytics_unreadable, or null.
 	 */
 	public static function sync_gap( ?array $windows = null ): ?string {
 		$windows = $windows ?? self::windows();
@@ -295,21 +298,36 @@ final class AnalyticsGuard {
 		// phpcs:enable
 
 		if ( $query_failed ) {
-			// wc_order_stats unreadable: the figures can't be trusted.
-			$reason = 'orders_not_imported';
+			// wc_order_stats unreadable: completeness can't be checked.
+			$reason = 'analytics_unreadable';
 		} else {
 			$reason = null;
 			$upper  = $now - self::SYNC_GRACE_SECONDS;
 			foreach ( $windows as $window ) {
 				$to = min( (int) $window['to'], $upper );
-				if ( (int) $window['from'] < $to && self::recent_order_missing( (int) $window['from'], $to ) ) {
+				if ( (int) $window['from'] >= $to ) {
+					continue;
+				}
+				$missing = self::recent_order_missing( (int) $window['from'], $to );
+				if ( null === $missing ) {
+					$reason = 'analytics_unreadable';
+					break;
+				}
+				if ( $missing ) {
 					$reason = null === $oldest_local ? 'import_not_run' : 'orders_not_imported';
 					break;
 				}
 			}
 		}
 
-		self::cache_result( $cache, $hash, $reason, null === $reason ? 6 * HOUR_IN_SECONDS : 15 * MINUTE_IN_SECONDS );
+		if ( null === $reason ) {
+			$ttl = 6 * HOUR_IN_SECONDS;
+		} elseif ( 'analytics_unreadable' === $reason ) {
+			$ttl = 5 * MINUTE_IN_SECONDS;
+		} else {
+			$ttl = 15 * MINUTE_IN_SECONDS;
+		}
+		self::cache_result( $cache, $hash, $reason, $ttl );
 
 		return $reason;
 	}
@@ -360,8 +378,9 @@ final class AnalyticsGuard {
 	 *
 	 * @param int $from_gmt Lower bound, Unix timestamp (inclusive).
 	 * @param int $to_gmt   Upper bound, Unix timestamp (exclusive).
+	 * @return bool|null Null when the query failed (a failed get_var() also returns null).
 	 */
-	private static function recent_order_missing( int $from_gmt, int $to_gmt ): bool {
+	private static function recent_order_missing( int $from_gmt, int $to_gmt ): ?bool {
 		global $wpdb;
 
 		$stats = $wpdb->prefix . 'wc_order_stats';
@@ -405,6 +424,9 @@ final class AnalyticsGuard {
 		}
 		// phpcs:enable
 
+		if ( '' !== $wpdb->last_error ) {
+			return null;
+		}
 		return null !== $found;
 	}
 }

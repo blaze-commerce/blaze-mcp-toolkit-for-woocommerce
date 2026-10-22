@@ -311,12 +311,14 @@ final class HealthSummary extends AbstractAbility {
 		$jobs                       = JobsHealth::summary( self::JOBS_DAYS );
 		$jobs['status']             = self::status_for( array( 'kind' => 'background_jobs' ) + $jobs );
 		$jobs['failed_window_days'] = self::JOBS_DAYS;
-		if ( ! $jobs['available'] ) {
+		if ( ! $jobs['available'] && $jobs['read_failed'] ) {
+			$notes[] = __( 'Background jobs couldn\'t be read from the database, so background job status is unknown, not healthy.', 'blaze-mcp-toolkit-for-woocommerce' );
+		} elseif ( ! $jobs['available'] ) {
 			$notes[] = __( 'Action Scheduler is not available (WooCommerce may be inactive), so background job status is unknown, not healthy.', 'blaze-mcp-toolkit-for-woocommerce' );
 		} elseif ( ! $jobs['by_hook_exact'] ) {
 			$notes[] = __( 'Action Scheduler is not using its database store, so the per-hook breakdown and money_related_failed are based on the most recent 200 failed and 200 overdue (more than an hour late) jobs.', 'blaze-mcp-toolkit-for-woocommerce' );
 		}
-		unset( $jobs['by_hook_exact'] );
+		unset( $jobs['by_hook_exact'], $jobs['read_failed'] );
 
 		// Updates.
 		$updates           = UpdatesHealth::summary();

@@ -370,6 +370,39 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	}
 	AnalyticsGuard::clear_cache();
 
+	// A failed guard read is an error, never "no gap" (audit F03), cached for at most 5 minutes.
+	$week_compare = array(
+		'subject' => 'revenue',
+		'period'  => 'last_7_days',
+		'compare' => true,
+	);
+	foreach ( array(
+		'missing-order query' => 's.order_id IS NULL',
+		'oldest-synced query' => 'MIN(date_created)',
+	) as $what => $needle ) {
+		$breaker = static function ( $query ) use ( $needle ) {
+			return is_string( $query ) && str_contains( $query, $needle ) ? 'SELECT order_id FROM blzmcp_it_missing_table_xyz' : $query;
+		};
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $breaker );
+		AnalyticsGuard::clear_cache();
+		$clear_upstream_cache();
+		$unreadable = $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null;
+		remove_filter( 'query', $breaker );
+		$wpdb->suppress_errors( $suppressed );
+		blzmcp_it_equals( 'analytics_unreadable', is_wp_error( $unreadable ) ? ( $unreadable->get_error_data()['reason'] ?? null ) : null, "{$what} failure: reason analytics_unreadable, not a pass" );
+		$msg = is_wp_error( $unreadable ) ? $unreadable->get_error_message() : '';
+		blzmcp_it_assert( str_starts_with( $msg, AnalyticsGuard::MESSAGE_TOKEN . ' ' ) && str_contains( $msg, "couldn't be read" ), "{$what} failure: plain owner-facing message" );
+		blzmcp_it_assert( ! str_contains( $msg, 'blzmcp_it_missing_table_xyz' ) && ! str_contains( $msg, 'SELECT' ) && ! str_contains( $msg, "doesn't exist" ), "{$what} failure: no SQL or database error in the message" );
+		blzmcp_it_equals( 'analytics_unreadable', AnalyticsGuard::cached_reason( $week_compare, 'wc-analytics/totals' ), "{$what} failure: not cached as none" );
+		$map     = get_transient( AnalyticsGuard::GAP_TRANSIENT );
+		$expires = is_array( $map ) ? max( array_column( $map, 'expires' ) ) : 0;
+		blzmcp_it_assert( $expires - time() <= 5 * MINUTE_IN_SECONDS && $expires > time(), "{$what} failure: cached for at most 5 minutes" );
+	}
+	AnalyticsGuard::clear_cache();
+	$clear_upstream_cache();
+	blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null ), 'after the failure clears: figures come back' );
+
 	// Resolver fallback: unknown period resolves to the package default (last 30 days).
 	$default_windows = AnalyticsGuard::windows( array( 'compare' => false ) );
 	blzmcp_it_equals( 1, count( $default_windows ), 'no period, compare off: one window' );

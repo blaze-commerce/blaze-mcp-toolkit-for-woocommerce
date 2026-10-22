@@ -192,6 +192,25 @@ ActionScheduler::store()->delete_action( $late_id );
 ActionScheduler::store()->delete_action( $recent_id );
 $clear_cache();
 
+// A failed Action Scheduler read is unknown (amber), never green (audit F03).
+$jobs_breaker = static function ( $query ) {
+	// Every Action Scheduler read (database store's grouped query or the sampled/hybrid store path).
+	return is_string( $query ) && str_contains( $query, 'actionscheduler_actions' ) && ! str_starts_with( ltrim( $query ), 'SHOW TABLES' ) ? 'SELECT hook FROM blzmcp_it_missing_table_xyz' : $query;
+};
+$suppressed = $wpdb->suppress_errors( true );
+add_filter( 'query', $jobs_breaker );
+$clear_cache();
+$broken = $ability->execute( array( 'since_hours' => 24 ) );
+remove_filter( 'query', $jobs_breaker );
+$wpdb->suppress_errors( $suppressed );
+$broken_json = (string) wp_json_encode( $broken );
+blzmcp_it_equals( false, $broken['background_jobs']['available'] ?? null, 'jobs read failure: background_jobs.available is false' );
+blzmcp_it_assert( in_array( $broken['background_jobs']['status'] ?? null, array( 'amber', 'red' ), true ) && 'green' !== ( $broken['overall'] ?? 'green' ), 'jobs read failure: status amber, never green' );
+blzmcp_it_assert( (bool) preg_grep( "/Background jobs couldn't be read/", (array) ( $broken['notes'] ?? array() ) ), 'jobs read failure: note says background jobs could not be read' );
+blzmcp_it_assert( ! str_contains( $broken_json, 'blzmcp_it_missing_table_xyz' ) && ! str_contains( $broken_json, "doesn't exist" ), 'jobs read failure: no SQL or database error text in output' );
+blzmcp_it_assert( ! array_key_exists( 'read_failed', (array) ( $broken['background_jobs'] ?? array() ) ), 'jobs read failure: internal read_failed flag not in output' );
+$clear_cache();
+
 // WooCommerce fatal logs: every daily file in the window is read, not just the newest.
 $wc_dir    = trailingslashit( WC_LOG_DIR );
 $wc_marker = 'blzmcp_it_wc_' . wp_generate_password( 8, false );

@@ -46,21 +46,24 @@ final class JobsHealth {
 	 *
 	 * With the default database store, per-hook figures come from one grouped query and
 	 * are exact. Otherwise they come from the newest SAMPLE actions per status and
-	 * by_hook_exact is false.
+	 * by_hook_exact is false. A failed database read gives available false and read_failed true
+	 * (never zero counts that look healthy).
 	 *
 	 * @param int $days Look-back window for failures.
-	 * @return array{available:bool,failed:int,past_due:int,money_related_failed:int,by_hook:array<int,array{hook:string,failed:int,past_due:int,money_related:bool}>,by_hook_exact:bool}
+	 * @return array{available:bool,read_failed:bool,failed:int,past_due:int,money_related_failed:int,by_hook:array<int,array{hook:string,failed:int,past_due:int,money_related:bool}>,by_hook_exact:bool}
 	 */
 	public static function summary( int $days = 7 ): array {
+		$unavailable = array(
+			'available'            => false,
+			'read_failed'          => false,
+			'failed'               => 0,
+			'past_due'             => 0,
+			'money_related_failed' => 0,
+			'by_hook'              => array(),
+			'by_hook_exact'        => true,
+		);
 		if ( ! self::available() ) {
-			return array(
-				'available'            => false,
-				'failed'               => 0,
-				'past_due'             => 0,
-				'money_related_failed' => 0,
-				'by_hook'              => array(),
-				'by_hook_exact'        => true,
-			);
+			return $unavailable;
 		}
 
 		$days  = max( 1, $days );
@@ -74,10 +77,16 @@ final class JobsHealth {
 		);
 		$past_due_query = self::past_due_query( $now );
 
-		$rows  = self::grouped_counts( $since, $now - self::PAST_DUE_GRACE );
+		$rows = self::grouped_counts( $since, $now - self::PAST_DUE_GRACE );
+		if ( false === $rows ) {
+			return array( 'read_failed' => true ) + $unavailable;
+		}
 		$exact = null !== $rows;
 		if ( null === $rows ) {
 			$rows = self::sampled_counts( $failed_query, $past_due_query );
+			if ( false === $rows ) {
+				return array( 'read_failed' => true ) + $unavailable;
+			}
 		}
 
 		$hooks = array();
@@ -108,6 +117,12 @@ final class JobsHealth {
 			}
 		}
 
+		$failed_total   = $exact ? $failed_sum : self::count( $failed_query, $failed_sum );
+		$past_due_total = $exact ? $past_due_sum : self::count( $past_due_query, $past_due_sum );
+		if ( null === $failed_total || null === $past_due_total ) {
+			return array( 'read_failed' => true ) + $unavailable;
+		}
+
 		$hooks = array_values( $hooks );
 		usort(
 			$hooks,
@@ -117,8 +132,9 @@ final class JobsHealth {
 
 		return array(
 			'available'            => true,
-			'failed'               => $exact ? $failed_sum : self::count( $failed_query, $failed_sum ),
-			'past_due'             => $exact ? $past_due_sum : self::count( $past_due_query, $past_due_sum ),
+			'read_failed'          => false,
+			'failed'               => $failed_total,
+			'past_due'             => $past_due_total,
 			'money_related_failed' => $money_failed,
 			'by_hook'              => array_slice( $hooks, 0, self::MAX_HOOKS ),
 			'by_hook_exact'        => $exact,
@@ -126,21 +142,25 @@ final class JobsHealth {
 	}
 
 	/**
-	 * Exact per-hook counts from the Action Scheduler table, or null when the
-	 * database store is not in use.
+	 * Exact per-hook counts from the Action Scheduler table, null when the database store is
+	 * not in use, or false when a read failed ($wpdb->last_error is set after the query).
 	 *
 	 * @param int $since  Failed since (Unix time).
 	 * @param int $cutoff Pending jobs scheduled before this are past due (Unix time).
-	 * @return array<int,array{hook:string,key:string,count:int}>|null
+	 * @return array<int,array{hook:string,key:string,count:int}>|null|false
 	 */
-	private static function grouped_counts( int $since, int $cutoff ): ?array {
+	private static function grouped_counts( int $since, int $cutoff ): array|null|false {
 		global $wpdb;
 		if ( ! class_exists( '\ActionScheduler_DBStore' ) || ! method_exists( '\ActionScheduler', 'store' ) || ! ( \ActionScheduler::store() instanceof \ActionScheduler_DBStore ) ) {
 			return null;
 		}
 		$table = $wpdb->prefix . 'actionscheduler_actions';
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Read-only existence check; result is cached by the ability.
-		if ( $table !== $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) ) {
+		$found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+		if ( '' !== $wpdb->last_error ) {
+			return false;
+		}
+		if ( $table !== $found ) {
 			return null;
 		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- One grouped read; the ability caches its result.
@@ -155,8 +175,9 @@ final class JobsHealth {
 			),
 			ARRAY_A
 		);
-		if ( ! is_array( $results ) ) {
-			return null;
+		// get_results() returns an empty array when a query fails, so check the error, not the type.
+		if ( '' !== $wpdb->last_error || ! is_array( $results ) ) {
+			return false;
 		}
 		$rows = array();
 		foreach ( $results as $r ) {
@@ -188,15 +209,19 @@ final class JobsHealth {
 	 *
 	 * @param array<string,mixed> $failed_query   Failed query.
 	 * @param array<string,mixed> $past_due_query Past-due query.
-	 * @return array<int,array{hook:string,key:string,count:int}>
+	 * @return array<int,array{hook:string,key:string,count:int}>|false False when a read failed.
 	 */
-	private static function sampled_counts( array $failed_query, array $past_due_query ): array {
+	private static function sampled_counts( array $failed_query, array $past_due_query ): array|false {
 		$rows = array();
 		foreach ( array(
 			'failed'   => $failed_query,
 			'past_due' => $past_due_query,
 		) as $key => $query ) {
-			foreach ( self::sample( $query ) as $action ) {
+			$actions = self::sample( $query );
+			if ( false === $actions ) {
+				return false;
+			}
+			foreach ( $actions as $action ) {
 				$hook = is_object( $action ) && method_exists( $action, 'get_hook' ) ? (string) $action->get_hook() : '';
 				$rows[] = array(
 					'hook'  => $hook,
@@ -225,10 +250,12 @@ final class JobsHealth {
 	 * Up to SAMPLE matching actions, newest first.
 	 *
 	 * @param array<string,mixed> $query Query args.
-	 * @return array<int|string,object>
+	 * @return array<int|string,object>|false False when the store's query failed.
 	 */
-	private static function sample( array $query ): array {
-		$actions = as_get_scheduled_actions(
+	private static function sample( array $query ): array|false {
+		global $wpdb;
+		$wpdb->last_error = '';
+		$actions          = as_get_scheduled_actions(
 			array_merge(
 				$query,
 				array(
@@ -238,16 +265,22 @@ final class JobsHealth {
 				)
 			)
 		);
+		// A failed query leaves an empty list; the error is what tells it apart from "no jobs".
+		if ( '' !== $wpdb->last_error ) {
+			return false;
+		}
 		return is_array( $actions ) ? $actions : array();
 	}
 
 	/**
-	 * Exact count via the store's count query; falls back to the sample size.
+	 * Exact count via the store's count query; falls back to the sample size. Null when the
+	 * count query failed.
 	 *
 	 * @param array<string,mixed> $query    Query args (timestamps).
 	 * @param int                 $fallback Sample size.
 	 */
-	private static function count( array $query, int $fallback ): int {
+	private static function count( array $query, int $fallback ): ?int {
+		global $wpdb;
 		if ( ! method_exists( '\ActionScheduler', 'store' ) ) {
 			return $fallback;
 		}
@@ -256,7 +289,11 @@ final class JobsHealth {
 				$query[ $key ] = new \DateTime( '@' . (int) $query[ $key ], new \DateTimeZone( 'UTC' ) );
 			}
 		}
-		$count = \ActionScheduler::store()->query_actions( $query, 'count' );
+		$wpdb->last_error = '';
+		$count            = \ActionScheduler::store()->query_actions( $query, 'count' );
+		if ( '' !== $wpdb->last_error ) {
+			return null;
+		}
 		return is_numeric( $count ) ? max( $fallback, (int) $count ) : $fallback;
 	}
 }
