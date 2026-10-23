@@ -71,9 +71,13 @@ final class Installer {
 
 	/**
 	 * Hooked to action_scheduler_init: finish a schedule that activation could
-	 * not do. Does nothing unless the flag is set.
+	 * not do. Does nothing unless the flag is set. Only admin, cron and WP-CLI
+	 * requests check the flag, so storefront pages run no query for it.
 	 */
 	public static function maybe_schedule(): void {
+		if ( ! is_admin() && ! wp_doing_cron() && ! ( defined( 'WP_CLI' ) && WP_CLI ) ) {
+			return;
+		}
 		if ( ! get_transient( self::PENDING_FLAG ) ) {
 			return;
 		}

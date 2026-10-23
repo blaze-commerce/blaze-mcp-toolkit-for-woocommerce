@@ -16,6 +16,9 @@ final class InstallerScheduleTest extends TestCase {
 		$GLOBALS['blzmcp_test_scheduled']   = array();
 		$GLOBALS['blzmcp_test_transients']  = array();
 		$GLOBALS['blzmcp_test_did_action']  = array();
+		$GLOBALS['blzmcp_test_transient_reads'] = array();
+		$GLOBALS['blzmcp_test_is_admin']    = true;
+		$GLOBALS['blzmcp_test_doing_cron']  = false;
 	}
 
 	public function test_schedules_immediately_when_scheduler_is_ready(): void {
@@ -29,6 +32,22 @@ final class InstallerScheduleTest extends TestCase {
 		$this->assertArrayNotHasKey( 'blzmcp_daily_cleanup', $GLOBALS['blzmcp_test_scheduled'] );
 
 		$GLOBALS['blzmcp_test_did_action']['action_scheduler_init'] = 1;
+		Installer::maybe_schedule();
+		$this->assertArrayHasKey( 'blzmcp_daily_cleanup', $GLOBALS['blzmcp_test_scheduled'] );
+		$this->assertFalse( get_transient( Installer::PENDING_FLAG ) );
+	}
+
+	public function test_front_end_request_never_reads_the_flag(): void {
+		Installer::schedule_cleanup();
+		$GLOBALS['blzmcp_test_did_action']['action_scheduler_init'] = 1;
+		$GLOBALS['blzmcp_test_is_admin']                            = false;
+
+		Installer::maybe_schedule();
+		$this->assertSame( array(), $GLOBALS['blzmcp_test_transient_reads'], 'front end: no option read, so no query' );
+		$this->assertArrayNotHasKey( 'blzmcp_daily_cleanup', $GLOBALS['blzmcp_test_scheduled'] );
+
+		// The next cron request finishes the job.
+		$GLOBALS['blzmcp_test_doing_cron'] = true;
 		Installer::maybe_schedule();
 		$this->assertArrayHasKey( 'blzmcp_daily_cleanup', $GLOBALS['blzmcp_test_scheduled'] );
 		$this->assertFalse( get_transient( Installer::PENDING_FLAG ) );

@@ -32,7 +32,18 @@ if ( ! function_exists( 'update_option' ) ) {
 }
 if ( ! function_exists( 'get_transient' ) ) {
 	function get_transient( string $name ) {
+		$GLOBALS['blzmcp_test_transient_reads'][] = $name;
 		return $GLOBALS['blzmcp_test_transients'][ $name ] ?? false;
+	}
+}
+if ( ! function_exists( 'is_admin' ) ) {
+	function is_admin(): bool {
+		return (bool) ( $GLOBALS['blzmcp_test_is_admin'] ?? false );
+	}
+}
+if ( ! function_exists( 'wp_doing_cron' ) ) {
+	function wp_doing_cron(): bool {
+		return (bool) ( $GLOBALS['blzmcp_test_doing_cron'] ?? false );
 	}
 }
 if ( ! function_exists( 'set_transient' ) ) {
