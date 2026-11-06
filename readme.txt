@@ -82,6 +82,10 @@ This plugin has no sign-in or keys, and registers no REST routes of its own. It 
 4. Add the connector URL in your assistant. In Claude: Customize > Connectors > Add > Add custom connector. In ChatGPT: Plugins > Add > Add custom MCP server. Log in to wp-admin in the same browser first, then click Connect and click Allow once.
 5. Ask: "Run my weekly store review."
 
+= Learn to run your store with AI =
+
+[Storemation](https://blazecommerce.io/storemation/) is Blaze Commerce's AI membership for WooCommerce store owners. It includes a lesson on setting up this toolkit, and shows you how to use Claude and ChatGPT for the rest of running your store.
+
 = Privacy =
 
 * Our diagnostics tools (store health, update history, access check) don't return customer contact details. They remove emails, phone numbers, card numbers and secrets from log lines, but log lines are free text and may still contain a name someone typed.
