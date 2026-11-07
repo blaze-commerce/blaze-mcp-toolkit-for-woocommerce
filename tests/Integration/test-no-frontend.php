@@ -153,6 +153,7 @@ try {
 		'wp_abilities_api_categories_init',
 		'wp_abilities_api_init',
 		'wp_register_ability_args',
+		'rest_endpoints', // REST-only filter: RequestContext wraps connector route callbacks.
 		'upgrader_process_complete',
 		'upgrader_pre_install',
 		'_core_updated_successfully',

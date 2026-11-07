@@ -14,6 +14,7 @@ use Blaze\McpToolkit\Abilities\Registrar;
 use Blaze\McpToolkit\Admin\SetupScreen;
 use Blaze\McpToolkit\Audit\AuditLog;
 use Blaze\McpToolkit\Bundled\Commerce;
+use Blaze\McpToolkit\Connectors\RequestContext;
 use Blaze\McpToolkit\Events\EventRecorder;
 use Blaze\McpToolkit\Events\EventStore;
 use Blaze\McpToolkit\Privacy\PolicyText;
@@ -39,6 +40,9 @@ final class Plugin {
 		EventRecorder::register();
 
 		Registrar::init();
+
+		// Records which connector served the current REST call.
+		RequestContext::register();
 
 		// wc-analytics/* public over MCP, whether our bundled copy or WooCommerce for Claude registers them.
 		McpExposure::register();
