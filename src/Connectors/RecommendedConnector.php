@@ -317,4 +317,13 @@ final class RecommendedConnector implements Connector {
 	public function label(): string {
 		return 'MCP Adapter and Enable Abilities for MCP';
 	}
+
+	/**
+	 * {@inheritDoc}
+	 *
+	 * MCP Adapter returns the ability's error message whole.
+	 */
+	public function max_error_message_bytes(): ?int {
+		return null;
+	}
 }

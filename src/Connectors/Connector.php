@@ -97,4 +97,10 @@ interface Connector {
 	 * Owner-facing connector name, e.g. "Easy MCP AI".
 	 */
 	public function label(): string;
+
+	/**
+	 * The most bytes of a tool error message this connector passes to the AI client, or null
+	 * when it passes the whole message.
+	 */
+	public function max_error_message_bytes(): ?int;
 }

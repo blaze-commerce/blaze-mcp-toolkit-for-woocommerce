@@ -34,6 +34,11 @@ final class AnalyticsNaming {
 	public const ERROR_CODE = 'extended_range_required';
 
 	/**
+	 * Bytes kept free under a connector's error-message limit.
+	 */
+	public const ERROR_MARGIN_BYTES = 10;
+
+	/**
 	 * Legacy executable alias => canonical ability slug. Bounded: nothing else is rewritten.
 	 */
 	public const ALIASES = array(
@@ -111,6 +116,7 @@ final class AnalyticsNaming {
 	 * @return mixed
 	 */
 	public static function translate_result( $result, Connector $connector ) {
+		$limit = $connector->max_error_message_bytes();
 		if ( ! $result instanceof \WP_Error || ! in_array( self::ERROR_CODE, $result->get_error_codes(), true ) ) {
 			return $result;
 		}
@@ -121,6 +127,9 @@ final class AnalyticsNaming {
 			foreach ( $result->get_error_messages( $code ) as $message ) {
 				if ( self::ERROR_CODE === $code ) {
 					$renamed = self::rename_aliases( (string) $message, $connector );
+					if ( null !== $limit && strlen( $renamed ) > $limit ) {
+						$renamed = self::compact_message( $renamed, $result->get_error_data( $code ), $connector, $limit - self::ERROR_MARGIN_BYTES );
+					}
 					$changed = $changed || $renamed !== $message;
 					$message = $renamed;
 				}
@@ -132,6 +141,49 @@ final class AnalyticsNaming {
 		}
 
 		return $changed ? $out : $result;
+	}
+
+	/**
+	 * The large-range recovery in a form that fits a connector's error-message limit. In order of
+	 * priority, later parts dropped first when over the budget: stop and ask the merchant; if they
+	 * say yes, call the confirm tool with the exact date_start, date_end and type; then re-run the
+	 * same call; don't split the range. The first three are always kept. Returns the message
+	 * unchanged when its dates or type can't be read.
+	 *
+	 * @param string    $message   The renamed large-range message.
+	 * @param mixed     $data      The error's data (cost_estimate.type is the literal type).
+	 * @param Connector $connector Connector.
+	 * @param int       $budget    Bytes to fit within.
+	 */
+	public static function compact_message( string $message, $data, Connector $connector, int $budget ): string {
+		$type = is_array( $data ) && isset( $data['cost_estimate']['type'] ) && is_string( $data['cost_estimate']['type'] ) ? $data['cost_estimate']['type'] : null;
+		if ( null === $type && preg_match( "/type='([^']+)'/", $message, $m ) ) {
+			$type = $m[1];
+		}
+		if ( ! preg_match( "/date_start='([0-9-]+)'/", $message, $start ) || ! preg_match( "/date_end='([0-9-]+)'/", $message, $end ) || null === $type ) {
+			return $message;
+		}
+		$days    = is_array( $data ) && isset( $data['cost_estimate']['range_days'] ) ? (int) $data['cost_estimate']['range_days'] : 0;
+		$confirm = $connector->tool_name( 'wc-analytics/confirm-large-range' );
+		$call    = sprintf( ' If yes, call %1$s date_start=%2$s date_end=%3$s type=%4$s description=<label>, then re-run the same call.', $confirm, $start[1], $end[1], $type );
+		$stop    = 'STOP: ask the merchant first.';
+		$out     = $stop . $call;
+		foreach ( array( " Don't split the range.", " Don't split it." ) as $tail ) {
+			if ( strlen( $out . $tail ) <= $budget ) {
+				$out .= $tail;
+				break;
+			}
+		}
+		if ( $days > 0 ) {
+			$with_days = sprintf( 'STOP: %d-day range; ask the merchant first.', $days ) . substr( $out, strlen( $stop ) );
+			if ( strlen( $with_days ) <= $budget ) {
+				$out = $with_days;
+			}
+		}
+		if ( strlen( $out ) > $budget ) {
+			$out = str_replace( ', then re-run the same call.', ', then re-run.', $out );
+		}
+		return $out;
 	}
 
 	/**

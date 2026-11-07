@@ -366,4 +366,15 @@ final class EasyMcpConnector implements Connector {
 	public function label(): string {
 		return 'Easy MCP AI';
 	}
+
+	/**
+	 * {@inheritDoc}
+	 *
+	 * Easy MCP AI 2.3.1 and 2.4.0 turn an ability's WP_Error into an exception and cut its message
+	 * to Detailed_Tool_Error::MAX_MESSAGE (200 bytes) in Server::sanitize_error_message(), adding
+	 * "…[truncated]". Abilities have no other channel to the client.
+	 */
+	public function max_error_message_bytes(): ?int {
+		return 200;
+	}
 }

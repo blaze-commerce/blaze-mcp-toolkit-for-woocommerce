@@ -414,8 +414,14 @@ for s in "${TRANSPORTS[@]}"; do
 	grep -q '\[truncated\]' <<<"$big_err" && note "$s: the client got a truncated large-range error (${#big_err} chars)"
 	if [ -n "$big_err" ] && grep -q "$confirm_name" <<<"$big_err"; then ok "$s: >365-day request asks for confirmation through $confirm_name"; else no "$s: >365-day request names $confirm_name ($(head -c 300 <<<"$big_err"))"; fi
 	grep -q 'wc-analytics-confirm-large-range' <<<"$big_err" && no "$s: large-range error still names wc-analytics-confirm-large-range" || ok "$s: large-range error has no obsolete alias"
-	call_tool "$s" "$confirm_name" "{\"date_start\":\"$big_start\",\"date_end\":\"$WINDOW_CURRENT_END\",\"type\":\"totals:revenue\",\"description\":\"Revenue for the last 14 months (matrix)\"}"
-	call_ok && ok "$s: merchant says yes: $confirm_name runs" || no "$s: $confirm_name ($(call_err | head -c 200))"
+	# The merchant says yes: confirm with only what the client received (tool name, dates, type).
+	got_tool=$(grep -oE "$confirm_name" <<<"$big_err" | head -1)
+	got_start=$(grep -oE "date_start='?[0-9]{4}-[0-9]{2}-[0-9]{2}" <<<"$big_err" | head -1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+	got_end=$(grep -oE "date_end='?[0-9]{4}-[0-9]{2}-[0-9]{2}" <<<"$big_err" | head -1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+	got_type=$(grep -oE "type='?[a-z_]+:[a-z_]+" <<<"$big_err" | head -1 | sed -E "s/^type='?//")
+	eq "$s: the received error carries the confirm tool, dates and type" "$confirm_name $big_start $WINDOW_CURRENT_END totals:revenue" "${got_tool:-?} ${got_start:-?} ${got_end:-?} ${got_type:-?}"
+	call_tool "$s" "${got_tool:-$confirm_name}" "$(jq -cn --arg a "$got_start" --arg b "$got_end" --arg t "$got_type" '{date_start:$a,date_end:$b,type:$t,description:"Revenue for the last 14 months (matrix)"}')"
+	call_ok && ok "$s: merchant says yes: $confirm_name runs with the received values" || no "$s: $confirm_name ($(call_err | head -c 200))"
 	call_tool "$s" "$totals_name" "$big_args"
 	call_ok && ok "$s: retried >365-day request runs after confirmation" || no "$s: retry after confirmation ($(call_err | head -c 200))"
 done

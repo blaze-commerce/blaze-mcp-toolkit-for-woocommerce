@@ -250,14 +250,33 @@ blzmcp_it_equals( 'extended_range_required', is_wp_error( $gate_error ) ? $gate_
 blzmcp_it_equals( 1, $GLOBALS['blzmcp_an_calls']['wc-analytics/totals'] ?? 0, "{$an_mode}: original callback ran exactly once" );
 blzmcp_it_assert( str_contains( $message, $expected_confirm ), "{$an_mode}: message names {$expected_confirm}" );
 blzmcp_it_assert( ! str_contains( $message, 'wc-analytics-confirm-large-range' ), "{$an_mode}: message has no legacy confirm alias" );
-blzmcp_it_assert( str_contains( $message, 'ANTI-SPLITTING RULE' ) && str_contains( $message, "type='totals:revenue'" ), "{$an_mode}: the rest of the message is kept" );
+// Easy MCP AI passes at most 200 bytes of an error message, so its recovery text is the compact
+// form; the recommended connector keeps the full message.
+$compact = $easy_stub;
+if ( $compact ) {
+	blzmcp_it_assert( strlen( $message ) <= 190, "{$an_mode}: compact message fits Easy MCP AI's limit with margin (" . strlen( $message ) . ' bytes)' );
+	blzmcp_it_assert( str_contains( $message, 'merchant' ) && str_starts_with( $message, 'STOP' ), "{$an_mode}: compact message says STOP and ask the merchant" );
+	blzmcp_it_assert( str_contains( $message, 'date_start=' . $input['date_start'] ) && str_contains( $message, 'date_end=' . $input['date_end'] ) && str_contains( $message, 'type=totals:revenue' ), "{$an_mode}: compact message carries the three exact values" );
+	blzmcp_it_assert( str_contains( $message, 're-run' ), "{$an_mode}: compact message says re-run" );
+	// Every gate type fits: the longest are totals:customer_value and breakdown:attribution.
+	$easy_conn = Connectors::get( 'easy-mcp' );
+	foreach ( array( 'totals:customer_value', 'breakdown:attribution', 'series:customers', 'totals:tax' ) as $t ) {
+		$long = "x date_start='2024-01-01', date_end='2026-11-07', type='{$t}' " . str_repeat( 'y', 900 );
+		$c    = AnalyticsNaming::compact_message( $long, array( 'cost_estimate' => array( 'type' => $t, 'range_days' => 1042 ) ), $easy_conn, 190 );
+		blzmcp_it_assert( strlen( $c ) <= 190 && str_contains( $c, 'type=' . $t ) && str_contains( $c, 'wp_ability_wc_analytics_confirm_large_range' ) && str_contains( $c, 'merchant' ) && str_contains( $c, 're-run' ), "compact form fits for {$t} (" . strlen( $c ) . " bytes): {$c}" );
+	}
+} else {
+	blzmcp_it_assert( str_contains( $message, 'ANTI-SPLITTING RULE' ) && str_contains( $message, "type='totals:revenue'" ), "{$an_mode}: the rest of the message is kept" );
+}
 
 $unwrapped = call_user_func( $GLOBALS['blzmcp_an_orig']['wc-analytics/totals'], $input );
 blzmcp_it_assert( is_wp_error( $unwrapped ) && 'extended_range_required' === $unwrapped->get_error_code(), "{$an_mode}: unwrapped call also returns the gate error" );
 if ( is_wp_error( $unwrapped ) && is_wp_error( $gate_error ) ) {
 	blzmcp_it_equals( $unwrapped->get_error_data(), $gate_error->get_error_data(), "{$an_mode}: error data (status, cost estimate) equals the unwrapped call's" );
 	blzmcp_it_equals( 400, $gate_error->get_error_data()['status'] ?? null, "{$an_mode}: status 400 kept" );
-	blzmcp_it_equals( str_replace( 'wc-analytics-confirm-large-range', $expected_confirm, $unwrapped->get_error_message() ), $message, "{$an_mode}: only the alias changed in the message" );
+	if ( ! $compact ) {
+		blzmcp_it_equals( str_replace( 'wc-analytics-confirm-large-range', $expected_confirm, $unwrapped->get_error_message() ), $message, "{$an_mode}: only the alias changed in the message" );
+	}
 }
 
 if ( $easy_stub && ! $rec_active ) {
@@ -270,6 +289,9 @@ if ( $easy_stub && ! $rec_active ) {
 } elseif ( $easy_stub ) {
 	$rec_frame = $gate_call( 'recommended' );
 	blzmcp_it_assert( is_wp_error( $rec_frame ) && str_contains( $rec_frame->get_error_message(), 'wc-analytics/confirm-large-range' ) && ! str_contains( $rec_frame->get_error_message(), 'wp_ability_' ), "{$an_mode}: inside a recommended frame the message names the canonical slug" );
+	if ( is_wp_error( $rec_frame ) && is_wp_error( $unwrapped ) ) {
+		blzmcp_it_equals( str_replace( 'wc-analytics-confirm-large-range', 'wc-analytics/confirm-large-range', $unwrapped->get_error_message() ), $rec_frame->get_error_message(), "{$an_mode}: inside a recommended frame the full message is unchanged apart from the alias" );
+	}
 	$nested = $gate_call( 'recommended', 'easy-mcp' );
 	blzmcp_it_assert( is_wp_error( $nested ) && str_contains( $nested->get_error_message(), 'wc-analytics/confirm-large-range' ) && ! str_contains( $nested->get_error_message(), 'wp_ability_' ), "{$an_mode}: a nested easy-mcp frame inside the call does not leak into the recovery text" );
 	$easy_frame = $gate_call( 'easy-mcp', 'recommended' );
