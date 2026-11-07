@@ -89,13 +89,6 @@ final class SetupChecks {
 	}
 
 	/**
-	 * Where Enable Abilities' own settings live.
-	 */
-	public static function enable_abilities_url(): string {
-		return Connectors::all()['recommended']->settings_url();
-	}
-
-	/**
 	 * Build one result row.
 	 *
 	 * @param string $id     Check id.

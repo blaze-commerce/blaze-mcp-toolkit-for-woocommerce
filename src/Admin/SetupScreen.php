@@ -152,7 +152,7 @@ final class SetupScreen {
 				: esc_html(
 					sprintf(
 						/* translators: %s: connection plugin name. */
-						__( 'Open %s settings', 'blaze-mcp-toolkit-for-woocommerce' ),
+						__( 'Open %s tools', 'blaze-mcp-toolkit-for-woocommerce' ),
 						$owner->label()
 					)
 				)
