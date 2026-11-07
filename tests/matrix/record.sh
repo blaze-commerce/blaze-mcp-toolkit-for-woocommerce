@@ -48,6 +48,12 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 		echo "| $state | $result | $p | $f | ${wpv:-?} | ${phpv:-?} | ${active:-?} |"
 	done
 	echo
+	echo "## Coverage notes"
+	echo
+	echo "- NOT COVERED: Easy MCP AI's auto-tick after an admin visits its Tools screen. On a store seeded before 1.1, Easy MCP AI did not tick the newly annotated wc-analytics tools on its own (its tool policy only records once that screen has been visited). Such stores rely on the setup screen's easy_tools_on row, which tells the owner to tick the analytics tools; the matrix asserts that row warns and names them."
+	echo "- Stub-only cases (malformed Tool_State::resolve() results, call counters) run in the fast checks, not here."
+	echo "- Large-range recovery through Easy MCP AI is checked on what the client receives (Easy MCP AI passes at most 200 bytes of an error message)."
+	echo
 	echo "## Failures, incomplete coverage and notes"
 	echo
 	echo "Check labels only, from the run's logs (no credentials or customer data are ever printed there)."
