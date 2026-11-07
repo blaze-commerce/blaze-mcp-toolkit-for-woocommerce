@@ -1,0 +1,183 @@
+<?php
+/**
+ * Connector-correct tool names in the analytics abilities' instruction text.
+ *
+ * @package Blaze\McpToolkit
+ */
+
+declare( strict_types=1 );
+
+namespace Blaze\McpToolkit\Abilities;
+
+use Blaze\McpToolkit\Connectors\Connector;
+use Blaze\McpToolkit\Connectors\Connectors;
+
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * The commerce-abilities package (our bundled copy and WooCommerce for Claude's) names other
+ * analytics tools by legacy aliases such as `wc-analytics-confirm-large-range`, in its
+ * descriptions and in the extended_range_required recovery error. Neither connector shows a tool
+ * by that name, so this filter renders those references per connector at runtime. It changes text
+ * only: never codes, data, permissions or the gate itself, and it never queries the registry.
+ */
+final class AnalyticsNaming {
+
+	/**
+	 * Ability name prefix this class translates.
+	 */
+	public const PREFIX = 'wc-analytics/';
+
+	/**
+	 * The gate's error code; only this error's message is rewritten.
+	 */
+	public const ERROR_CODE = 'extended_range_required';
+
+	/**
+	 * Legacy executable alias => canonical ability slug. Bounded: nothing else is rewritten.
+	 */
+	public const ALIASES = array(
+		'wc-analytics-confirm-large-range' => 'wc-analytics/confirm-large-range',
+		'wc-analytics-totals'              => 'wc-analytics/totals',
+		'wc-analytics-breakdown'           => 'wc-analytics/breakdown',
+		'wc-analytics-series'              => 'wc-analytics/series',
+		'wc-analytics-rows'                => 'wc-analytics/rows',
+	);
+
+	/**
+	 * Add the filter. Priority 30: after McpExposure (10) and AnalyticsGuard (20), so the
+	 * guard's wrapper is the callback this one calls.
+	 */
+	public static function register(): void {
+		add_filter( 'wp_register_ability_args', array( self::class, 'filter_args' ), 30, 2 );
+	}
+
+	/**
+	 * Render the description and wrap the execute callback of wc-analytics/* abilities.
+	 *
+	 * @param mixed  $args Ability registration args.
+	 * @param string $name Ability name.
+	 * @return mixed
+	 */
+	public static function filter_args( $args, $name = '' ) {
+		if ( ! is_array( $args ) || ! is_string( $name ) || ! str_starts_with( $name, self::PREFIX ) ) {
+			return $args;
+		}
+
+		// Descriptions are fixed at registration (a connector may capture them before any request
+		// context exists), so they follow the installed connectors, not the current request.
+		if ( isset( $args['description'] ) && is_string( $args['description'] ) ) {
+			$args['description'] = self::render_description( $args['description'], Connectors::state() );
+		}
+
+		if ( isset( $args['execute_callback'] ) && is_callable( $args['execute_callback'] ) ) {
+			$original                 = $args['execute_callback'];
+			$args['execute_callback'] = static function ( ...$call_args ) use ( $original ) {
+				// Resolve before the call, so no frame opened inside it can change the recovery text.
+				$connector = Connectors::execution();
+				return self::translate_result( call_user_func_array( $original, $call_args ), $connector );
+			};
+		}
+
+		return $args;
+	}
+
+	/**
+	 * Description text with every alias and canonical slug rendered for the connector state:
+	 * the labelled dual form while Easy MCP AI is active, otherwise the canonical slug.
+	 *
+	 * @param string $text  Description.
+	 * @param string $state Connectors::state() value.
+	 */
+	public static function render_description( string $text, string $state ): string {
+		$dual = in_array( $state, array( 'easy-mcp', 'both' ), true );
+		$out  = preg_replace_callback(
+			self::pattern( true ),
+			static function ( array $m ) use ( $dual ): string {
+				$slug = self::ALIASES[ $m[0] ] ?? $m[0];
+				return $dual ? self::dual_form( $slug ) : $slug;
+			},
+			$text
+		);
+		return is_string( $out ) ? $out : $text;
+	}
+
+	/**
+	 * The large-range error with its aliases named as the connector names them. Anything else
+	 * (other codes, results, an error with no alias in it) is returned as is.
+	 *
+	 * @param mixed     $result    Execute callback result.
+	 * @param Connector $connector Connector resolved before the call.
+	 * @return mixed
+	 */
+	public static function translate_result( $result, Connector $connector ) {
+		if ( ! $result instanceof \WP_Error || ! in_array( self::ERROR_CODE, $result->get_error_codes(), true ) ) {
+			return $result;
+		}
+
+		$changed = false;
+		$out     = new \WP_Error();
+		foreach ( $result->get_error_codes() as $code ) {
+			foreach ( $result->get_error_messages( $code ) as $message ) {
+				if ( self::ERROR_CODE === $code ) {
+					$renamed = self::rename_aliases( (string) $message, $connector );
+					$changed = $changed || $renamed !== $message;
+					$message = $renamed;
+				}
+				$out->add( $code, $message );
+			}
+			foreach ( $result->get_all_error_data( $code ) as $data ) {
+				$out->add_data( $data, $code );
+			}
+		}
+
+		return $changed ? $out : $result;
+	}
+
+	/**
+	 * Replace the alias keys (only) with the connector's tool name for the canonical slug.
+	 *
+	 * @param string    $text      Message.
+	 * @param Connector $connector Connector.
+	 */
+	private static function rename_aliases( string $text, Connector $connector ): string {
+		$out = preg_replace_callback(
+			self::pattern( false ),
+			static fn( array $m ): string => $connector->tool_name( self::ALIASES[ $m[0] ] ),
+			$text
+		);
+		return is_string( $out ) ? $out : $text;
+	}
+
+	/**
+	 * "Recommended connector: execute ability `<slug>`; Easy MCP AI: call `<easy name>`".
+	 *
+	 * @param string $slug Canonical ability slug.
+	 */
+	private static function dual_form( string $slug ): string {
+		$recommended = Connectors::get( 'recommended' );
+		$easy        = Connectors::get( 'easy-mcp' );
+		return sprintf(
+			'Recommended connector: execute ability `%1$s`; %2$s: call `%3$s`',
+			null !== $recommended ? $recommended->tool_name( $slug ) : $slug,
+			null !== $easy ? $easy->label() : 'Easy MCP AI',
+			null !== $easy ? $easy->tool_name( $slug ) : $slug
+		);
+	}
+
+	/**
+	 * Whole-token matcher for the aliases, and optionally the five canonical slugs. A token
+	 * continued by a letter, digit, `_`, `-` or `/` (e.g. `wc-analytics/totals-foo`) is left alone.
+	 *
+	 * @param bool $with_slugs Also match the canonical slash-form slugs.
+	 */
+	private static function pattern( bool $with_slugs ): string {
+		$tokens = array_keys( self::ALIASES );
+		if ( $with_slugs ) {
+			$tokens = array_merge( $tokens, array_values( self::ALIASES ) );
+		}
+		usort( $tokens, static fn( string $a, string $b ): int => strlen( $b ) <=> strlen( $a ) );
+		$alternation = implode( '|', array_map( static fn( string $t ): string => preg_quote( $t, '#' ), $tokens ) );
+		return '#(?<![A-Za-z0-9_/-])(?:' . $alternation . ')(?![A-Za-z0-9_/-])#';
+	}
+}

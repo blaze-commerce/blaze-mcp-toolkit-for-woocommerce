@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace Blaze\McpToolkit;
 
+use Blaze\McpToolkit\Abilities\AnalyticsNaming;
 use Blaze\McpToolkit\Abilities\McpExposure;
 use Blaze\McpToolkit\Abilities\Registrar;
 use Blaze\McpToolkit\Admin\SetupScreen;
@@ -46,6 +47,10 @@ final class Plugin {
 
 		// wc-analytics/* public over MCP, whether our bundled copy or WooCommerce for Claude registers them.
 		McpExposure::register();
+
+		// Connector-correct tool names in wc-analytics/* descriptions and the large-range error,
+		// whoever supplies the abilities (registered here, not in Commerce::load(), to cover stand-aside).
+		AnalyticsNaming::register();
 
 		// Bundled commerce-abilities and store tools, or stand aside for WooCommerce for Claude (plugins_loaded 20).
 		Commerce::register();

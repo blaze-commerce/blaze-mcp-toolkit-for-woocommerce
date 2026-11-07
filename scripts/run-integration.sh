@@ -37,7 +37,7 @@ for f in tests/Integration/test-bundled.php tests/Integration/test-workflows.php
 	fi
 done
 # Easy MCP AI stub (EASY_MCP_AI_VERSION defined while Enable Abilities stays active: the `both` state).
-for f in tests/Integration/test-connectors.php tests/Integration/test-connector-availability.php tests/Integration/test-workflows.php; do
+for f in tests/Integration/test-connectors.php tests/Integration/test-connector-availability.php tests/Integration/test-workflows.php tests/Integration/test-analytics-naming.php; do
 	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
@@ -47,6 +47,19 @@ for f in tests/Integration/test-connectors.php tests/Integration/test-connector-
 		fail=1
 	else
 		echo "PASS  $f [easy-stub] ($summary)"
+	fi
+done
+# Stand-aside plus the Easy MCP AI stub: analytics naming must hold whoever supplies wc-analytics/*.
+for f in tests/Integration/test-analytics-naming.php; do
+	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+	status=$?
+	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
+	if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
+		echo "FAIL  $f [stand-aside+easy-stub] (${summary:-no summary})"
+		printf '%s\n' "$out" | awk '/^FAIL/ && n++ < 20'
+		fail=1
+	else
+		echo "PASS  $f [stand-aside+easy-stub] ($summary)"
 	fi
 done
 # Easy MCP AI stub plus a stub Tool_State whose resolve() answers from a test global.
