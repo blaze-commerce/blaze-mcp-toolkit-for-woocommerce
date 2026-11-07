@@ -21,6 +21,27 @@ require_once __DIR__ . '/assert.php';
 use Blaze\McpToolkit\Abilities\McpExposure;
 use Blaze\McpToolkit\Bundled\AnalyticsGuard;
 use Blaze\McpToolkit\Bundled\Commerce;
+use Blaze\McpToolkit\Abilities\AnalyticsNaming;
+use Blaze\McpToolkit\Connectors\Connectors;
+
+/*
+ * The guard's owner-facing copy, as the caller receives it. Under a connector that cuts error
+ * messages (Easy MCP AI: 200 bytes), a direct call outside any route gets the compact per-reason
+ * form from AnalyticsNaming; that is asserted exactly here, and the full guard copy for the same
+ * reason is returned so the wording checks below still check AnalyticsGuard's text.
+ */
+$guard_message = static function ( $err ): string {
+	if ( ! is_wp_error( $err ) ) {
+		return '';
+	}
+	$limit = class_exists( Connectors::class ) ? Connectors::execution()->max_error_message_bytes() : null;
+	if ( null === $limit ) {
+		return $err->get_error_message();
+	}
+	$reason = (string) ( $err->get_error_data()['reason'] ?? '' );
+	blzmcp_it_equals( AnalyticsNaming::compact_unavailable( $reason, $limit - AnalyticsNaming::ERROR_MARGIN_BYTES ), $err->get_error_message(), "limited connector: {$reason} arrives in its compact form" );
+	return AnalyticsGuard::MESSAGE_TOKEN . ' ' . AnalyticsGuard::message( $reason );
+};
 
 $analytics_names = array(
 	'wc-analytics/totals',
@@ -277,7 +298,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$clear_upstream_cache();
 	$disabled = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
 	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $disabled ), 'analytics_import_incomplete_is_reported: Analytics off returns blzmcp_analytics_unavailable' );
-	blzmcp_it_assert( is_wp_error( $disabled ) && str_contains( $disabled->get_error_message(), 'turned off' ) && str_contains( $disabled->get_error_message(), 'Features' ), 'analytics off: plain turn-on message for the owner' );
+	blzmcp_it_assert( is_wp_error( $disabled ) && str_contains( $guard_message( $disabled ), 'turned off' ) && str_contains( AnalyticsGuard::message( 'analytics_disabled' ), 'Features' ), 'analytics off: plain turn-on message for the owner' );
 	blzmcp_it_assert( is_wp_error( $disabled ) && str_starts_with( $disabled->get_error_message(), AnalyticsGuard::MESSAGE_TOKEN . ' ' ), 'analytics off: message starts with the stable token' );
 	blzmcp_it_equals( 'analytics_disabled', is_wp_error( $disabled ) ? ( $disabled->get_error_data()['reason'] ?? null ) : null, 'analytics off: reason analytics_disabled' );
 	$valid_inputs = array(
@@ -353,7 +374,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	$incomplete = $totals instanceof WP_Ability ? $totals->execute( $totals_input ) : null;
 	blzmcp_it_equals( AnalyticsGuard::ERROR_CODE, $error_code( $incomplete ), 'analytics_import_incomplete_is_reported: recent unsynced order returns blzmcp_analytics_unavailable' );
 	blzmcp_it_equals( 'orders_not_imported', is_wp_error( $incomplete ) ? ( $incomplete->get_error_data()['reason'] ?? null ) : null, 'recent gap: reason orders_not_imported' );
-	blzmcp_it_assert( is_wp_error( $incomplete ) && str_contains( $incomplete->get_error_message(), 'Scheduled Actions' ), 'recent gap: message points to Scheduled Actions' );
+	blzmcp_it_assert( is_wp_error( $incomplete ) && str_contains( $guard_message( $incomplete ), 'Scheduled Actions' ), 'recent gap: message points to Scheduled Actions' );
 	blzmcp_it_equals( 'orders_not_imported', AnalyticsGuard::cached_reason( $totals_input, 'wc-analytics/totals' ), 'recent gap: result cached for the requested window' );
 	blzmcp_it_equals( 999, has_action( 'wc-admin_import_batch_orders', array( AnalyticsGuard::class, 'clear_cache' ) ), 'import batch hook clears the cached probe' );
 	blzmcp_it_equals( 999, has_action( 'wc-admin_import_batch_init_orders', array( AnalyticsGuard::class, 'clear_cache' ) ), 'import batch init hook clears the cached probe' );
@@ -457,7 +478,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		AnalyticsGuard::clear_cache();
 		$blocked = $totals instanceof WP_Ability ? $totals->execute( $week_compare ) : null;
 		blzmcp_it_equals( 'orders_not_imported', $reason_of( $blocked ), "{$label}: missing 5-day-old order blocks last_7_days + compare" );
-		blzmcp_it_assert( is_wp_error( $blocked ) && str_contains( $blocked->get_error_message(), 'requested dates include orders' ) && str_contains( $blocked->get_error_message(), 'Import historical data' ) && str_contains( $blocked->get_error_message(), 'more recent period' ), "{$label}: message names the requested dates, the import and a more recent period" );
+		blzmcp_it_assert( is_wp_error( $blocked ) && str_contains( $blzmcp_bm = $guard_message( $blocked ), 'requested dates include orders' ) && str_contains( $blzmcp_bm, 'Import historical data' ) && str_contains( $blzmcp_bm, 'more recent period' ), "{$label}: message names the requested dates, the import and a more recent period" );
 		blzmcp_it_equals( 'orders_not_imported', $reason_of( $totals instanceof WP_Ability ? $totals->execute( $week_only ) : null ), "{$label}: missing 5-day-old order blocks last_7_days without compare too" );
 		blzmcp_it_equals( 'orders_not_imported', $reason_of( $rows instanceof WP_Ability ? $rows->execute( array( 'entity' => 'orders', 'period' => 'last_7_days' ) ) : null ), "{$label}: rows for last_7_days is blocked too" );
 		blzmcp_it_assert( is_array( $totals instanceof WP_Ability ? $totals->execute( array( 'subject' => 'revenue', 'period' => 'yesterday', 'compare' => true ) ) : null ), "{$label}: yesterday + compare (does not reach 5 days back) still returns figures" );
@@ -558,7 +579,7 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		remove_filter( 'query', $breaker );
 		$wpdb->suppress_errors( $suppressed );
 		blzmcp_it_equals( 'analytics_unreadable', is_wp_error( $unreadable ) ? ( $unreadable->get_error_data()['reason'] ?? null ) : null, "{$what} failure: reason analytics_unreadable, not a pass" );
-		$msg = is_wp_error( $unreadable ) ? $unreadable->get_error_message() : '';
+		$msg = $guard_message( $unreadable );
 		blzmcp_it_assert( str_starts_with( $msg, AnalyticsGuard::MESSAGE_TOKEN . ' ' ) && str_contains( $msg, "couldn't be read" ), "{$what} failure: plain owner-facing message" );
 		blzmcp_it_assert( ! str_contains( $msg, 'blzmcp_it_missing_table_xyz' ) && ! str_contains( $msg, 'SELECT' ) && ! str_contains( $msg, "doesn't exist" ), "{$what} failure: no SQL or database error in the message" );
 		blzmcp_it_equals( 'analytics_unreadable', AnalyticsGuard::cached_reason( $week_compare, 'wc-analytics/totals' ), "{$what} failure: not cached as none" );
