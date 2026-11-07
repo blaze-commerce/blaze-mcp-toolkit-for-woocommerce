@@ -37,7 +37,20 @@ blzmcp_it_equals( rest_url( 'easy-mcp-ai/v1/mcp' ), Connectors::get( 'easy-mcp' 
 blzmcp_it_assert( str_contains( Connectors::get( 'recommended' )->run_instruction(), 'execute-ability tool' ), 'recommended run instruction' );
 blzmcp_it_assert( str_contains( Connectors::get( 'easy-mcp' )->run_instruction(), 'call the step\'s "tool" with its "arguments"' ), 'easy run instruction' );
 blzmcp_it_assert( in_array( '/wp-json/mcp/*', Connectors::get( 'recommended' )->firewall_paths(), true ), 'recommended firewall paths' );
-blzmcp_it_assert( in_array( '/easy-mcp-ai/*', Connectors::get( 'easy-mcp' )->firewall_paths(), true ), 'easy firewall paths' );
+blzmcp_it_equals( array( '/.well-known/oauth-*', '/.well-known/openid-configuration', '/easy-mcp-ai/*', '/wp-json/easy-mcp-ai/*', '/authorize', '/token' ), Connectors::get( 'easy-mcp' )->firewall_paths(), 'easy firewall paths include the root OAuth fallbacks' );
+
+// Production resolver: a real MCP Adapter route under /mcp/ has its callback wrapped in a recommended frame.
+Blaze\McpToolkit\Connectors\RequestContext::set_resolver( null );
+$blzmcp_route = '/mcp/mcp-adapter-default-server';
+remove_filter( 'rest_endpoints', array( Blaze\McpToolkit\Connectors\RequestContext::class, 'wrap_endpoints' ), PHP_INT_MAX );
+$blzmcp_raw = rest_get_server()->get_routes()[ $blzmcp_route ][0]['callback'] ?? null;
+add_filter( 'rest_endpoints', array( Blaze\McpToolkit\Connectors\RequestContext::class, 'wrap_endpoints' ), PHP_INT_MAX );
+$blzmcp_wrapped = rest_get_server()->get_routes()[ $blzmcp_route ][0]['callback'] ?? null;
+blzmcp_it_assert( null !== $blzmcp_raw, 'MCP Adapter route registered' );
+blzmcp_it_assert( $blzmcp_wrapped instanceof \Closure && $blzmcp_wrapped !== $blzmcp_raw, 'production resolver wraps the MCP Adapter route callback' );
+blzmcp_it_equals( 'recommended', $blzmcp_wrapped instanceof \Closure ? ( ( new \ReflectionFunction( $blzmcp_wrapped ) )->getClosureUsedVariables()['connector_id'] ?? null ) : null, 'wrapped MCP Adapter callback runs in the recommended frame' );
+$blzmcp_wc = rest_get_server()->get_routes()['/wc/v3/orders'][0]['callback'] ?? null;
+blzmcp_it_assert( ! ( $blzmcp_wc instanceof \Closure ), 'production resolver leaves other routes alone' );
 
 if ( ! $stub ) {
 	blzmcp_it_equals( 'recommended', Connectors::state(), 'state is recommended' );

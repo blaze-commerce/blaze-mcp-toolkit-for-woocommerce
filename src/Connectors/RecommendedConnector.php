@@ -34,7 +34,8 @@ final class RecommendedConnector implements Connector {
 	 * {@inheritDoc}
 	 */
 	public function owns_sign_in(): bool {
-		return $this->is_active() && ! ( new EasyMcpConnector() )->is_active();
+		$easy = Connectors::get( 'easy-mcp' );
+		return $this->is_active() && ! ( null !== $easy && $easy->is_active() );
 	}
 
 	/**
@@ -56,20 +57,31 @@ final class RecommendedConnector implements Connector {
 	}
 
 	/**
-	 * Placeholder until the exposure check lands.
+	 * Whether MCP Adapter exposes the ability to MCP clients: its own check when available, else
+	 * the ability's `mcp.public` meta. Read-only.
 	 *
 	 * @param \WP_Ability $ability Ability.
 	 */
 	public function is_exposed( \WP_Ability $ability ): bool|null {
-		return true;
+		if ( class_exists( '\WP\MCP\Abilities\McpAbilityExposure' ) ) {
+			return (bool) \WP\MCP\Abilities\McpAbilityExposure::is_public( $ability );
+		}
+		$meta = $ability->get_meta();
+
+		return true === ( $meta['mcp']['public'] ?? null );
 	}
 
 	/**
-	 * Placeholder until the diagnosis lands.
+	 * Removed for every connector when Enable Abilities for MCP's third-party denylist holds the
+	 * ability (it unregisters those at `wp_abilities_api_init`). Read-only.
 	 *
 	 * @param string $ability Ability name (slug).
 	 */
 	public function diagnose( string $ability ): ?Availability {
+		$disabled = get_option( 'ewpa_thirdparty_disabled', array() );
+		if ( is_array( $disabled ) && in_array( $ability, $disabled, true ) ) {
+			return new Availability( Availability::REMOVED_GLOBALLY, $this->id(), 'switched off in Enable Abilities for MCP', $this->settings_url() );
+		}
 		return null;
 	}
 
