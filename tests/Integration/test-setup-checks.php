@@ -353,6 +353,20 @@ try {
 		$by = array_column( SetupChecks::run(), null, 'id' );
 		blzmcp_it_equals( 'warn', $by['tools_visible']['status'], 'tools_visible warns when wc-analytics/totals is denylisted' );
 		blzmcp_it_assert( str_contains( $by['tools_visible']['fix'], 'wc-analytics/totals' ), 'tools_visible names the denylisted analytics tool' );
+
+		// 1.0 order and status (strings from SetupChecks at 8972431): ours in Registrar order, then
+		// wc-analytics in denylist order; any denylisted wc-analytics/* name counts.
+		$tv_label = 'Some Blaze MCP Toolkit tools are switched off in Enable Abilities';
+		$tv_fix   = static fn( string $names ): string => 'AI assistants cannot see: ' . $names . '. Turn them back on under Settings > WP Abilities, in the third-party tools list.';
+		update_option( 'ewpa_thirdparty_disabled', array( 'wc-analytics/breakdown', 'wc-analytics/totals' ) );
+		$tv = array_column( SetupChecks::run(), null, 'id' )['tools_visible'];
+		blzmcp_it_equals( array( 'warn', $tv_label, $tv_fix( 'wc-analytics/breakdown, wc-analytics/totals' ) ), array( $tv['status'], $tv['label'], $tv['fix'] ), 'denylisted analytics: the 1.0 row, in denylist order' );
+		update_option( 'ewpa_thirdparty_disabled', array( 'wc-analytics/totals', 'blaze-mcp-toolkit/update-history' ) );
+		$tv = array_column( SetupChecks::run(), null, 'id' )['tools_visible'];
+		blzmcp_it_equals( $tv_fix( 'blaze-mcp-toolkit/update-history, wc-analytics/totals' ), $tv['fix'], 'denylisted ours and analytics: ours first, then analytics (1.0 order)' );
+		update_option( 'ewpa_thirdparty_disabled', array( 'wc-analytics/x' ) );
+		$tv = array_column( SetupChecks::run(), null, 'id' )['tools_visible'];
+		blzmcp_it_equals( array( 'warn', $tv_label, $tv_fix( 'wc-analytics/x' ) ), array( $tv['status'], $tv['label'], $tv['fix'] ), 'denylisted wc-analytics/* outside the known five: still the 1.0 warn' );
 		update_option( 'ewpa_thirdparty_disabled', array() );
 		blzmcp_it_assert( ! str_contains( array_column( SetupChecks::run(), null, 'id' )['chatgpt_connector']['fix'], 'Claude does not need' ), 'no unverified Claude claim' );
 	}

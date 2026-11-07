@@ -272,11 +272,11 @@ final class RecommendedConnector implements Connector {
 	}
 
 	/**
-	 * Enable Abilities' third-party denylist.
+	 * Enable Abilities' third-party denylist, in its stored order. Read-only.
 	 *
 	 * @return array<int, string>
 	 */
-	private static function denylist(): array {
+	public static function denylist(): array {
 		$list = get_option( 'ewpa_thirdparty_disabled', array() );
 		return is_array( $list ) ? array_values( array_filter( $list, 'is_string' ) ) : array();
 	}

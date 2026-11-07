@@ -184,6 +184,13 @@ final class SetupChecks {
 		foreach ( Registrar::abilities() as $class_name ) {
 			$names[ $class_name::NAME ] = true;
 		}
+		// Denylisted wc-analytics names first, in denylist order (as 1.0 listed them, including names
+		// outside the known five), then the known ones.
+		foreach ( RecommendedConnector::denylist() as $denied ) {
+			if ( str_starts_with( $denied, AnalyticsNaming::PREFIX ) ) {
+				$names[ $denied ] ??= false;
+			}
+		}
 		foreach ( AnalyticsNaming::ALIASES as $analytics ) {
 			$names[ $analytics ] ??= false;
 		}
