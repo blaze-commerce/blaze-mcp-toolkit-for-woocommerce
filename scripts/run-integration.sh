@@ -178,6 +178,14 @@ else
 	echo "PASS  $f [none] ($summary)"
 fi
 if bash tests/Integration/frontend-curl.sh; then :; else fail=1; fi
+# The matrix recorder's zip inventory and byte-identity check (host-side, no wp-env).
+if rec_out=$(bash tests/matrix/test-record.sh 2>&1); then
+	echo "PASS  tests/matrix/test-record.sh ($(printf '%s\n' "$rec_out" | tail -1))"
+else
+	echo "FAIL  tests/matrix/test-record.sh"
+	printf '%s\n' "$rec_out" | awk '/^FAIL/ && n++ < 20'
+	fail=1
+fi
 [ "$fail" -eq 0 ] && echo "ALL INTEGRATION CHECKS PASSED" || echo "INTEGRATION CHECKS FAILED"
 echo "FAST CHECKS ONLY — NOT THE RELEASE GATE"
 exit $fail

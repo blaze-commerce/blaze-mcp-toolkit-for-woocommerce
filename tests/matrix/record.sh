@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Writes the matrix evidence record: ../reports/v1.1-matrix-<UTC date>.md (outside the repo).
+# An existing record is never overwritten: the next free -r2, -r3 … name is used instead, or
+# BLZMCP_MATRIX_OUT names the file (it must not exist yet).
 #
 #   bash tests/matrix/record.sh <summary.txt from run-matrix.sh> <PASSED|FAILED>
+#
+# Zip inventory and byte identity (fails the record, exit 3, on any problem): every file in the
+# zip must be byte-identical to its source at the evidence commit. vendor/woocommerce/
+# commerce-abilities/* is compared with vendor-src/commerce-abilities/*; the only other files
+# allowed without a git source are composer's vendor/autoload.php and vendor/composer/*. Every
+# tracked src/ file, the plugin's top-level files and every vendored source file must be in the
+# zip, and both matched counts must be above zero.
 #
 # Contents: the git commit, the candidate zip's SHA-256, the fixture window and timezone, and per
 # state the WP, WooCommerce, PHP and plugin versions (wp plugin list) with pass/fail counts.
@@ -13,27 +22,77 @@ VERDICT=${2:?PASSED or FAILED}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT_DIR=${BLZMCP_REPORTS_DIR:-$REPO/../reports}
 mkdir -p "$OUT_DIR"
-OUT="$OUT_DIR/v1.1-matrix-$(date -u +%Y-%m-%d).md"
+if [ -n "${BLZMCP_MATRIX_OUT:-}" ]; then
+	OUT=$BLZMCP_MATRIX_OUT
+	[ ! -e "$OUT" ] || { echo "MATRIX RECORD REFUSED: $OUT already exists"; exit 4; }
+else
+	base="$OUT_DIR/v1.1-matrix-$(date -u +%Y-%m-%d)"
+	OUT="$base.md"
+	n=2
+	while [ -e "$OUT" ]; do
+		OUT="$base-r$n.md"
+		n=$((n + 1))
+	done
+fi
 
 zip=$(sed -n 's/^ZIP=//p' "$SUMMARY")
 commit=$(sed -n 's/^COMMIT=//p' "$SUMMARY")
 window_file=$(sed -n 's/^WINDOW_FILE=//p' "$SUMMARY")
-# Tie the zip to the evidence commit: every file in the zip that git tracks must be byte-identical
-# to that file at the commit. Files git does not track (composer's vendor/ output) are build products.
+# Tie the zip to the evidence commit (see the header): byte identity for every shipped file,
+# vendored commerce files against vendor-src/, and an inventory of what must be present.
+PKG=blaze-mcp-toolkit-for-woocommerce
+VPFX=vendor/woocommerce/commerce-abilities/
+SPFX=vendor-src/commerce-abilities/
 check_dir=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-record.XXXXXX")
-unzip -q "$zip" -d "$check_dir"
-same=0
 differ=()
+same=0
+vendored=0
 built=0
+if ! unzip -Z1 "$zip" >"$check_dir/names" 2>/dev/null || ! unzip -q "$zip" -d "$check_dir/x"; then
+	differ+=("(zip unreadable)")
+fi
+if grep -qvE "^$PKG/" "$check_dir/names" 2>/dev/null || grep -qE '(^|/)\.\.(/|$)' "$check_dir/names" 2>/dev/null; then
+	differ+=("(zip has entries outside $PKG/)")
+fi
+: >"$check_dir/present"
 while IFS= read -r f; do
-	rel=${f#"$check_dir"/blaze-mcp-toolkit-for-woocommerce/}
-	if git -C "$REPO" cat-file -e "$commit:$rel" 2>/dev/null; then
-		if cmp -s "$f" <(git -C "$REPO" show "$commit:$rel"); then same=$((same + 1)); else differ+=("$rel"); fi
-	else
+	rel=${f#"$check_dir/x/$PKG"/}
+	echo "$rel" >>"$check_dir/present"
+	case "$rel" in
+	"$VPFX"*) src="$SPFX${rel#"$VPFX"}" ;;
+	vendor/autoload.php | vendor/composer/*)
 		built=$((built + 1))
+		continue
+		;;
+	vendor/*)
+		differ+=("$rel (unexpected vendor file)")
+		continue
+		;;
+	*) src=$rel ;;
+	esac
+	if ! git -C "$REPO" cat-file -e "$commit:$src" 2>/dev/null; then
+		differ+=("$rel (no source at commit)")
+	elif ! cmp -s "$f" <(git -C "$REPO" show "$commit:$src"); then
+		differ+=("$rel (bytes differ)")
+	elif [ "$src" != "$rel" ]; then
+		vendored=$((vendored + 1))
+	else
+		same=$((same + 1))
 	fi
-done < <(find "$check_dir/blaze-mcp-toolkit-for-woocommerce" -type f | sort)
+done < <(find "$check_dir/x/$PKG" -type f 2>/dev/null | sort)
+# Required: tracked src/ and the top-level plugin files; every vendored source except its build metadata.
+git -C "$REPO" ls-tree -r --name-only "$commit" >"$check_dir/tracked"
+{
+	grep -E '^src/' "$check_dir/tracked"
+	printf '%s\n' "$PKG.php" uninstall.php readme.txt composer.json LICENSE.txt
+	grep -E "^$SPFX" "$check_dir/tracked" | grep -vE '/(UPSTREAM|composer\.lock|package\.json)$' | sed "s|^$SPFX|$VPFX|"
+} | sort -u >"$check_dir/required"
+missing=()
+while IFS= read -r m; do missing+=("$m"); done < <(sort -u "$check_dir/present" | comm -23 "$check_dir/required" -)
 rm -rf "$check_dir"
+[ "$same" -gt 0 ] || differ+=("(no tracked files matched)")
+[ "$vendored" -gt 0 ] || differ+=("(no vendored commerce files matched)")
+for m in "${missing[@]}"; do differ+=("$m (missing from zip)"); done
 [ "${#differ[@]}" -eq 0 ] || VERDICT=FAILED
 name_commit=$(basename "$zip" .zip | sed -n 's/^candidate-//p')
 dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommerce.php uninstall.php readme.txt vendor-src | wc -l | tr -d ' ')
@@ -45,9 +104,10 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 	echo "- Git commit: \`$commit\`$([ "$dirty" != 0 ] && echo " (WARNING: $dirty uncommitted change(s) under src/ or the plugin files at record time)")"
 	echo "- Candidate: \`$(basename "$zip")\` (build commit per its name: \`${name_commit:-unknown}\`)"
 	if [ "${#differ[@]}" -eq 0 ]; then
-		echo "- Zip vs evidence commit: **byte-identical** — all $same git-tracked files in the zip match \`$commit\`; $built build-generated files (composer vendor/) are not in git"
+		echo "- Zip vs evidence commit: **byte-identical** — $same tracked shipped files match \`$commit\`; $vendored vendored files under \`$VPFX\` match \`$SPFX\` at that commit; $built composer runtime files (vendor/autoload.php, vendor/composer/*) have no git source"
+		echo "- Inventory: no required file missing (tracked src/, $PKG.php, uninstall.php, readme.txt, composer.json, LICENSE.txt, every vendored source file except UPSTREAM/composer.lock/package.json); no other unexpected vendor/ file"
 	else
-		echo "- Zip vs evidence commit: **DIFFERS** in ${#differ[@]} file(s): ${differ[*]:0:10}"
+		echo "- Zip vs evidence commit: **DIFFERS / INVENTORY FAILED** in ${#differ[@]} item(s): ${differ[*]:0:20}"
 	fi
 	echo "- SHA-256: \`$(shasum -a 256 "$zip" | awk '{print $1}')\`"
 	echo "- Runner: \`scripts/run-integration.sh --matrix $(basename "$zip")\`"
@@ -101,6 +161,6 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 } >"$OUT"
 echo "Evidence: $OUT"
 if [ "${#differ[@]}" -ne 0 ]; then
-	echo "CANDIDATE DOES NOT MATCH THE EVIDENCE COMMIT: ${#differ[@]} file(s) differ"
+	echo "CANDIDATE DOES NOT MATCH THE EVIDENCE COMMIT: ${#differ[@]} item(s): ${differ[*]:0:20}"
 	exit 3
 fi
