@@ -97,7 +97,7 @@ This plugin has no sign-in or keys, and registers no REST routes of its own. It 
 * The sales analytics tools (from WooCommerce for Claude) return totals, counts and, when asked, order rows with customers pseudonymised (Customer #N, never names or emails). They accept location filters such as billing city, state and postcode, but never filters on names or emails.
 * Text that comes from the site (log lines, labels people typed in) is shortened and marked as untrusted, so the AI treats it as data and not as instructions.
 * Each call to our tools is logged for 30 days: time, user ID, tool, a hash of the inputs, row count and duration. No customer data is logged. Store changes (updates, activations) are kept for 180 days.
-* * If you use Easy MCP AI, its other tools (such as its general read tool or its WooCommerce tools) can return customer details. The setup screen tells you where to switch them off.
+* If you use Easy MCP AI, its other tools (such as its general read tool or its WooCommerce tools) can return customer details. The setup screen tells you where to switch them off.
 * The plugin suggests wording for your privacy policy under Settings > Privacy.
 * Nothing is added to your storefront: no scripts, styles or front-end hooks.
 
@@ -149,11 +149,11 @@ In claude.ai, open Customize > Connectors > Add > Add custom connector and paste
 
 = Connecting fails with a 403 error =
 
-A firewall or CDN in front of your site (Cloudflare, Kinsta Bot Protection, a security plugin) is blocking the assistant's server. Add path exceptions for `/.well-known/oauth-*`, `/oauth/*` and `/wp-json/mcp/*`. Don't allow it by matching a user agent: that lets anything claiming to be the assistant through.
+A firewall or CDN in front of your site (Cloudflare, Kinsta Bot Protection, a security plugin) is blocking the assistant's server. With Option 1 (Enable Abilities), add path exceptions for `/.well-known/oauth-*`, `/oauth/*` and `/wp-json/mcp/*`. With Option 2 (Easy MCP AI), add them for `/.well-known/oauth-*`, `/.well-known/openid-configuration`, `/easy-mcp-ai/*`, `/wp-json/easy-mcp-ai/*`, `/authorize`, `/token` and `/register`. The setup screen lists the exact paths for your connection. Don't allow it by matching a user agent: that lets anything claiming to be the assistant through.
 
 = The sign-in page says the session expired or the state is invalid =
 
-Log in to wp-admin in the same browser before clicking Connect, then click Allow once. Clicking Allow twice shows an error even though the first click worked, so check the connector before trying again.
+Log in to wp-admin in the same browser before clicking Connect, then click the approve button once (Allow with Enable Abilities, Approve & Continue with Easy MCP AI). Clicking it twice shows an error even though the first click worked, so check the connector before trying again.
 
 = Why are some tools off for a Shop Manager? =
 
@@ -200,7 +200,7 @@ Yes, with High-Performance Order Storage on or off.
 == Upgrade Notice ==
 
 = 1.1.0 =
-Now works with Easy MCP AI or the recommended setup, uses the correct tool names for each, and fixes the long-range confirmation prompt. Nothing to change if you already use MCP Adapter with Enable Abilities for MCP.
+Now works with Easy MCP AI or the recommended setup, uses the correct tool names for each, and fixes the long-range confirmation prompt. Your recommended setup is unchanged.
 
 = 1.0.0 =
 First release: read-only store health, update history, access check and weekly review tools for Claude and ChatGPT.

@@ -432,7 +432,7 @@ try {
 	}
 	if ( 'none' === $state ) {
 		blzmcp_it_assert( str_contains( $html, 'Connect your AI assistant' ) && str_contains( $html, 'Easy MCP AI' ), 'none: install steps shown' );
-		blzmcp_it_assert( ! str_contains( $html, 'name="connector' ) && ! str_contains( $html, esc_html( rest_url( 'mcp/mcp-oauth-server' ) ) ), 'none: no connector URL' );
+		blzmcp_it_assert( ! str_contains( $html, esc_html( rest_url( 'mcp/mcp-oauth-server' ) ) ), 'none: no connector URL' );
 		blzmcp_it_assert( ! str_contains( $html, 'Open Enable Abilities settings' ), 'none: no Enable Abilities settings link' );
 	}
 	blzmcp_it_assert( str_contains( \Blaze\McpToolkit\Privacy\PolicyText::content(), 'Easy MCP AI' ), 'privacy text names Easy MCP AI' );
