@@ -62,18 +62,6 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	private const UNKNOWN_REASON = "couldn't confirm it is switched on";
 
 	/**
-	 * Plain words for the short reason codes a connector may add in brackets to a switched-off
-	 * reason. Unknown codes are dropped rather than shown.
-	 */
-	private const REASON_CODES = array(
-		'disabled' => 'switched off on its tools screen',
-		'held'     => 'new, and waiting to be switched on',
-		'policy'   => 'switched off by its tool settings',
-		'override' => "switched off by the site's configuration",
-		'default'  => 'off unless switched on',
-	);
-
-	/**
 	 * Store profile tool name. A string, not StoreProfile::NAME: referencing that class would load
 	 * it (and the store trait it uses) even while standing aside, when WooCommerce for Claude's own
 	 * copy of that trait may be the one in memory.
@@ -270,18 +258,6 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	}
 
 	/**
-	 * True when the ability exists, is exposed by the execution connector, and the current user
-	 * passes its permission check. Never runs the ability, and a denial here is not audited (it is a
-	 * probe, not a call).
-	 *
-	 * @param string               $ability Ability name.
-	 * @param array<string, mixed> $args    Arguments the step would run with.
-	 */
-	protected static function available( string $ability, array $args = array() ): bool {
-		return self::STEP_OK === static::step_status( Connectors::execution(), $ability, $args )[0];
-	}
-
-	/**
 	 * Why a step can or cannot run through connector $c: STEP_OK, STEP_MISSING or STEP_DENIED (the
 	 * current user's role fails its permission check), plus, for a missing step, the diagnosis when
 	 * one is known. Enable Abilities-style removal reported by any active connector wins; a
@@ -465,28 +441,12 @@ abstract class AbstractWorkflow extends AbstractAbility {
 		foreach ( $switched as [ $step, $why ] ) {
 			$where   = Connectors::get( $why->connector_id );
 			$label   = null === $where ? '' : $where->label();
-			$reason  = Availability::UNKNOWN === $why->kind ? self::UNKNOWN_REASON : self::plain_reason( $why->reason );
+			$reason  = Availability::UNKNOWN === $why->kind ? self::UNKNOWN_REASON : trim( $why->reason );
 			$lines[] = '- ' . $step['tool'] . ': ' . $step['why'] . ' Skipped: ' . ( '' !== $reason ? $reason : 'switched off' ) . '.'
 				. ( '' !== $label ? ' Switch it on in ' . $label . ( '' !== $why->settings_url ? ' (' . $why->settings_url . ')' : '' ) . '.' : '' );
 		}
 
 		return implode( "\n", $lines );
-	}
-
-	/**
-	 * A connector's reason with any trailing bracketed code, e.g. "(held)", turned into plain words
-	 * (or dropped when the code is not known).
-	 *
-	 * @param string $reason Reason from the connector.
-	 */
-	private static function plain_reason( string $reason ): string {
-		if ( 1 !== preg_match( '/^(.*?)\s*\(([a-z_-]+)\)\s*$/', $reason, $m ) ) {
-			return trim( $reason );
-		}
-		$base = trim( $m[1] );
-		$code = self::REASON_CODES[ $m[2] ] ?? '';
-
-		return '' === $code ? $base : $base . ': ' . $code;
 	}
 
 	/**

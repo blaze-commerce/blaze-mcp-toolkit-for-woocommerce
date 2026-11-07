@@ -218,7 +218,10 @@ if ( ! $toolstate ) {
 	$GLOBALS['blzmcp_toolstate_return'] = array( false, 'disabled' );
 	blzmcp_av_easy( $health, false, Availability::DISABLED_HERE, 'easy: ticked, resolve [false, disabled]', 'switched off in Easy MCP AI' );
 	$d = Connectors::get( 'easy-mcp' )->diagnose( BLZMCP_AV_SLUG );
-	blzmcp_it_assert( null !== $d && str_contains( $d->reason, 'disabled' ), 'easy: switched-off reason carries resolve()\'s reason' );
+	blzmcp_it_equals( 'switched off in Easy MCP AI: switched off on its tools screen', null !== $d ? $d->reason : null, 'easy: switched-off reason is resolve()\'s code in plain words' );
+	$GLOBALS['blzmcp_toolstate_return'] = array( false, 'mystery' );
+	$d                                  = Connectors::get( 'easy-mcp' )->diagnose( BLZMCP_AV_SLUG );
+	blzmcp_it_equals( 'switched off in Easy MCP AI', null !== $d ? $d->reason : null, 'easy: an unknown reason code is dropped, never shown raw' );
 
 	foreach (
 		array(

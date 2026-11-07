@@ -9,30 +9,32 @@ declare( strict_types=1 );
 
 namespace Blaze\McpToolkit\Admin;
 
+use Blaze\McpToolkit\Abilities\AnalyticsNaming;
 use Blaze\McpToolkit\Abilities\Registrar;
 use Blaze\McpToolkit\Bundled\AnalyticsGuard;
 use Blaze\McpToolkit\Bundled\Commerce;
+use Blaze\McpToolkit\Connectors\Availability;
+use Blaze\McpToolkit\Connectors\Connector;
+use Blaze\McpToolkit\Connectors\Connectors;
+use Blaze\McpToolkit\Connectors\RecommendedConnector;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
  * Builds the list of checks shown on the setup screen. Read-only: it only reads options and the
- * Abilities registry.
+ * Abilities registry. The connection row comes first, then the rows for the connection state:
+ * shared rows built here, connector rows from the sign-in owner's checks().
  */
 final class SetupChecks {
 
 	/**
-	 * Customer list and order-detail tools from Enable Abilities and WooCommerce core. These return
-	 * customer names, emails and addresses.
+	 * Row ids per connection state, after the connection row. Recommended is the 1.0 order.
 	 */
-	private const PII_ABILITIES = array(
-		'ewpa/wc-get-customers',
-		'ewpa/wc-get-order',
-		'ewpa/wc-get-orders',
-		'ewpa/get-users',
-		'ewpa/get-comments',
-		'ewpa/obtener-usuarios',
-		'woocommerce/orders-query',
+	private const ORDER = array(
+		'recommended' => array( 'woocommerce', 'mcp_adapter', 'enable_abilities', 'oauth_on', 'chatgpt_connector', 'tools_visible', 'wcfc_standaside', 'analytics_import', 'hpos_mode', 'pii_tools', 'write_tools', 'edge_guidance' ),
+		'easy-mcp'    => array( 'woocommerce', 'easy_tools_on', 'easy_signin_access', 'tools_visible', 'wcfc_standaside', 'analytics_import', 'hpos_mode', 'easy_rest_read', 'easy_write_tools', 'easy_woo_group', 'edge_guidance' ),
+		'both'        => array( 'woocommerce', 'easy_tools_on', 'easy_signin_access', 'tools_visible', 'wcfc_standaside', 'analytics_import', 'hpos_mode', 'easy_rest_read', 'easy_write_tools', 'easy_woo_group', 'edge_guidance' ),
+		'none'        => array( 'woocommerce', 'tools_visible', 'wcfc_standaside', 'analytics_import', 'hpos_mode' ),
 	);
 
 	/**
@@ -62,27 +64,35 @@ final class SetupChecks {
 	 * @return array<int, array{id: string, status: string, label: string, fix: string}>
 	 */
 	public static function run(): array {
-		return array(
-			self::woocommerce(),
-			self::mcp_adapter(),
-			self::enable_abilities(),
-			self::oauth_on(),
-			self::chatgpt_connector(),
-			self::tools_visible(),
-			self::wcfc_standaside(),
-			self::analytics_import(),
-			self::hpos_mode(),
-			self::pii_tools(),
-			self::write_tools(),
-			self::edge_guidance(),
+		$state = Connectors::state();
+		$owner = Connectors::signin_owner();
+
+		$rows = array(
+			'woocommerce'      => self::woocommerce(),
+			'tools_visible'    => self::tools_visible( $state, $owner ),
+			'wcfc_standaside'  => self::wcfc_standaside(),
+			'analytics_import' => self::analytics_import(),
+			'hpos_mode'        => self::hpos_mode(),
 		);
+		if ( null !== $owner ) {
+			$rows                 += $owner->checks();
+			$rows['edge_guidance'] = self::edge_guidance( $owner );
+		}
+
+		$out = array( self::connection( $state ) );
+		foreach ( self::ORDER[ $state ] ?? self::ORDER['none'] as $id ) {
+			if ( isset( $rows[ $id ] ) ) {
+				$out[] = $rows[ $id ];
+			}
+		}
+		return $out;
 	}
 
 	/**
 	 * Where Enable Abilities' own settings live.
 	 */
 	public static function enable_abilities_url(): string {
-		return admin_url( 'options-general.php?page=ewpa-settings' );
+		return Connectors::all()['recommended']->settings_url();
 	}
 
 	/**
@@ -94,13 +104,55 @@ final class SetupChecks {
 	 * @param string $fix    What to do (empty when passing).
 	 * @return array{id: string, status: string, label: string, fix: string}
 	 */
-	private static function result( string $id, string $status, string $label, string $fix = '' ): array {
+	public static function result( string $id, string $status, string $label, string $fix = '' ): array {
 		return array(
 			'id'     => $id,
 			'status' => $status,
 			'label'  => $label,
 			'fix'    => $fix,
 		);
+	}
+
+	/**
+	 * How AI assistants connect: which connection plugin is active.
+	 *
+	 * @param string $state Connectors::state().
+	 * @return array{id: string, status: string, label: string, fix: string}
+	 */
+	private static function connection( string $state ): array {
+		$rec  = Connectors::all()['recommended']->label();
+		$easy = Connectors::all()['easy-mcp']->label();
+		switch ( $state ) {
+			case 'recommended':
+				/* translators: %s: connection plugin names. */
+				return self::result( 'connection', 'pass', sprintf( __( 'Connected through %s', 'blaze-mcp-toolkit-for-woocommerce' ), $rec ) );
+			case 'easy-mcp':
+				/* translators: %s: connection plugin name. */
+				return self::result( 'connection', 'pass', sprintf( __( 'Connected through %s', 'blaze-mcp-toolkit-for-woocommerce' ), $easy ) );
+			case 'both':
+				return self::result(
+					'connection',
+					'warn',
+					__( 'Two connection plugins are active', 'blaze-mcp-toolkit-for-woocommerce' ),
+					sprintf(
+						/* translators: %s: connection plugin name. */
+						__( 'New Claude or ChatGPT connections go through %1$s: for a new connection, use the %1$s connection link below. To use the other one for new connections, deactivate %1$s.', 'blaze-mcp-toolkit-for-woocommerce' ),
+						$easy
+					)
+				);
+			default:
+				return self::result(
+					'connection',
+					'fail',
+					__( 'No AI connection plugin yet', 'blaze-mcp-toolkit-for-woocommerce' ),
+					sprintf(
+						/* translators: 1: recommended plugin names, 2: the other supported plugin. */
+						__( 'Claude and ChatGPT need a connection plugin to reach your store. We recommend %1$s: install and activate both from the Plugins screen, then come back here. If you already use %2$s, activate it instead; this plugin works with either.', 'blaze-mcp-toolkit-for-woocommerce' ),
+						$rec,
+						$easy
+					)
+				);
+		}
 	}
 
 	/**
@@ -116,78 +168,42 @@ final class SetupChecks {
 	}
 
 	/**
-	 * MCP Adapter is loaded (as its own plugin or a copy bundled by another plugin).
+	 * Our tools (and the wc-analytics tools the workflows use) are registered and reachable. Every
+	 * active connector's diagnose() is asked: removal by any connector wins, a switched-off or
+	 * unknown state counts only from the sign-in owner. A tool of ours that is neither registered
+	 * nor removed gets the registration advice. On the recommended setup, Enable Abilities removals
+	 * read exactly as in 1.0.
 	 *
+	 * @param string         $state Connectors::state().
+	 * @param Connector|null $owner Sign-in owner.
 	 * @return array{id: string, status: string, label: string, fix: string}
 	 */
-	private static function mcp_adapter(): array {
-		if ( class_exists( 'WP\MCP\Core\McpAdapter' ) ) {
-			return self::result( 'mcp_adapter', 'pass', __( 'MCP Adapter is loaded', 'blaze-mcp-toolkit-for-woocommerce' ) );
-		}
-		return self::result( 'mcp_adapter', 'fail', __( 'MCP Adapter is not loaded', 'blaze-mcp-toolkit-for-woocommerce' ), __( 'Install and activate the MCP Adapter plugin. AI assistants reach your store through it.', 'blaze-mcp-toolkit-for-woocommerce' ) );
-	}
-
-	/**
-	 * Enable Abilities for MCP is active.
-	 *
-	 * @return array{id: string, status: string, label: string, fix: string}
-	 */
-	private static function enable_abilities(): array {
-		if ( defined( 'EWPA_OPTION_KEY' ) || function_exists( 'ewpa_render_settings_page' ) ) {
-			return self::result( 'enable_abilities', 'pass', __( 'Enable Abilities for MCP is active', 'blaze-mcp-toolkit-for-woocommerce' ) );
-		}
-		return self::result( 'enable_abilities', 'fail', __( 'Enable Abilities for MCP is not active', 'blaze-mcp-toolkit-for-woocommerce' ), __( 'Install and activate Enable Abilities for MCP. It provides the connector URL and sign-in that Claude and ChatGPT use.', 'blaze-mcp-toolkit-for-woocommerce' ) );
-	}
-
-	/**
-	 * Enable Abilities' OAuth sign-in is on.
-	 *
-	 * @return array{id: string, status: string, label: string, fix: string}
-	 */
-	private static function oauth_on(): array {
-		if ( (bool) get_option( 'ewpa_oauth_enabled', false ) ) {
-			return self::result( 'oauth_on', 'pass', __( 'OAuth sign-in is on in Enable Abilities', 'blaze-mcp-toolkit-for-woocommerce' ) );
-		}
-		return self::result( 'oauth_on', 'warn', __( 'OAuth sign-in is off in Enable Abilities', 'blaze-mcp-toolkit-for-woocommerce' ), __( 'Open Settings > WP Abilities and turn on OAuth. Claude connects with it.', 'blaze-mcp-toolkit-for-woocommerce' ) );
-	}
-
-	/**
-	 * Enable Abilities' ChatGPT and other third-party OAuth connectors are on.
-	 *
-	 * @return array{id: string, status: string, label: string, fix: string}
-	 */
-	private static function chatgpt_connector(): array {
-		if ( (bool) get_option( 'ewpa_oauth_connectors_enabled', false ) ) {
-			return self::result( 'chatgpt_connector', 'pass', __( 'ChatGPT and other OAuth connectors are on in Enable Abilities', 'blaze-mcp-toolkit-for-woocommerce' ) );
-		}
-		return self::result( 'chatgpt_connector', 'warn', __( 'ChatGPT and other OAuth connectors are off in Enable Abilities', 'blaze-mcp-toolkit-for-woocommerce' ), __( 'Open Settings > WP Abilities and turn on "ChatGPT & Other OAuth Connectors". Needed for ChatGPT and other OAuth clients.', 'blaze-mcp-toolkit-for-woocommerce' ) );
-	}
-
-	/**
-	 * Our tools are registered and not switched off in Enable Abilities.
-	 *
-	 * @return array{id: string, status: string, label: string, fix: string}
-	 */
-	private static function tools_visible(): array {
-		$denylist = self::denylist();
-		$missing  = array();
-		$disabled = array();
-
+	private static function tools_visible( string $state, ?Connector $owner ): array {
+		$active = array_filter( Connectors::all(), static fn( Connector $c ): bool => $c->is_active() );
+		$names  = array();
 		foreach ( Registrar::abilities() as $class_name ) {
-			$name = $class_name::NAME;
-			// Denylist first: Enable Abilities unregisters switched-off tools at the end of
-			// wp_abilities_api_init, so they also look unregistered.
-			if ( in_array( $name, $denylist, true ) ) {
-				$disabled[] = $name;
-			} elseif ( ! function_exists( 'wp_has_ability' ) || ! wp_has_ability( $name ) ) {
-				$missing[] = $name;
-			}
+			$names[ $class_name::NAME ] = true;
+		}
+		foreach ( AnalyticsNaming::ALIASES as $analytics ) {
+			$names[ $analytics ] ??= false;
 		}
 
-		// The workflows depend on the analytics tools, whoever registers them.
-		foreach ( $denylist as $denied ) {
-			if ( str_starts_with( $denied, 'wc-analytics/' ) ) {
-				$disabled[] = $denied;
+		$missing = array();
+		$groups  = array();
+		foreach ( $names as $name => $ours ) {
+			$why        = self::diagnosis( $name, $active, $owner );
+			$registered = function_exists( 'wp_has_ability' ) && wp_has_ability( $name );
+			if ( ! $registered && ( null === $why || Availability::REMOVED_GLOBALLY !== $why->kind ) ) {
+				// Not on this store. Ours should be; wc-analytics may simply be absent.
+				if ( $ours ) {
+					$missing[] = $name;
+				}
+				continue;
+			}
+			if ( null !== $why ) {
+				$key                       = $why->kind . '|' . $why->connector_id . '|' . $why->reason;
+				$groups[ $key ]['why']     = $why;
+				$groups[ $key ]['names'][] = $name;
 			}
 		}
 
@@ -200,16 +216,81 @@ final class SetupChecks {
 				sprintf( __( 'These tools did not register: %s. Deactivate and reactivate the plugin, and check that WordPress is 6.9 or newer.', 'blaze-mcp-toolkit-for-woocommerce' ), implode( ', ', $missing ) )
 			);
 		}
-		if ( $disabled ) {
+		if ( ! $groups ) {
+			return null === $owner
+				? self::result( 'tools_visible', 'pass', __( 'Blaze MCP Toolkit tools are registered', 'blaze-mcp-toolkit-for-woocommerce' ) )
+				: self::result( 'tools_visible', 'pass', __( 'Blaze MCP Toolkit tools are registered and visible to AI assistants', 'blaze-mcp-toolkit-for-woocommerce' ) );
+		}
+
+		$only_rec_removed = 'recommended' === $state;
+		$switched_off     = false;
+		foreach ( $groups as $group ) {
+			$only_rec_removed = $only_rec_removed && Availability::REMOVED_GLOBALLY === $group['why']->kind && 'recommended' === $group['why']->connector_id;
+			$switched_off     = $switched_off || Availability::UNKNOWN !== $group['why']->kind;
+		}
+		if ( $only_rec_removed ) {
 			return self::result(
 				'tools_visible',
 				'warn',
 				__( 'Some Blaze MCP Toolkit tools are switched off in Enable Abilities', 'blaze-mcp-toolkit-for-woocommerce' ),
 				/* translators: %s: comma separated tool names. */
-				sprintf( __( 'AI assistants cannot see: %s. Turn them back on under Settings > WP Abilities, in the third-party tools list.', 'blaze-mcp-toolkit-for-woocommerce' ), implode( ', ', $disabled ) )
+				sprintf( __( 'AI assistants cannot see: %s. Turn them back on under Settings > WP Abilities, in the third-party tools list.', 'blaze-mcp-toolkit-for-woocommerce' ), implode( ', ', array_merge( ...array_column( $groups, 'names' ) ) ) )
 			);
 		}
-		return self::result( 'tools_visible', 'pass', __( 'Blaze MCP Toolkit tools are registered and visible to AI assistants', 'blaze-mcp-toolkit-for-woocommerce' ) );
+
+		$lines = array();
+		foreach ( $groups as $group ) {
+			$why     = $group['why'];
+			$lines[] = Availability::UNKNOWN === $why->kind
+				? sprintf(
+					/* translators: 1: comma separated tool names, 2: reason, 3: settings screen URL. */
+					__( 'Couldn\'t check %1$s: %2$s. Check them at %3$s.', 'blaze-mcp-toolkit-for-woocommerce' ),
+					implode( ', ', $group['names'] ),
+					$why->reason,
+					$why->settings_url
+				)
+				: sprintf(
+					/* translators: 1: comma separated tool names, 2: reason, 3: settings screen URL. */
+					__( 'AI assistants cannot see %1$s: %2$s. Switch them on at %3$s.', 'blaze-mcp-toolkit-for-woocommerce' ),
+					implode( ', ', $group['names'] ),
+					$why->reason,
+					$why->settings_url
+				);
+		}
+		return self::result(
+			'tools_visible',
+			'warn',
+			$switched_off
+				? __( 'Some Blaze MCP Toolkit tools are switched off', 'blaze-mcp-toolkit-for-woocommerce' )
+				: __( 'Couldn\'t check whether some Blaze MCP Toolkit tools are switched on', 'blaze-mcp-toolkit-for-woocommerce' ),
+			implode( ' ', $lines )
+		);
+	}
+
+	/**
+	 * Why an ability is unavailable: the first removal reported by an active connector, else the
+	 * sign-in owner's switched-off or unknown state, else null. diagnose() is only asked of active
+	 * connectors.
+	 *
+	 * @param string                  $name   Ability name.
+	 * @param array<string,Connector> $active Active connectors.
+	 * @param Connector|null          $owner  Sign-in owner.
+	 */
+	private static function diagnosis( string $name, array $active, ?Connector $owner ): ?Availability {
+		$own = null;
+		foreach ( $active as $connector ) {
+			$why = $connector->diagnose( $name );
+			if ( null === $why ) {
+				continue;
+			}
+			if ( Availability::REMOVED_GLOBALLY === $why->kind ) {
+				return $why;
+			}
+			if ( null !== $owner && $connector->id() === $owner->id() ) {
+				$own = $why;
+			}
+		}
+		return $own;
 	}
 
 	/**
@@ -263,116 +344,29 @@ final class SetupChecks {
 	}
 
 	/**
-	 * Other tools that expose customer names, emails or addresses.
+	 * Reminder about the edge (CDN or firewall) in front of the site, with the sign-in owner's
+	 * paths.
 	 *
+	 * @param Connector $owner Sign-in owner.
 	 * @return array{id: string, status: string, label: string, fix: string}
 	 */
-	private static function pii_tools(): array {
-		$found = array();
-		foreach ( self::exposed_abilities() as $name => $ability ) {
-			if ( self::is_pii_name( $name ) ) {
-				$found[] = $name;
-			}
-		}
+	private static function edge_guidance( Connector $owner ): array {
+		$paths = $owner->firewall_paths();
+		$last  = array_pop( $paths );
+		$list  = $paths ? implode( ', ', $paths ) . ' ' . __( 'and', 'blaze-mcp-toolkit-for-woocommerce' ) . ' ' . $last : (string) $last;
+		$allow = 'recommended' === $owner->id() ? __( 'Allow', 'blaze-mcp-toolkit-for-woocommerce' ) : __( 'Approve & Continue', 'blaze-mcp-toolkit-for-woocommerce' );
 
-		if ( ! $found ) {
-			return self::result( 'pii_tools', 'pass', __( 'No customer or order-detail tools are exposed by other plugins', 'blaze-mcp-toolkit-for-woocommerce' ) );
-		}
-		return self::result(
-			'pii_tools',
-			'warn',
-			__( 'Other plugins expose tools that return customer personal data', 'blaze-mcp-toolkit-for-woocommerce' ),
-			sprintf(
-				/* translators: %s: comma separated tool names. */
-				__( 'These tools can return customer names, emails and addresses to your AI provider: %s. Our tools never do. To turn the tools off, open Settings > WP Abilities and switch them off (WooCommerce core tools are in the third-party list).', 'blaze-mcp-toolkit-for-woocommerce' ),
-				implode( ', ', $found )
-			)
-		);
-	}
-
-	/**
-	 * Other tools that can change the store or site.
-	 *
-	 * @return array{id: string, status: string, label: string, fix: string}
-	 */
-	private static function write_tools(): array {
-		$found = array();
-		foreach ( self::exposed_abilities() as $name => $ability ) {
-			if ( self::is_write( $name, $ability->get_meta()['annotations'] ?? array() ) ) {
-				$found[] = $name;
-			}
-		}
-
-		if ( ! $found ) {
-			return self::result( 'write_tools', 'pass', __( 'No other plugins expose tools that can change your store', 'blaze-mcp-toolkit-for-woocommerce' ) );
-		}
-
-		$shown = array_slice( $found, 0, 12 );
-		$more  = count( $found ) - count( $shown );
-		return self::result(
-			'write_tools',
-			'warn',
-			__( 'Other plugins expose tools that can change your store', 'blaze-mcp-toolkit-for-woocommerce' ),
-			sprintf(
-				/* translators: 1: number of tools, 2: comma separated tool names, 3: extra count text. */
-				__( '%1$d tools from WooCommerce core or Enable Abilities can create, edit or delete content and orders: %2$s%3$s. Our own tools are read-only, but these are not. If you want a read-only connection, turn them off under Settings > WP Abilities.', 'blaze-mcp-toolkit-for-woocommerce' ),
-				count( $found ),
-				implode( ', ', $shown ),
-				$more > 0 ? sprintf( /* translators: %d: number of further tools. */ __( ' and %d more', 'blaze-mcp-toolkit-for-woocommerce' ), $more ) : ''
-			)
-		);
-	}
-
-	/**
-	 * Reminder about the edge (CDN or firewall) in front of the site.
-	 *
-	 * @return array{id: string, status: string, label: string, fix: string}
-	 */
-	private static function edge_guidance(): array {
 		return self::result(
 			'edge_guidance',
 			'warn',
 			__( 'Check your firewall or CDN allows the connection paths', 'blaze-mcp-toolkit-for-woocommerce' ),
-			__( 'Allow these paths through Cloudflare, Kinsta Bot Protection or any other firewall: /.well-known/oauth-*, /oauth/* and /wp-json/mcp/*. If connecting fails with a 403 the first time, the edge is blocking it: add those path exceptions. Do not bypass the block by matching a user agent. Also log in to wp-admin before clicking Connect, and click Allow once.', 'blaze-mcp-toolkit-for-woocommerce' )
+			sprintf(
+				/* translators: 1: list of URL paths, 2: the button that grants access on the sign-in screen. */
+				__( 'Allow these paths through Cloudflare, Kinsta Bot Protection or any other firewall: %1$s. If connecting fails with a 403 the first time, the edge is blocking it: add those path exceptions. Do not bypass the block by matching a user agent. Also log in to wp-admin before clicking Connect, and click %2$s once.', 'blaze-mcp-toolkit-for-woocommerce' ),
+				$list,
+				$allow
+			)
 		);
-	}
-
-	/**
-	 * Enable Abilities' third-party denylist.
-	 *
-	 * @return array<int, string>
-	 */
-	private static function denylist(): array {
-		$list = get_option( 'ewpa_thirdparty_disabled', array() );
-		return is_array( $list ) ? array_values( array_filter( $list, 'is_string' ) ) : array();
-	}
-
-	/**
-	 * Registered, MCP-public abilities from other plugins that Enable Abilities has not switched off.
-	 * Ours (blaze-mcp-toolkit/*) and the adapter's own tools are left out. Enable Abilities only
-	 * registers its own ewpa/* abilities when enabled, so registered means enabled.
-	 *
-	 * @return array<string, \WP_Ability>
-	 */
-	private static function exposed_abilities(): array {
-		if ( ! function_exists( 'wp_get_abilities' ) ) {
-			return array();
-		}
-
-		$denylist = self::denylist();
-		$out      = array();
-		foreach ( wp_get_abilities() as $ability ) {
-			$name = $ability->get_name();
-			if ( str_starts_with( $name, Registrar::CATEGORY . '/' ) || str_starts_with( $name, 'mcp-adapter/' ) || in_array( $name, $denylist, true ) ) {
-				continue;
-			}
-			$meta = $ability->get_meta();
-			if ( empty( $meta['mcp']['public'] ) ) {
-				continue;
-			}
-			$out[ $name ] = $ability;
-		}
-		return $out;
 	}
 
 	/**
@@ -381,7 +375,7 @@ final class SetupChecks {
 	 * @param string $name Ability name.
 	 */
 	public static function is_pii_name( string $name ): bool {
-		return in_array( $name, self::PII_ABILITIES, true );
+		return RecommendedConnector::is_pii_name( $name );
 	}
 
 	/**
