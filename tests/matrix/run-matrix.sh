@@ -101,6 +101,14 @@ run_state() {
 		wp plugin activate easy-mcp-ai >/dev/null
 		wp eval 'echo 1;' >/dev/null
 	fi
+	# Action Scheduler stays on its HybridStore while its post-to-table migration is pending, and
+	# wp-env never runs WP-Cron. Finish the migration in recommended and both so the health
+	# summary's exact database-store path is exercised there; the easy states keep the sampled path.
+	# Done last: activating a plugin (here Easy MCP AI) puts Action Scheduler back on HybridStore.
+	if [ "$state" == recommended ] || [ "$state" == both ]; then
+		wp action-scheduler migrate >>"$LOG_DIR/$state-start.log"
+		echo "action scheduler store: $(wp eval 'echo get_class( ActionScheduler::store() );')"
+	fi
 	VERSIONS[$state]=$(wp plugin list --format=json | jq -c 'map({name, status, version})')
 	PHPV[$state]=$(wp eval 'echo PHP_VERSION;')
 	WPV[$state]=$(wp core version)
@@ -168,8 +176,13 @@ run_state() {
 			echo "PASS  [$state] $f ($summary)"
 		fi
 	done
-	if [ "$state" == recommended ]; then
-		if WPE="$WPE" bash "$REPO/tests/Integration/frontend-curl.sh" >"$LOG_DIR/$state-frontend.log" 2>&1; then
+	# test-no-frontend.php runs with BLZMCP_SKIP_HTTP=1; its HTTP half is frontend-curl.sh from the
+	# host, so every state that lists test-no-frontend must run it (else INCOMPLETE COVERAGE).
+	if [[ " $suites " == *" test-no-frontend.php "* ]]; then
+		if [ "$state" == none ]; then
+			echo "INCOMPLETE COVERAGE: [$state] test-no-frontend.php is listed but its HTTP half is not run in none"
+			FAILS[$state]=$((FAILS[$state] + 1))
+		elif WPE="$WPE" bash "$REPO/tests/Integration/frontend-curl.sh" >"$LOG_DIR/$state-frontend.log" 2>&1; then
 			echo "PASS  [$state] frontend-curl.sh ($(grep -c '^PASS' "$LOG_DIR/$state-frontend.log") URLs)"
 			PASSES[$state]=$((PASSES[$state] + 1))
 		else
@@ -177,6 +190,15 @@ run_state() {
 			grep '^FAIL' "$LOG_DIR/$state-frontend.log" | head -5
 			FAILS[$state]=$((FAILS[$state] + 1))
 		fi
+	fi
+	# The exact (database store) per-hook grace must have been asserted where the store was migrated.
+	if { [ "$state" == recommended ] || [ "$state" == both ]; } && ! grep -q '^PASS  database store: pending job 2 hours late' "$LOG_DIR/$state-test-health-summary.php.log" 2>/dev/null; then
+		echo "INCOMPLETE COVERAGE: [$state] test-health-summary did not take the database-store path"
+		FAILS[$state]=$((FAILS[$state] + 1))
+	fi
+	if [ "$state" != none ] && [ ! -s "$LOG_DIR/$state-frontend.log" ]; then
+		echo "INCOMPLETE COVERAGE: [$state] the front-end HTTP check (frontend-curl.sh) did not run"
+		FAILS[$state]=$((FAILS[$state] + 1))
 	fi
 	# Reseed for the HTTP suite, on this same reporting date.
 	out=$(wp eval-file "$T/matrix/fixture.php" seed)

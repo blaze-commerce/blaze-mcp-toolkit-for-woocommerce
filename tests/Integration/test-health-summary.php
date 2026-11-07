@@ -253,11 +253,14 @@ for ( $grace_try = 0; $grace_try < 3 && ! $grace_measured; $grace_try++ ) {
 }
 blzmcp_it_assert( $grace_measured, 'past-due baseline held steady while measuring the grace' );
 blzmcp_it_equals( $grace_before + 1, (int) ( $jobs_result['background_jobs']['past_due'] ?? -1 ), 'past_due total counts the 2-hours-late job but not the 2-minutes-late one' );
-if ( true === ( $jobs_result['background_jobs']['by_hook_exact'] ?? null ) ) {
-	blzmcp_it_equals( 1, $past_due_of( $jobs_result, 'blzmcp_it_late_job' ), 'pending job 2 hours late counts as past due' );
-	blzmcp_it_equals( 0, $past_due_of( $jobs_result, 'blzmcp_it_recent_job' ), 'pending job 2 minutes late is within the 1-hour grace' );
+// The ability does not expose by_hook_exact; the store class decides which path JobsHealth took
+// (exact grouped counts on ActionScheduler_DBStore, the newest-SAMPLE path otherwise).
+echo 'NOTE  Action Scheduler store: ' . get_class( ActionScheduler::store() ) . "\n";
+if ( ActionScheduler::store() instanceof ActionScheduler_DBStore ) {
+	blzmcp_it_equals( 1, $past_due_of( $jobs_result, 'blzmcp_it_late_job' ), 'database store: pending job 2 hours late counts as past due in by_hook' );
+	blzmcp_it_equals( 0, $past_due_of( $jobs_result, 'blzmcp_it_recent_job' ), 'database store: pending job 2 minutes late is within the 1-hour grace in by_hook' );
 } else {
-	blzmcp_it_assert( (bool) preg_grep( '/not using its database store/', (array) ( $jobs_result['notes'] ?? array() ) ), 'sampled by_hook carries the sample note' );
+	blzmcp_it_assert( (bool) preg_grep( '/not using its database store/', (array) ( $jobs_result['notes'] ?? array() ) ), 'sampled store: by_hook carries the sample note' );
 }
 blzmcp_it_assert( str_contains( wp_get_ability( 'blaze-mcp-toolkit/health-summary' )->get_description(), 'more than an hour' ), 'description explains the past-due grace' );
 blzmcp_it_assert( in_array( 'blzmcp_it_late_job', $fallback_hooks, true ) && ! in_array( 'blzmcp_it_recent_job', $fallback_hooks, true ), 'fallback past-due query applies the 1-hour grace' );
