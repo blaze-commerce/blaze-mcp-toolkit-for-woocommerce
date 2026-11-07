@@ -1,0 +1,19 @@
+{
+	"core": "https://wordpress.org/wordpress-7.1.4.zip",
+	"phpVersion": "8.1",
+	"port": 8892,
+	"testsPort": 8893,
+	"plugins": [
+		"https://downloads.wordpress.org/plugin/woocommerce.11.2.2.zip",
+		"https://downloads.wordpress.org/plugin/easy-mcp-ai.2.3.1.zip",
+		"./blaze-mcp-toolkit-for-woocommerce"
+	],
+	"mappings": {
+		"wp-content/blzmcp-tests": "./tests"
+	},
+	"config": {
+		"WP_DEBUG": true,
+		"WP_DEBUG_LOG": true,
+		"WP_DEBUG_DISPLAY": false
+	}
+}

@@ -4,6 +4,7 @@
  *
  * Run: npx wp-env run cli wp eval-file wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/test-connectors.php
  * Stub: add --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php before eval-file.
+ * Real plugins (tests/matrix): expectations follow Connectors::state() (recommended, easy-mcp, both).
  *
  * @package Blaze\McpToolkit
  */
@@ -19,7 +20,9 @@ if ( ! class_exists( Connectors::class ) ) {
 	blzmcp_it_finish();
 }
 
-$stub = defined( 'EASY_MCP_AI_VERSION' );
+$stub       = defined( 'EASY_MCP_AI_VERSION' );
+$state      = Connectors::state();
+$rec_active = Connectors::get( 'recommended' )->is_active();
 
 blzmcp_it_equals( array( 'recommended', 'easy-mcp' ), array_keys( Connectors::all() ), 'all() is keyed by id' );
 blzmcp_it_equals( 'recommended', Connectors::get( 'recommended' )->id(), 'get(recommended)' );
@@ -39,23 +42,35 @@ blzmcp_it_assert( str_contains( Connectors::get( 'easy-mcp' )->run_instruction()
 blzmcp_it_assert( in_array( '/wp-json/mcp/*', Connectors::get( 'recommended' )->firewall_paths(), true ), 'recommended firewall paths' );
 blzmcp_it_equals( array( '/.well-known/oauth-*', '/.well-known/openid-configuration', '/easy-mcp-ai/*', '/wp-json/easy-mcp-ai/*', '/authorize', '/token', '/register' ), Connectors::get( 'easy-mcp' )->firewall_paths(), 'easy firewall paths include the root OAuth fallbacks (/authorize, /token, /register)' );
 
-// Production resolver: a real MCP Adapter route under /mcp/ has its callback wrapped in a recommended frame.
+// Production resolver: the active connector's real route has its callback wrapped in that
+// connector's frame (the MCP Adapter route under /mcp/ when Enable Abilities is active; Easy MCP
+// AI's own route when only it is active, as WooCommerce's bundled adapter registers no route).
 Blaze\McpToolkit\Connectors\RequestContext::set_resolver( null );
-$blzmcp_route = '/mcp/mcp-adapter-default-server';
+$blzmcp_route    = $rec_active ? '/mcp/mcp-adapter-default-server' : '/easy-mcp-ai/v1/mcp';
+$blzmcp_frame_id = $rec_active ? 'recommended' : 'easy-mcp';
 $blzmcp_removed = remove_filter( 'rest_endpoints', array( Blaze\McpToolkit\Connectors\RequestContext::class, 'wrap_endpoints' ), PHP_INT_MAX );
 $blzmcp_raw = rest_get_server()->get_routes()[ $blzmcp_route ][0]['callback'] ?? null;
 if ( $blzmcp_removed ) {
 	add_filter( 'rest_endpoints', array( Blaze\McpToolkit\Connectors\RequestContext::class, 'wrap_endpoints' ), PHP_INT_MAX );
 }
 $blzmcp_wrapped = rest_get_server()->get_routes()[ $blzmcp_route ][0]['callback'] ?? null;
-blzmcp_it_assert( null !== $blzmcp_raw, 'MCP Adapter route registered' );
-blzmcp_it_assert( $blzmcp_wrapped instanceof \Closure && $blzmcp_wrapped !== $blzmcp_raw, 'production resolver wraps the MCP Adapter route callback' );
-blzmcp_it_equals( 'recommended', $blzmcp_wrapped instanceof \Closure ? ( ( new \ReflectionFunction( $blzmcp_wrapped ) )->getClosureUsedVariables()['connector_id'] ?? null ) : null, 'wrapped MCP Adapter callback runs in the recommended frame' );
+blzmcp_it_assert( null !== $blzmcp_raw, "{$blzmcp_route} route registered" );
+blzmcp_it_assert( $blzmcp_wrapped instanceof \Closure && $blzmcp_wrapped !== $blzmcp_raw, "production resolver wraps the {$blzmcp_route} route callback" );
+blzmcp_it_equals( $blzmcp_frame_id, $blzmcp_wrapped instanceof \Closure ? ( ( new \ReflectionFunction( $blzmcp_wrapped ) )->getClosureUsedVariables()['connector_id'] ?? null ) : null, "wrapped {$blzmcp_route} callback runs in the {$blzmcp_frame_id} frame" );
 $blzmcp_wc = rest_get_server()->get_routes()['/wc/v3/orders'][0]['callback'] ?? null;
 blzmcp_it_assert( null !== $blzmcp_wc, '/wc/v3/orders route callback exists' );
 blzmcp_it_assert( ! ( $blzmcp_wc instanceof \Closure ), 'production resolver leaves other routes alone' );
 
-if ( ! $stub ) {
+if ( 'easy-mcp' === $state ) {
+	// Real Easy MCP AI alone (matrix): Enable Abilities is not active.
+	blzmcp_it_assert( $stub, 'easy-mcp: EASY_MCP_AI_VERSION is defined' );
+	blzmcp_it_equals( 'easy-mcp', Connectors::signin_owner()->id(), 'easy-mcp: signin owner is easy-mcp' );
+	blzmcp_it_equals( 'wp_ability_wc_analytics_totals', Connectors::get( 'easy-mcp' )->tool_name( 'wc-analytics/totals' ), 'easy-mcp: easy tool name' );
+	blzmcp_it_assert( ! Connectors::get( 'recommended' )->is_active(), 'easy-mcp: recommended inactive' );
+	blzmcp_it_assert( ! Connectors::get( 'recommended' )->owns_sign_in(), 'easy-mcp: recommended does not own sign-in' );
+	blzmcp_it_assert( Connectors::get( 'easy-mcp' )->owns_sign_in(), 'easy-mcp: easy owns sign-in' );
+	blzmcp_it_equals( 'easy-mcp', Connectors::execution()->id(), 'easy-mcp: execution outside REST is easy-mcp' );
+} elseif ( ! $stub ) {
 	blzmcp_it_equals( 'recommended', Connectors::state(), 'state is recommended' );
 	blzmcp_it_equals( 'recommended', Connectors::signin_owner()->id(), 'signin owner is recommended' );
 	blzmcp_it_equals( 'recommended', Connectors::execution()->id(), 'execution outside REST is recommended' );
@@ -63,7 +78,7 @@ if ( ! $stub ) {
 	blzmcp_it_assert( ! Connectors::get( 'easy-mcp' )->is_active(), 'easy inactive' );
 	blzmcp_it_assert( ! Connectors::get( 'easy-mcp' )->owns_sign_in(), 'easy does not own sign-in' );
 } else {
-	blzmcp_it_equals( 'both', Connectors::state(), 'stub: state is both' );
+	blzmcp_it_equals( 'both', $state, 'stub or real both: state is both' );
 	blzmcp_it_equals( 'easy-mcp', Connectors::signin_owner()->id(), 'stub: signin owner is easy-mcp' );
 	blzmcp_it_equals( 'wp_ability_wc_analytics_totals', Connectors::get( 'easy-mcp' )->tool_name( 'wc-analytics/totals' ), 'stub: easy tool name' );
 	blzmcp_it_equals( rest_url( 'easy-mcp-ai/v1/mcp' ), Connectors::get( 'easy-mcp' )->connect_url(), 'stub: easy connect_url' );
@@ -75,8 +90,8 @@ if ( ! $stub ) {
 // execution() follows the request context when that connector is active.
 Blaze\McpToolkit\Connectors\RequestContext::run(
 	'recommended',
-	static function (): void {
-		blzmcp_it_equals( 'recommended', Connectors::execution()->id(), 'execution follows the request context' );
+	static function () use ( $rec_active ): void {
+		blzmcp_it_equals( $rec_active ? 'recommended' : 'easy-mcp', Connectors::execution()->id(), $rec_active ? 'execution follows the request context' : 'execution ignores an inactive recommended context' );
 	}
 );
 Blaze\McpToolkit\Connectors\RequestContext::run(

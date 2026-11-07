@@ -7,3 +7,6 @@
 .wp-env.override.json
 *.log
 /docs/
+
+# Matrix fixture window (written by tests/matrix/fixture.php)
+tests/matrix/.window

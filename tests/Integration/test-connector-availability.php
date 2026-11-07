@@ -5,6 +5,9 @@
  * Run: npx wp-env run cli wp eval-file wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/test-connector-availability.php
  * Easy MCP stub (no Tool_State): add --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php before eval-file.
  * Easy MCP stub with Tool_State: also add --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp-toolstate.php.
+ * Real Easy MCP AI (tests/matrix): the real Tool_State answers from Easy MCP AI's own options, so
+ * the switched-off case is driven by easy_mcp_ai_disabled_tools (test setup, restored) and the
+ * malformed-resolve() cases, which only a stub can produce, are left to the fast (stub) tier.
  * Denylist mode: env BLZMCP_EWPA_DENYLIST=1, with blaze-mcp-toolkit/health-summary already in
  * ewpa_thirdparty_disabled (scripts/run-integration.sh sets it with `wp option update` in an
  * earlier step and restores it afterwards), so Enable Abilities' own unregister hook has run.
@@ -30,6 +33,8 @@ $rec       = Connectors::get( 'recommended' );
 $easy      = Connectors::get( 'easy-mcp' );
 $easy_stub = defined( 'EASY_MCP_AI_VERSION' );
 $toolstate = class_exists( '\Easy_MCP_AI\Tools\Tool_State' );
+// The stub Tool_State (stub-easymcp-toolstate.php) answers from a test global; the real one does not.
+$real_toolstate = $toolstate && ! str_contains( (string) ( new ReflectionClass( '\Easy_MCP_AI\Tools\Tool_State' ) )->getFileName(), 'stub-easymcp-toolstate' );
 $denylist  = '1' === getenv( 'BLZMCP_EWPA_DENYLIST' );
 
 /**
@@ -204,7 +209,34 @@ if ( null !== $second ) {
 	blzmcp_av_easy( $second, false, Availability::DISABLED_HERE, 'easy: not ticked', 'not ticked in Easy MCP AI › Tools › Abilities' );
 }
 
-if ( ! $toolstate ) {
+if ( $real_toolstate ) {
+	// Real Easy MCP AI: on by default once ticked; switched off through its disabled-tools list.
+	blzmcp_av_easy( $health, true, null, 'real easy: ticked, on by default' );
+	$had_disabled  = false !== get_option( 'easy_mcp_ai_disabled_tools', false );
+	$prev_disabled = get_option( 'easy_mcp_ai_disabled_tools' );
+	blzmcp_it_cleanup(
+		static function () use ( $had_disabled, $prev_disabled ): void {
+			if ( $had_disabled ) {
+				update_option( 'easy_mcp_ai_disabled_tools', $prev_disabled );
+			} else {
+				delete_option( 'easy_mcp_ai_disabled_tools' );
+			}
+		}
+	);
+	update_option( 'easy_mcp_ai_disabled_tools', array_merge( (array) $prev_disabled, array( 'wp_ability_blaze_mcp_toolkit_health_summary' ) ) );
+	blzmcp_av_easy( $health, false, Availability::DISABLED_HERE, 'real easy: ticked but in the disabled-tools list', 'switched off in Easy MCP AI' );
+	$d = Connectors::get( 'easy-mcp' )->diagnose( BLZMCP_AV_SLUG );
+	blzmcp_it_equals( 'switched off in Easy MCP AI on its tools screen', null !== $d ? $d->reason : null, 'real easy: switched-off reason is resolve()\'s code in plain words' );
+	if ( $had_disabled ) {
+		update_option( 'easy_mcp_ai_disabled_tools', $prev_disabled );
+	} else {
+		delete_option( 'easy_mcp_ai_disabled_tools' );
+	}
+	echo "NOTE  real Tool_State: the malformed-resolve() and is_enabled()-counter cases need the stub (fast tier); option snapshots stand in for the never-writes check\n";
+	$before = blzmcp_av_snapshot();
+	blzmcp_av_sweep( $blzmcp_av_names );
+	blzmcp_av_unchanged( $before, 'real easy sweep: options unchanged' );
+} elseif ( ! $toolstate ) {
 	// No Tool_State class (base stub, or no Easy MCP at all): effective state unknown.
 	blzmcp_av_easy( $health, null, Availability::UNKNOWN, 'easy: ticked, no Tool_State' );
 } else {

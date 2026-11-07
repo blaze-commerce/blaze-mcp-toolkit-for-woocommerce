@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# Release gate: runs every integration test file inside wp-env, then the host-side front-end
-# check, and fails if any of them fails.
+# Integration checks.
 #
-#   bash scripts/run-integration.sh
+#   bash scripts/run-integration.sh                       fast checks (stubs, default wp-env)
+#   bash scripts/run-integration.sh --matrix CANDIDATE.zip the release gate: the real-plugin
+#                                                         matrix (tests/matrix/run-matrix.sh)
 #
-# Needs wp-env running (npx wp-env start). The container cannot fetch its own pages, so
-# test-no-frontend.php runs with BLZMCP_SKIP_HTTP=1 here and tests/Integration/frontend-curl.sh
+# Fast mode runs every integration test file inside the default wp-env (npx wp-env start), the
+# stub modes, then the host-side front-end check, and fails if any of them fails. It is NOT the
+# release gate: stubs are not compatibility evidence. The container cannot fetch its own pages,
+# so test-no-frontend.php runs with BLZMCP_SKIP_HTTP=1 here and tests/Integration/frontend-curl.sh
 # does the HTTP half from the host. Running test-no-frontend.php alone without that variable
 # fails with "HTTP CHECK NOT RUN" when the fetches cannot connect.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+if [ "${1:-}" == --matrix ]; then
+	[ -n "${2:-}" ] || { echo "usage: bash scripts/run-integration.sh --matrix CANDIDATE.zip"; exit 2; }
+	exec bash tests/matrix/run-matrix.sh "$2"
+fi
+echo "FAST CHECKS ONLY — NOT THE RELEASE GATE (the gate is: bash scripts/run-integration.sh --matrix CANDIDATE.zip)"
 fail=0
 for f in tests/Integration/test-*.php; do
 	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
@@ -171,4 +179,5 @@ else
 fi
 if bash tests/Integration/frontend-curl.sh; then :; else fail=1; fi
 [ "$fail" -eq 0 ] && echo "ALL INTEGRATION CHECKS PASSED" || echo "INTEGRATION CHECKS FAILED"
+echo "FAST CHECKS ONLY — NOT THE RELEASE GATE"
 exit $fail

@@ -202,9 +202,22 @@ ActionScheduler::store()->delete_action( $job_id );
 $clear_cache();
 
 // Past-due grace: a pending job only counts once it is more than an hour late (queue runner lag is normal).
-$late_id   = as_schedule_single_action( time() - 2 * HOUR_IN_SECONDS, 'blzmcp_it_late_job', array(), 'blzmcp-it' );
-$recent_id = as_schedule_single_action( time() - 120, 'blzmcp_it_recent_job', array(), 'blzmcp-it' );
-$jobs_result = $ability->execute( array( 'since_hours' => 24 ) );
+// by_hook is exact only on the plain database store. While Action Scheduler's post-to-table
+// migration is unfinished (wp-env never runs WP-Cron, so it stays on ActionScheduler_HybridStore)
+// by_hook is the newest SAMPLE past-due jobs, and other pending jobs a long-lived test site piles
+// up can push this test's job out of it. So by_hook is asserted only when exact; the past_due
+// total (an exact count on every store) is asserted as a delta against a baseline taken just
+// before and just after, retried if unrelated jobs crossed the grace line meanwhile.
+$past_due_count = static function (): int {
+	return (int) ActionScheduler::store()->query_actions(
+		array(
+			'status'       => 'pending',
+			'date'         => new DateTime( '@' . ( time() - HOUR_IN_SECONDS ), new DateTimeZone( 'UTC' ) ),
+			'date_compare' => '<',
+		),
+		'count'
+	);
+};
 $past_due_of = static function ( $res, string $hook ): int {
 	foreach ( (array) ( $res['background_jobs']['by_hook'] ?? array() ) as $r ) {
 		if ( $hook === $r['hook'] ) {
@@ -213,18 +226,41 @@ $past_due_of = static function ( $res, string $hook ): int {
 	}
 	return 0;
 };
-blzmcp_it_equals( 1, $past_due_of( $jobs_result, 'blzmcp_it_late_job' ), 'pending job 2 hours late counts as past due' );
-blzmcp_it_equals( 0, $past_due_of( $jobs_result, 'blzmcp_it_recent_job' ), 'pending job 2 minutes late is within the 1-hour grace' );
+$grace_measured = false;
+for ( $grace_try = 0; $grace_try < 3 && ! $grace_measured; $grace_try++ ) {
+	$grace_before = $past_due_count();
+	$late_id      = as_schedule_single_action( time() - 2 * HOUR_IN_SECONDS, 'blzmcp_it_late_job', array(), 'blzmcp-it' );
+	$recent_id    = as_schedule_single_action( time() - 120, 'blzmcp_it_recent_job', array(), 'blzmcp-it' );
+	$clear_cache();
+	$jobs_result = $ability->execute( array( 'since_hours' => 24 ) );
+	// Fallback (non-database store) path uses the same grace. Scoped to this test's group so the
+	// sample holds only this test's jobs.
+	$sampled = ( new ReflectionMethod( \Blaze\McpToolkit\Diagnostics\JobsHealth::class, 'sampled_counts' ) );
+	$pdq     = ( new ReflectionMethod( \Blaze\McpToolkit\Diagnostics\JobsHealth::class, 'past_due_query' ) );
+	$sampled->setAccessible( true );
+	$pdq->setAccessible( true );
+	$fallback_hooks = array_column(
+		$sampled->invoke(
+			null,
+			array( 'status' => 'failed', 'modified' => time(), 'modified_compare' => '>=', 'group' => 'blzmcp-it' ),
+			array( 'group' => 'blzmcp-it' ) + $pdq->invoke( null, time() )
+		),
+		'hook'
+	);
+	ActionScheduler::store()->delete_action( $late_id );
+	ActionScheduler::store()->delete_action( $recent_id );
+	$grace_measured = $grace_before === $past_due_count();
+}
+blzmcp_it_assert( $grace_measured, 'past-due baseline held steady while measuring the grace' );
+blzmcp_it_equals( $grace_before + 1, (int) ( $jobs_result['background_jobs']['past_due'] ?? -1 ), 'past_due total counts the 2-hours-late job but not the 2-minutes-late one' );
+if ( true === ( $jobs_result['background_jobs']['by_hook_exact'] ?? null ) ) {
+	blzmcp_it_equals( 1, $past_due_of( $jobs_result, 'blzmcp_it_late_job' ), 'pending job 2 hours late counts as past due' );
+	blzmcp_it_equals( 0, $past_due_of( $jobs_result, 'blzmcp_it_recent_job' ), 'pending job 2 minutes late is within the 1-hour grace' );
+} else {
+	blzmcp_it_assert( (bool) preg_grep( '/not using its database store/', (array) ( $jobs_result['notes'] ?? array() ) ), 'sampled by_hook carries the sample note' );
+}
 blzmcp_it_assert( str_contains( wp_get_ability( 'blaze-mcp-toolkit/health-summary' )->get_description(), 'more than an hour' ), 'description explains the past-due grace' );
-// Fallback (non-database store) path uses the same grace.
-$sampled = ( new ReflectionMethod( \Blaze\McpToolkit\Diagnostics\JobsHealth::class, 'sampled_counts' ) );
-$pdq     = ( new ReflectionMethod( \Blaze\McpToolkit\Diagnostics\JobsHealth::class, 'past_due_query' ) );
-$sampled->setAccessible( true );
-$pdq->setAccessible( true );
-$fallback_hooks = array_column( $sampled->invoke( null, array( 'status' => 'failed', 'modified' => time(), 'modified_compare' => '>=' ), $pdq->invoke( null, time() ) ), 'hook' );
 blzmcp_it_assert( in_array( 'blzmcp_it_late_job', $fallback_hooks, true ) && ! in_array( 'blzmcp_it_recent_job', $fallback_hooks, true ), 'fallback past-due query applies the 1-hour grace' );
-ActionScheduler::store()->delete_action( $late_id );
-ActionScheduler::store()->delete_action( $recent_id );
 $clear_cache();
 
 // Totals and status come from every group, not the 50 listed (audit F04). Fresh debug.log content.

@@ -6,7 +6,8 @@
 # created if the store has none.
 #   bash tests/Integration/frontend-curl.sh
 set -uo pipefail
-wp() { npx wp-env run cli wp "$@" 2>/dev/null; }
+# WPE: the wp-env binary (the matrix runner sets it; default npx wp-env).
+wp() { ${WPE:-npx wp-env} run cli wp "$@" 2>/dev/null; }
 if ! wp plugin is-active blaze-mcp-toolkit-for-woocommerce; then
 	echo "FAIL  blaze-mcp-toolkit-for-woocommerce is not active (or wp-env is not running)"
 	exit 1

@@ -33,6 +33,8 @@ const BLZMCP_SC_SLUG = 'blaze-mcp-toolkit/health-summary';
 
 $state     = Connectors::state();
 $toolstate = class_exists( '\Easy_MCP_AI\Tools\Tool_State' );
+// Real Easy MCP AI (tests/matrix): its own Tool_State answers from its options, not a test global.
+$real_toolstate = $toolstate && ! str_contains( (string) ( new ReflectionClass( '\Easy_MCP_AI\Tools\Tool_State' ) )->getFileName(), 'stub-easymcp-toolstate' );
 $denylist  = '1' === getenv( 'BLZMCP_EWPA_DENYLIST' );
 $none_mode = '1' === getenv( 'BLZMCP_STATE_NONE' );
 $easy      = in_array( $state, array( 'easy-mcp', 'both' ), true );
@@ -188,7 +190,21 @@ if ( $easy ) {
 	blzmcp_it_equals( 'warn', $by['easy_write_tools']['status'] ?? null, 'easy: approval off: easy_write_tools warns' );
 	blzmcp_it_equals( 'pass', $by['easy_woo_group']['status'] ?? null, 'easy: WooCommerce group off: easy_woo_group passes' );
 
-	if ( $toolstate ) {
+	if ( $real_toolstate ) {
+		blzmcp_it_equals( 'warn', $by['easy_rest_read']['status'] ?? null, 'real easy: wp_rest_read on: easy_rest_read warns' );
+		blzmcp_it_assert( str_contains( $by['easy_rest_read']['fix'] ?? '', 'wp_rest_read' ), 'real easy: easy_rest_read names wp_rest_read' );
+		if ( ! $denylist ) {
+			blzmcp_it_equals( 'pass', $by['tools_visible']['status'] ?? null, 'real easy: all ticked and on: tools_visible passes' );
+		}
+		// Everything switched off through Easy MCP AI's own disabled-tools list.
+		blzmcp_sc_set( 'easy_mcp_ai_disabled_tools', array_merge( array( 'wp_rest_read' ), array_map( array( \Blaze\McpToolkit\Connectors\EasyMcpNaming::class, 'tool_name' ), $wanted ) ) );
+		$off = blzmcp_sc_run( 'real easy switched off' );
+		blzmcp_it_equals( 'pass', $off['easy_rest_read']['status'] ?? null, 'real easy: wp_rest_read switched off: easy_rest_read passes' );
+		blzmcp_it_equals( 'warn', $off['tools_visible']['status'] ?? null, 'real easy: switched off in Easy MCP AI: tools_visible warns' );
+		blzmcp_it_assert( str_contains( $off['tools_visible']['fix'] ?? '', 'switched off in Easy MCP AI' ) && ! str_contains( $off['tools_visible']['fix'] ?? '', '(disabled)' ), 'real easy: switched-off reason in plain words, no raw code' );
+		blzmcp_sc_set( 'easy_mcp_ai_disabled_tools', array() );
+		echo "NOTE  real Tool_State: the unknown-state and resolve()-call-log cases need the stub (fast tier)\n";
+	} elseif ( $toolstate ) {
 		blzmcp_it_equals( 'warn', $by['easy_rest_read']['status'] ?? null, 'easy: wp_rest_read on: easy_rest_read warns' );
 		blzmcp_it_assert( str_contains( $by['easy_rest_read']['fix'] ?? '', 'wp_rest_read' ), 'easy: easy_rest_read names wp_rest_read' );
 		if ( ! $denylist ) {

@@ -121,8 +121,15 @@ try {
 	);
 	blzmcp_it_assert( count( $abilities ) >= 18, 'found ' . count( $abilities ) . ' abilities to test' );
 
+	// The gateway exists only with the recommended connector (Enable Abilities). Easy MCP AI alone
+	// has no gateway ability; its own transport is covered by tests/matrix/http-suite.sh.
 	$gateway = wp_get_ability( 'mcp-adapter/execute-ability' );
-	blzmcp_it_assert( null !== $gateway, 'MCP Adapter execute-ability is registered' );
+	if ( \Blaze\McpToolkit\Connectors\Connectors::get( 'recommended' )->is_active() ) {
+		blzmcp_it_assert( null !== $gateway, 'MCP Adapter execute-ability is registered' );
+	} else {
+		echo "NOTE  recommended connector inactive: gateway column skipped (direct calls still checked)\n";
+		$gateway = null;
+	}
 
 	// Reverse check: every expected ability is registered (this env has no stand-aside).
 	foreach ( array_keys( $expectations ) as $expected_name ) {

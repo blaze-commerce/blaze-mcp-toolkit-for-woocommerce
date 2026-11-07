@@ -68,7 +68,10 @@ $dual      = static function ( string $slug ): string {
 // Wiring.
 blzmcp_it_equals( 30, has_filter( 'wp_register_ability_args', array( AnalyticsNaming::class, 'filter_args' ) ), 'naming filter on wp_register_ability_args at priority 30' );
 blzmcp_it_equals( $aliases, AnalyticsNaming::ALIASES, 'ALIASES is the binding alias map' );
-blzmcp_it_equals( $easy_stub ? 'both' : 'recommended', Connectors::state(), "{$an_mode}: connector state" );
+// The stub (and the real `both` matrix state) keep Enable Abilities active; the real easy-only
+// matrix states do not.
+$rec_active = Connectors::get( 'recommended' )->is_active();
+blzmcp_it_equals( $easy_stub ? ( $rec_active ? 'both' : 'easy-mcp' ) : 'recommended', Connectors::state(), "{$an_mode}: connector state" );
 if ( $stand_aside ) {
 	blzmcp_it_equals( false, class_exists( StoreProfile::class, false ), 'stand-aside: our store tools are not loaded' );
 }
@@ -257,7 +260,14 @@ if ( is_wp_error( $unwrapped ) && is_wp_error( $gate_error ) ) {
 	blzmcp_it_equals( str_replace( 'wc-analytics-confirm-large-range', $expected_confirm, $unwrapped->get_error_message() ), $message, "{$an_mode}: only the alias changed in the message" );
 }
 
-if ( $easy_stub ) {
+if ( $easy_stub && ! $rec_active ) {
+	// Easy MCP AI alone: a recommended frame is inactive, so the Easy MCP name is used throughout.
+	$rec_frame = $gate_call( 'recommended' );
+	blzmcp_it_assert( is_wp_error( $rec_frame ) && str_contains( $rec_frame->get_error_message(), 'wp_ability_wc_analytics_confirm_large_range' ), "{$an_mode}: an inactive recommended frame falls back to the Easy MCP tool name" );
+	$easy_frame = $gate_call( 'easy-mcp', 'recommended' );
+	blzmcp_it_assert( is_wp_error( $easy_frame ) && str_contains( $easy_frame->get_error_message(), 'wp_ability_wc_analytics_confirm_large_range' ), "{$an_mode}: inside an easy-mcp frame the message names the Easy MCP tool" );
+	blzmcp_it_equals( 1, $GLOBALS['blzmcp_an_calls']['wc-analytics/totals'] ?? 0, "{$an_mode}: framed call ran the original exactly once" );
+} elseif ( $easy_stub ) {
 	$rec_frame = $gate_call( 'recommended' );
 	blzmcp_it_assert( is_wp_error( $rec_frame ) && str_contains( $rec_frame->get_error_message(), 'wc-analytics/confirm-large-range' ) && ! str_contains( $rec_frame->get_error_message(), 'wp_ability_' ), "{$an_mode}: inside a recommended frame the message names the canonical slug" );
 	$nested = $gate_call( 'recommended', 'easy-mcp' );
