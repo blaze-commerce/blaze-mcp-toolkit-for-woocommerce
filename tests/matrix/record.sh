@@ -18,6 +18,24 @@ OUT="$OUT_DIR/v1.1-matrix-$(date -u +%Y-%m-%d).md"
 zip=$(sed -n 's/^ZIP=//p' "$SUMMARY")
 commit=$(sed -n 's/^COMMIT=//p' "$SUMMARY")
 window_file=$(sed -n 's/^WINDOW_FILE=//p' "$SUMMARY")
+# Tie the zip to the evidence commit: every file in the zip that git tracks must be byte-identical
+# to that file at the commit. Files git does not track (composer's vendor/ output) are build products.
+check_dir=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-record.XXXXXX")
+unzip -q "$zip" -d "$check_dir"
+same=0
+differ=()
+built=0
+while IFS= read -r f; do
+	rel=${f#"$check_dir"/blaze-mcp-toolkit-for-woocommerce/}
+	if git -C "$REPO" cat-file -e "$commit:$rel" 2>/dev/null; then
+		if cmp -s "$f" <(git -C "$REPO" show "$commit:$rel"); then same=$((same + 1)); else differ+=("$rel"); fi
+	else
+		built=$((built + 1))
+	fi
+done < <(find "$check_dir/blaze-mcp-toolkit-for-woocommerce" -type f | sort)
+rm -rf "$check_dir"
+[ "${#differ[@]}" -eq 0 ] || VERDICT=FAILED
+name_commit=$(basename "$zip" .zip | sed -n 's/^candidate-//p')
 dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommerce.php uninstall.php readme.txt vendor-src | wc -l | tr -d ' ')
 {
 	echo "# Blaze MCP Toolkit 1.1 — real-plugin matrix"
@@ -25,7 +43,12 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 	echo "- Result: **MATRIX $VERDICT**"
 	echo "- Run (UTC): $(date -u '+%Y-%m-%d %H:%M')"
 	echo "- Git commit: \`$commit\`$([ "$dirty" != 0 ] && echo " (WARNING: $dirty uncommitted change(s) under src/ or the plugin files at record time)")"
-	echo "- Candidate: \`$(basename "$zip")\`"
+	echo "- Candidate: \`$(basename "$zip")\` (build commit per its name: \`${name_commit:-unknown}\`)"
+	if [ "${#differ[@]}" -eq 0 ]; then
+		echo "- Zip vs evidence commit: **byte-identical** — all $same git-tracked files in the zip match \`$commit\`; $built build-generated files (composer vendor/) are not in git"
+	else
+		echo "- Zip vs evidence commit: **DIFFERS** in ${#differ[@]} file(s): ${differ[*]:0:10}"
+	fi
 	echo "- SHA-256: \`$(shasum -a 256 "$zip" | awk '{print $1}')\`"
 	echo "- Runner: \`scripts/run-integration.sh --matrix $(basename "$zip")\`"
 	echo
@@ -52,7 +75,8 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 	echo
 	echo "- NOT COVERED: Easy MCP AI's auto-tick after an admin visits its Tools screen. On a store seeded before 1.1, Easy MCP AI did not tick the newly annotated wc-analytics tools on its own (its tool policy only records once that screen has been visited). Such stores rely on the setup screen's easy_tools_on row, which tells the owner to tick the analytics tools; the matrix asserts that row warns and names them."
 	echo "- Stub-only cases (malformed Tool_State::resolve() results, call counters) run in the fast checks, not here."
-	echo "- Large-range recovery through Easy MCP AI is checked on what the client receives (Easy MCP AI passes at most 200 bytes of an error message)."
+	echo "- Large-range recovery and the analytics-unavailable errors through Easy MCP AI are checked on what the client receives (Easy MCP AI passes at most 200 bytes of an error message)."
+	echo "- The Enable Abilities denylist pass is not repeated in the matrix recommended state; F02 covers it over HTTP in both (and the fast checks run the denylist in-container)."
 	echo
 	echo "## Failures, incomplete coverage and notes"
 	echo
@@ -76,3 +100,7 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 	done
 } >"$OUT"
 echo "Evidence: $OUT"
+if [ "${#differ[@]}" -ne 0 ]; then
+	echo "CANDIDATE DOES NOT MATCH THE EVIDENCE COMMIT: ${#differ[@]} file(s) differ"
+	exit 3
+fi

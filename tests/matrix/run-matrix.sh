@@ -269,7 +269,7 @@ done
 		echo "STATE=$state|${RESULT[$state]:-NOT RUN}|${PASSES[$state]:-0}|${FAILS[$state]:-1}|${WPV[$state]:-}|${PHPV[$state]:-}|${VERSIONS[$state]:-[]}"
 	done
 } >"$LOG_DIR/summary.txt"
-bash "$REPO/tests/matrix/record.sh" "$LOG_DIR/summary.txt" "$([ "$fail" -eq 0 ] && echo PASSED || echo FAILED)"
+bash "$REPO/tests/matrix/record.sh" "$LOG_DIR/summary.txt" "$([ "$fail" -eq 0 ] && echo PASSED || echo FAILED)" || fail=1
 echo "Logs: $LOG_DIR"
 if [ "$fail" -eq 0 ]; then echo "MATRIX PASSED"; else echo "MATRIX FAILED"; fi
 exit $fail

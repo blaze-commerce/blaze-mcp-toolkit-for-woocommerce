@@ -426,6 +426,21 @@ for s in "${TRANSPORTS[@]}"; do
 	call_ok && ok "$s: retried >365-day request runs after confirmation" || no "$s: retry after confirmation ($(call_err | head -c 200))"
 done
 
+# Analytics guard firing (Analytics turned off): every transport's client gets the token and the
+# fix path whole (Easy MCP AI passes at most 200 bytes of an error message).
+save_option woocommerce_analytics_enabled
+wpc option update woocommerce_analytics_enabled no >/dev/null
+for s in "${TRANSPORTS[@]}"; do
+	call_ability "$s" wc-analytics/totals "{\"subject\":\"revenue\",\"date_start\":\"$WINDOW_CURRENT_START\",\"date_end\":\"$WINDOW_CURRENT_END\"}"
+	g_err=$(call_err)
+	if grep -qF '[ANALYTICS_UNAVAILABLE]' <<<"$g_err" && grep -qF 'WooCommerce > Settings > Advanced > Features' <<<"$g_err" && ! grep -qF '[truncated]' <<<"$g_err"; then
+		ok "$s: Analytics off: the client gets [ANALYTICS_UNAVAILABLE] and the fix path whole (${#g_err} chars)"
+	else
+		no "$s: Analytics off: token and fix path received ($(head -c 300 <<<"$g_err"))"
+	fi
+done
+wpc option update woocommerce_analytics_enabled yes >/dev/null
+
 # The same figures whichever connector answers, and the same as WooCommerce › Analytics.
 if has_transport rec && has_transport easy; then
 	eq "both: current figures match across transports" "${FIG[rec.cur]}" "${FIG[easy.cur]}"
