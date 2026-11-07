@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace Blaze\McpToolkit\Abilities;
 
+use Blaze\McpToolkit\Bundled\AnalyticsGuard;
 use Blaze\McpToolkit\Connectors\Connector;
 use Blaze\McpToolkit\Connectors\Connectors;
 
@@ -117,7 +118,11 @@ final class AnalyticsNaming {
 	 */
 	public static function translate_result( $result, Connector $connector ) {
 		$limit = $connector->max_error_message_bytes();
-		if ( ! $result instanceof \WP_Error || ! in_array( self::ERROR_CODE, $result->get_error_codes(), true ) ) {
+		if ( ! $result instanceof \WP_Error ) {
+			return $result;
+		}
+		$codes = $result->get_error_codes();
+		if ( ! in_array( self::ERROR_CODE, $codes, true ) && ! ( null !== $limit && in_array( AnalyticsGuard::ERROR_CODE, $codes, true ) ) ) {
 			return $result;
 		}
 
@@ -132,6 +137,11 @@ final class AnalyticsNaming {
 					}
 					$changed = $changed || $renamed !== $message;
 					$message = $renamed;
+				} elseif ( AnalyticsGuard::ERROR_CODE === $code && null !== $limit ) {
+					$data    = $result->get_error_data( $code );
+					$short   = self::compact_unavailable( is_array( $data ) && isset( $data['reason'] ) ? (string) $data['reason'] : '', $limit - self::ERROR_MARGIN_BYTES );
+					$changed = $changed || $short !== $message;
+					$message = $short;
 				}
 				$out->add( $code, $message );
 			}
@@ -183,7 +193,49 @@ final class AnalyticsNaming {
 		if ( strlen( $out ) > $budget ) {
 			$out = str_replace( ', then re-run the same call.', ', then re-run.', $out );
 		}
-		return $out;
+		if ( strlen( $out ) > $budget ) {
+			// Last resort: keep stop, ask, the confirm tool and the exact arguments; drop the hint.
+			$out = str_replace( ' description=<label>', '', $out );
+		}
+		return self::fit( $out, $budget );
+	}
+
+	/**
+	 * The analytics-unavailable error in a form that fits a connector's error-message limit: the
+	 * [ANALYTICS_UNAVAILABLE] token first, then what is wrong and where to fix it, per reason.
+	 *
+	 * @param string $reason AnalyticsGuard reason code (from the error data).
+	 * @param int    $budget Bytes to fit within.
+	 */
+	public static function compact_unavailable( string $reason, int $budget ): string {
+		switch ( $reason ) {
+			case 'analytics_disabled':
+				$text = __( 'WooCommerce Analytics is off, so figures would be incomplete. Fix: turn it on under WooCommerce > Settings > Advanced > Features, then retry.', 'blaze-mcp-toolkit-for-woocommerce' );
+				break;
+			case 'analytics_unreadable':
+				$text = __( 'Analytics data could not be read, so figures cannot be checked. Retry in a few minutes; if it persists, ask your developer or host to check the database.', 'blaze-mcp-toolkit-for-woocommerce' );
+				break;
+			case 'import_in_progress':
+			case 'import_not_run':
+				$text = __( 'Analytics has not finished importing orders. Fix: wait, or start it under WooCommerce > Analytics > Settings > Import historical data, then retry.', 'blaze-mcp-toolkit-for-woocommerce' );
+				break;
+			default:
+				$text = __( 'Some orders in these dates are not in Analytics yet. Fix: WooCommerce > Analytics > Settings > Import historical data, or ask about a more recent period.', 'blaze-mcp-toolkit-for-woocommerce' );
+		}
+		return self::fit( AnalyticsGuard::MESSAGE_TOKEN . ' ' . $text, $budget );
+	}
+
+	/**
+	 * Cut a message to at most $budget bytes on a UTF-8 character boundary (never exceeds it).
+	 *
+	 * @param string $text   Message.
+	 * @param int    $budget Bytes.
+	 */
+	private static function fit( string $text, int $budget ): string {
+		if ( strlen( $text ) <= $budget ) {
+			return $text;
+		}
+		return function_exists( 'mb_strcut' ) ? mb_strcut( $text, 0, max( 0, $budget ), 'UTF-8' ) : substr( $text, 0, max( 0, $budget ) );
 	}
 
 	/**

@@ -23,6 +23,7 @@ require_once __DIR__ . '/assert.php';
 
 use Blaze\McpToolkit\Abilities\AnalyticsNaming;
 use Blaze\McpToolkit\Abilities\Store\StoreProfile;
+use Blaze\McpToolkit\Bundled\AnalyticsGuard;
 use Blaze\McpToolkit\Bundled\Commerce;
 use Blaze\McpToolkit\Connectors\Connectors;
 use Blaze\McpToolkit\Connectors\RequestContext;
@@ -298,6 +299,40 @@ if ( $easy_stub && ! $rec_active ) {
 	blzmcp_it_assert( is_wp_error( $easy_frame ) && str_contains( $easy_frame->get_error_message(), 'wp_ability_wc_analytics_confirm_large_range' ), "{$an_mode}: inside an easy-mcp frame the message names the Easy MCP tool" );
 	blzmcp_it_equals( 1, $GLOBALS['blzmcp_an_calls']['wc-analytics/totals'] ?? 0, "{$an_mode}: framed call ran the original exactly once" );
 }
+
+// Easy MCP AI's error-message cut (2.3.1 = 2.4.0 Server::sanitize_error_message, minus branding):
+// what a client receives from a tool error.
+$easy_sanitise = static function ( string $m ): string {
+	$m = (string) preg_replace( '/\s*Stack trace:.*$/s', '', $m );
+	$m = (string) preg_replace( '/\s+in\s+\S+\.php(?:\(\d+\)|:\d+| on line \d+)/', '', $m );
+	$m = (string) preg_replace( '#(?<![\w.\-/\\\\])(?:\\\\?/|[A-Z]:\\\\)(?:(?:[^\s\'"<>/\\\\]+(?: +[^\s\'"<>/\\\\]+)*)?[/\\\\])*[^\s\'"<>/\\\\]*\.(?:php|inc|tpl|phtml)\b#', '[file]', $m );
+	$m = (string) preg_replace( '/\[?::1\]?|\blocalhost\b/i', '[internal]', $m );
+	$m = trim( $m );
+	return strlen( $m ) > 200 ? substr( $m, 0, 200 ) . '…[truncated]' : $m;
+};
+
+// Analytics-unavailable errors (AnalyticsGuard), every reason: a compact form under Easy MCP AI,
+// the full message on the recommended connector.
+$easy_c = Connectors::get( 'easy-mcp' );
+$rec_c  = Connectors::get( 'recommended' );
+foreach ( array( 'analytics_disabled', 'analytics_unreadable', 'import_in_progress', 'import_not_run', 'orders_not_imported' ) as $reason ) {
+	$full = new WP_Error( AnalyticsGuard::ERROR_CODE, AnalyticsGuard::MESSAGE_TOKEN . ' ' . AnalyticsGuard::message( $reason ), array( 'status' => 503, 'reason' => $reason ) );
+	$short = AnalyticsNaming::translate_result( $full, $easy_c );
+	$msg   = is_wp_error( $short ) ? $short->get_error_message() : '';
+	$sent  = $easy_sanitise( $msg );
+	blzmcp_it_assert( strlen( $sent ) <= 190 && $sent === $msg, "unavailable {$reason}: Easy form is at most 190 bytes and survives Easy's sanitising (" . strlen( $sent ) . ' bytes)' );
+	blzmcp_it_assert( str_starts_with( $sent, AnalyticsGuard::MESSAGE_TOKEN . ' ' ), "unavailable {$reason}: Easy form starts with the token" );
+	blzmcp_it_assert( 1 === preg_match( '/Fix:|Retry/', $sent ), "unavailable {$reason}: Easy form keeps the action" );
+	blzmcp_it_equals( array( AnalyticsGuard::ERROR_CODE, $full->get_error_data() ), is_wp_error( $short ) ? array( $short->get_error_code(), $short->get_error_data() ) : null, "unavailable {$reason}: code and data (status, reason) unchanged" );
+	blzmcp_it_assert( AnalyticsNaming::translate_result( $full, $rec_c ) === $full, "unavailable {$reason}: recommended connector gets the full message unchanged" );
+}
+// Large-range compact form never exceeds its budget; an over-long type drops the description hint first.
+$long_type = 'totals:' . str_repeat( 'x', 30 );
+$cap       = AnalyticsNaming::compact_message( "x date_start='2024-01-01', date_end='2026-11-07', type='{$long_type}' " . str_repeat( 'y', 900 ), array( 'cost_estimate' => array( 'type' => $long_type ) ), $easy_c, 190 );
+blzmcp_it_assert( strlen( $cap ) <= 190 && str_contains( $cap, 'type=' . $long_type ) && ! str_contains( $cap, 'description=' ) && str_contains( $cap, 'merchant' ), 'compact large-range: long type keeps the exact args and drops the description hint (' . strlen( $cap ) . ' bytes)' );
+$huge = 'totals:' . str_repeat( 'z', 300 );
+$cap2 = AnalyticsNaming::compact_message( "x date_start='2024-01-01', date_end='2026-11-07', type='{$huge}'", array( 'cost_estimate' => array( 'type' => $huge ) ), $easy_c, 190 );
+blzmcp_it_assert( strlen( $cap2 ) <= 190 && str_starts_with( $cap2, 'STOP' ), 'compact large-range: never exceeds the budget, even for an absurd type (' . strlen( $cap2 ) . ' bytes)' );
 
 // Confirm, rerun: data, not an error. The gate still works.
 $gate_type      = is_wp_error( $gate_error ) ? (string) ( $gate_error->get_error_data()['cost_estimate']['type'] ?? '' ) : '';
