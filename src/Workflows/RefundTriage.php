@@ -47,7 +47,7 @@ final class RefundTriage extends AbstractWorkflow {
 	 * Steps.
 	 *
 	 * @param string $period One of PERIODS.
-	 * @return array<int, array{tool: string, arguments: array<string, mixed>, why: string}>
+	 * @return array<int, array{tool: string, ability: string, arguments: array<string, mixed>, why: string}>
 	 */
 	protected static function plan( string $period ): array {
 		return array(

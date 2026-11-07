@@ -51,7 +51,7 @@ final class RevenueDropTriage extends AbstractWorkflow {
 	 * Steps.
 	 *
 	 * @param string $period One of PERIODS.
-	 * @return array<int, array{tool: string, arguments: array<string, mixed>, why: string}>
+	 * @return array<int, array{tool: string, ability: string, arguments: array<string, mixed>, why: string}>
 	 */
 	protected static function plan( string $period ): array {
 		return array(
@@ -144,7 +144,7 @@ final class RevenueDropTriage extends AbstractWorkflow {
 				'Use the tools quietly. If you need a progress sentence before the final answer, say only: "I\'ll compare the period with the previous one and separate volume, basket size, refunds, products, and channels." Do not tell the merchant you are loading schemas, loading tools, selecting tools, calling tools, using a connector, or constructing filters.',
 				'',
 				'Required data: the steps read order, revenue, customer and refund totals (all compared with the previous period), the store profile, the top eight products, the channel mix, and recent updates and site errors over the same window.',
-				'Optional only if it supports a claim you will make: revenue by country for regional shifts (wc-analytics/breakdown with subject=revenue, dimension=country), revenue by payment method for gateway/pipeline signals (subject=revenue, dimension=payment_method), or coupons if discounting/campaign cost is central (subject=coupons, dimension=code). Use the same period and compare=true.',
+				'Optional only if it supports a claim you will make: revenue by country for regional shifts ({tool:wc-analytics/breakdown} with subject=revenue, dimension=country), revenue by payment method for gateway/pipeline signals (subject=revenue, dimension=payment_method), or coupons if discounting/campaign cost is central (subject=coupons, dimension=code). Use the same period and compare=true.',
 				'',
 				'Rules:',
 				'- Lead with collected revenue: paid orders, net of refunds. Keep pending/on-hold revenue separate and never describe it as lost revenue.',

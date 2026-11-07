@@ -10,6 +10,10 @@
  * since with the stub no wc-analytics/* abilities exist):
  *   npx wp-env run cli wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php eval-file wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/test-workflows.php
  *
+ * Easy MCP AI stub run (the `both` state; this file loads the stub Tool_State itself and seeds
+ * Easy MCP's ticked-abilities option, restoring it afterwards):
+ *   npx wp-env run cli wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php eval-file wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/test-workflows.php
+ *
  * @package Blaze\McpToolkit
  */
 
@@ -18,7 +22,11 @@
 require_once __DIR__ . '/assert.php';
 
 use Blaze\McpToolkit\Bundled\Commerce;
+use Blaze\McpToolkit\Connectors\Connectors;
+use Blaze\McpToolkit\Connectors\EasyMcpNaming;
+use Blaze\McpToolkit\Connectors\RequestContext;
 use Blaze\McpToolkit\Settings;
+use Blaze\McpToolkit\Workflows\WeeklyStoreReview;
 
 global $wpdb;
 
@@ -55,6 +63,207 @@ $step_for = static function ( $result, string $tool, ?string $subject = null ) {
 };
 
 $profile = 'blaze-mcp-toolkit/store-profile';
+
+// Connector naming (1.1): the run sentence 1.0 shipped, and helpers shared by the default and
+// Easy MCP stub runs.
+$easy_stub     = defined( 'EASY_MCP_AI_VERSION' );
+$run_line_10   = 'This tool does not read store data itself. It returns the steps to run. Each step is run with the connector\'s execute-ability tool, using the step\'s "tool" as the ability name and its "arguments" as the parameters, exactly as given. Arguments are already valid, so you don\'t need to look up tool info first.';
+$abilities_of  = static function ( $result ): array {
+	return is_array( $result ) && isset( $result['steps'] ) ? array_column( $result['steps'], 'ability' ) : array();
+};
+$run_workflows = static function ( string $period = 'last_7_days' ) use ( $workflows ): array {
+	$out = array();
+	foreach ( array_keys( $workflows ) as $name ) {
+		$ability      = wp_get_ability( $name );
+		$out[ $name ] = null === $ability ? null : $ability->execute( array( 'period' => $period ) );
+	}
+	return $out;
+};
+// Every step's tool is the given connector's name for its ability.
+$names_match = static function ( $result, $connector ): bool {
+	if ( ! is_array( $result ) || array() === ( $result['steps'] ?? array() ) ) {
+		return false;
+	}
+	foreach ( $result['steps'] as $step ) {
+		if ( ! isset( $step['ability'] ) || $connector->tool_name( $step['ability'] ) !== $step['tool'] ) {
+			return false;
+		}
+	}
+	return true;
+};
+
+/**
+ * Checks run in both the default and Easy MCP stub modes: Enable Abilities' denylist wins from any
+ * active connector, a /mcp/ route uses recommended names, and a top-level exception thrown inside
+ * a connector-route dispatch leaves no stale frame for a later direct call.
+ */
+$shared_connector_checks = static function ( string $mode ) use ( $names_match ): void {
+	$health = 'blaze-mcp-toolkit/health-summary';
+
+	// REMOVED_GLOBALLY: health-summary on Enable Abilities' denylist (read at call time).
+	$dl_had  = false !== get_option( 'ewpa_thirdparty_disabled', false );
+	$dl_prev = get_option( 'ewpa_thirdparty_disabled', array() );
+	$dl_new  = is_array( $dl_prev ) ? array_values( $dl_prev ) : array();
+	$dl_new[] = $health;
+	update_option( 'ewpa_thirdparty_disabled', $dl_new );
+	$dl_restore = static function () use ( $dl_had, $dl_prev ): void {
+		if ( $dl_had ) {
+			update_option( 'ewpa_thirdparty_disabled', $dl_prev );
+		} else {
+			delete_option( 'ewpa_thirdparty_disabled' );
+		}
+	};
+	blzmcp_it_cleanup( $dl_restore );
+	$weekly = wp_get_ability( WeeklyStoreReview::NAME )->execute( array( 'period' => 'last_7_days' ) );
+	$dl_restore();
+	$text = is_array( $weekly ) ? $weekly['instructions'] : '';
+	blzmcp_it_assert( is_array( $weekly ) && ! in_array( $health, array_column( $weekly['steps'], 'ability' ), true ), "{$mode} denylist: health step left out" );
+	blzmcp_it_assert( str_contains( $text, 'Enable Abilities for MCP' ) && str_contains( $text, admin_url( 'options-general.php?page=ewpa-settings' ) ), "{$mode} denylist: instructions name Enable Abilities for MCP and its settings link" );
+	$not_on_store = (string) strstr( $text, 'NOT ON THIS STORE' );
+	blzmcp_it_assert( ! str_contains( substr( $not_on_store, 0, (int) strpos( $not_on_store . 'SKIPPED STEPS: SWITCHED OFF', 'SKIPPED STEPS: SWITCHED OFF' ) ), $health ), "{$mode} denylist: health not listed as not on this store" );
+	blzmcp_it_assert( str_contains( $text, 'SWITCHED OFF' ), "{$mode} denylist: diagnosed skip has its own section" );
+
+	// Throwaway routes: /mcp/... (production lookup: recommended) and a throw route mapped by a test resolver.
+	$GLOBALS['blzmcp_wf_route_result'] = null;
+	$register                          = static function (): void {
+		register_rest_route(
+			'mcp',
+			'/blzmcp-wf-test',
+			array(
+				'methods'             => 'GET',
+				'permission_callback' => '__return_true',
+				'callback'            => static function () {
+					$GLOBALS['blzmcp_wf_route_result'] = wp_get_ability( WeeklyStoreReview::NAME )->execute( array( 'period' => 'last_7_days' ) );
+					return array( 'ok' => true );
+				},
+			)
+		);
+		register_rest_route(
+			'blzmcp-wf-test',
+			'/throw',
+			array(
+				'methods'             => 'GET',
+				'permission_callback' => '__return_true',
+				'callback'            => static function () {
+					$GLOBALS['blzmcp_wf_route_result'] = wp_get_ability( WeeklyStoreReview::NAME )->execute( array( 'period' => 'last_7_days' ) );
+					throw new \RuntimeException( 'blzmcp-wf-top-level' );
+				},
+			)
+		);
+	};
+	RequestContext::set_resolver( static fn( string $route ): ?string => '/blzmcp-wf-test/throw' === $route ? 'recommended' : Connectors::id_for_route( $route ) );
+	add_action( 'rest_api_init', $register );
+	$GLOBALS['wp_rest_server'] = null;
+	blzmcp_it_cleanup(
+		static function () use ( $register ): void {
+			RequestContext::set_resolver( null );
+			remove_action( 'rest_api_init', $register );
+			$GLOBALS['wp_rest_server'] = null;
+		}
+	);
+	$recommended = Connectors::get( 'recommended' );
+
+	rest_do_request( new WP_REST_Request( 'GET', '/mcp/blzmcp-wf-test' ) );
+	blzmcp_it_assert( $names_match( $GLOBALS['blzmcp_wf_route_result'], $recommended ), "{$mode}: a workflow run inside a /mcp/ route uses recommended names" );
+
+	$GLOBALS['blzmcp_wf_route_result'] = null;
+	$top                               = null;
+	try {
+		rest_do_request( new WP_REST_Request( 'GET', '/blzmcp-wf-test/throw' ) );
+	} catch ( \RuntimeException $e ) {
+		$top = $e;
+	}
+	blzmcp_it_assert( null !== $top && 'blzmcp-wf-top-level' === $top->getMessage(), "{$mode}: top-level exception propagates out of rest_do_request" );
+	blzmcp_it_assert( $names_match( $GLOBALS['blzmcp_wf_route_result'], $recommended ), "{$mode}: inside the throwing route the workflow used the route's connector" );
+	blzmcp_it_equals( null, RequestContext::current(), "{$mode}: no frame left after the exception" );
+	$after = wp_get_ability( WeeklyStoreReview::NAME )->execute( array( 'period' => 'last_7_days' ) );
+	blzmcp_it_assert( $names_match( $after, Connectors::signin_owner() ), "{$mode}: a later direct call uses the sign-in owner's names (no stale frame)" );
+};
+
+if ( $easy_stub ) {
+	echo "Mode: easy-stub (both)\n";
+	require_once __DIR__ . '/stub-easymcp-toolstate.php';
+	$easy = Connectors::get( 'easy-mcp' );
+	blzmcp_it_equals( 'both', Connectors::state(), 'easy-stub: state is both' );
+	blzmcp_it_assert( class_exists( '\Easy_MCP_AI\Tools\Tool_State' ), 'easy-stub: stub Tool_State loaded' );
+
+	$opt      = 'easy_mcp_ai_enabled_abilities';
+	$opt_had  = false !== get_option( $opt, false );
+	$opt_prev = get_option( $opt, array() );
+	blzmcp_it_cleanup(
+		static function () use ( $opt, $opt_had, $opt_prev ): void {
+			if ( $opt_had ) {
+				update_option( $opt, $opt_prev );
+			} else {
+				delete_option( $opt );
+			}
+			unset( $GLOBALS['blzmcp_toolstate_return'] );
+		}
+	);
+	$all_names = array_map( static fn( $a ) => $a->get_name(), wp_get_abilities() );
+
+	// All abilities ticked, Tool_State says on: Easy MCP names everywhere.
+	update_option( $opt, $all_names );
+	$GLOBALS['blzmcp_toolstate_return'] = array( true, 'default' );
+	$easy_run_line                      = 'This tool does not read store data itself. It returns the steps to run. ' . $easy->run_instruction();
+	foreach ( $run_workflows() as $name => $result ) {
+		$text = is_array( $result ) ? $result['instructions'] : '';
+		blzmcp_it_assert( is_array( $result ) && array() !== $result['steps'], "easy-stub {$name}: runs and has steps" );
+		$ok = is_array( $result );
+		foreach ( is_array( $result ) ? $result['steps'] : array() as $step ) {
+			$ok = $ok && str_starts_with( $step['tool'], 'wp_ability_' ) && EasyMcpNaming::tool_name( $step['ability'] ) === $step['tool'];
+		}
+		blzmcp_it_assert( $ok, "easy-stub {$name}: every tool is wp_ability_ + the Easy MCP name of its ability" );
+		blzmcp_it_assert( str_contains( $text, "HOW TO USE THIS PLAN\n" . $easy_run_line . "\n" ), "easy-stub {$name}: instructions carry the Easy MCP run sentence" );
+		blzmcp_it_assert( str_contains( $text, 'call the step\'s "tool" with its "arguments"' ) && ! str_contains( $text, 'execute-ability tool' ), "easy-stub {$name}: no execute-ability wording" );
+		blzmcp_it_assert( ! str_contains( $text, '{tool:' ), "easy-stub {$name}: no {tool: token left" );
+		blzmcp_it_assert( ! str_contains( $text, 'wc-analytics-confirm-large-range' ), "easy-stub {$name}: no hyphenated confirm-large-range name" );
+		blzmcp_it_assert( ! str_contains( $text, 'NOT ON THIS STORE' ) && ! str_contains( $text, 'SWITCHED OFF' ), "easy-stub {$name}: nothing skipped" );
+		if ( 'blaze-mcp-toolkit/failed-order-triage' === $name ) {
+			blzmcp_it_assert( str_contains( $text, 'wp_ability_wc_analytics_rows' ) && ! str_contains( $text, 'wc-analytics/rows' ), 'easy-stub failed-order: instructions name wp_ability_wc_analytics_rows' );
+		}
+		if ( 'blaze-mcp-toolkit/revenue-drop-triage' === $name ) {
+			blzmcp_it_assert( str_contains( $text, 'wp_ability_wc_analytics_breakdown' ) && ! str_contains( $text, 'wc-analytics/breakdown' ), 'easy-stub revenue-drop: instructions name wp_ability_wc_analytics_breakdown' );
+		}
+		// Same plan as the recommended connector, only the names differ.
+		$rec = RequestContext::run( 'recommended', static fn() => wp_get_ability( $name )->execute( array( 'period' => 'last_7_days' ) ) );
+		blzmcp_it_equals( $abilities_of( $rec ), $abilities_of( $result ), "easy-stub {$name}: same abilities as the recommended plan" );
+		blzmcp_it_equals( wp_json_encode( array_column( $rec['steps'] ?? array(), 'arguments' ) ), wp_json_encode( array_column( $result['steps'] ?? array(), 'arguments' ) ), "easy-stub {$name}: same arguments as the recommended plan" );
+	}
+
+	// Seeded before 1.1: only our own abilities ticked, so the analytics steps are not reachable.
+	update_option( $opt, array_values( array_filter( $all_names, static fn( $n ) => str_starts_with( $n, 'blaze-mcp-toolkit/' ) ) ) );
+	foreach ( $run_workflows() as $name => $result ) {
+		$text = is_array( $result ) ? $result['instructions'] : '';
+		blzmcp_it_assert( is_array( $result ) && array() === array_filter( $abilities_of( $result ), static fn( $a ) => str_starts_with( (string) $a, 'wc-analytics/' ) ), "easy-stub seeded {$name}: analytics steps absent" );
+		blzmcp_it_assert( str_contains( $text, 'Easy MCP AI › Tools › Abilities' ) && str_contains( $text, 'wp_ability_wc_analytics_totals' ), "easy-stub seeded {$name}: instructions list the analytics tools with Easy MCP AI › Tools › Abilities" );
+		blzmcp_it_assert( str_contains( $text, $easy->settings_url() ), "easy-stub seeded {$name}: instructions link Easy MCP AI's settings" );
+		blzmcp_it_assert( ! str_contains( (string) strstr( $text, 'NOT ON THIS STORE' ), 'wp_ability_wc_analytics' ), "easy-stub seeded {$name}: analytics not called missing from the store" );
+	}
+
+	// Ticked but switched off with a reason code: plain words, never the raw code.
+	update_option( $opt, $all_names );
+	$GLOBALS['blzmcp_toolstate_return'] = array( false, 'held' );
+	$held                               = wp_get_ability( WeeklyStoreReview::NAME )->execute( array( 'period' => 'last_7_days' ) );
+	$text                               = is_array( $held ) ? $held['instructions'] : '';
+	blzmcp_it_assert( is_array( $held ) && array() === $held['steps'], 'easy-stub held: every step left out' );
+	blzmcp_it_assert( str_contains( $text, 'SWITCHED OFF' ) && str_contains( $text, 'Easy MCP AI' ), 'easy-stub held: switched-off section names Easy MCP AI' );
+	blzmcp_it_assert( ! str_contains( $text, '(held)' ) && ! str_contains( $text, 'held)' ), 'easy-stub held: raw reason code not shown' );
+
+	// Effective state unreadable: "couldn't confirm it is switched on".
+	$GLOBALS['blzmcp_toolstate_return'] = 'not-an-array';
+	$unknown                            = wp_get_ability( WeeklyStoreReview::NAME )->execute( array( 'period' => 'last_7_days' ) );
+	$text                               = is_array( $unknown ) ? $unknown['instructions'] : '';
+	blzmcp_it_assert( is_array( $unknown ) && array() === $unknown['steps'], 'easy-stub unknown: every step left out' );
+	blzmcp_it_assert( str_contains( $text, "couldn't confirm it is switched on" ), 'easy-stub unknown: says it could not confirm the tool is switched on' );
+
+	// Back to all on for the shared checks.
+	$GLOBALS['blzmcp_toolstate_return'] = array( true, 'default' );
+	$shared_connector_checks( 'easy-stub' );
+
+	blzmcp_it_finish();
+	return;
+}
 
 // Requested-period analytics check (audit F02), in both modes: a paid order 5 days ago missing from
 // wc_order_stats stops a last_7_days review but not one for yesterday.
@@ -319,6 +528,26 @@ if ( is_array( $refund ) ) {
 	blzmcp_it_assert( null !== $step_for( $refund, 'wc-analytics/totals', 'refunds' ), 'refund triage has refund totals' );
 	blzmcp_it_assert( null !== $step_for( $refund, 'wc-analytics/breakdown', 'refunds' ), 'refund triage has refund breakdown' );
 }
+
+// Recommended connector (1.1): tool equals ability, the 1.0 run sentence byte for byte, tokens rendered.
+blzmcp_it_equals( 'recommended', Connectors::execution()->id(), 'default: execution connector is recommended' );
+foreach ( $run_workflows() as $name => $result ) {
+	$text = is_array( $result ) ? $result['instructions'] : '';
+	$ok   = is_array( $result ) && array() !== $result['steps'];
+	foreach ( is_array( $result ) ? $result['steps'] : array() as $step ) {
+		$ok = $ok && isset( $step['ability'] ) && $step['tool'] === $step['ability'];
+	}
+	blzmcp_it_assert( $ok, "recommended {$name}: every step's tool equals its ability" );
+	blzmcp_it_assert( str_contains( $text, "HOW TO USE THIS PLAN\n" . $run_line_10 . "\n" ), "recommended {$name}: run sentence is byte-identical to 1.0" );
+	blzmcp_it_assert( ! str_contains( $text, '{tool:' ), "recommended {$name}: no {tool: token left" );
+	if ( 'blaze-mcp-toolkit/failed-order-triage' === $name ) {
+		blzmcp_it_assert( str_contains( $text, 'also run wc-analytics/rows twice more' ), 'recommended failed-order: instructions name wc-analytics/rows' );
+	}
+	if ( 'blaze-mcp-toolkit/revenue-drop-triage' === $name ) {
+		blzmcp_it_assert( str_contains( $text, '(wc-analytics/breakdown with subject=revenue' ), 'recommended revenue-drop: instructions name wc-analytics/breakdown' );
+	}
+}
+$shared_connector_checks( 'default' );
 
 // Shop manager, diagnostics off: health steps absent, instructions say so, no denied audit rows from probing.
 $settings = Settings::get();

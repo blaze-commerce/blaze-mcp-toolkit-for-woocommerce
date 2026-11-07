@@ -11,6 +11,9 @@ namespace Blaze\McpToolkit\Workflows;
 
 use Blaze\McpToolkit\Abilities\AbstractAbility;
 use Blaze\McpToolkit\Bundled\AnalyticsGuard;
+use Blaze\McpToolkit\Connectors\Availability;
+use Blaze\McpToolkit\Connectors\Connector;
+use Blaze\McpToolkit\Connectors\Connectors;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -20,9 +23,11 @@ defined( 'ABSPATH' ) || exit;
  * MCP prompt because ChatGPT does not show MCP prompts, and because Enable Abilities' gateway only
  * exposes abilities.
  *
- * Steps whose tool is not registered (or not exposed over MCP), or whose permission the current user
- * fails, are dropped and named in the instructions, each group with its own reason, so the AI never
- * wastes a turn on a call that will fail and tells the merchant the right reason.
+ * Each step names an ability; its `tool` is the name the connector running this request shows for
+ * that ability. Steps whose tool is not registered, not exposed by that connector, switched off in
+ * a connector, or whose permission the current user fails, are dropped and named in the
+ * instructions, each group with its own reason, so the AI never wastes a turn on a call that will
+ * fail and tells the merchant the right reason (and, when known, where to switch the tool on).
  */
 abstract class AbstractWorkflow extends AbstractAbility {
 
@@ -42,7 +47,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	protected const STEP_OK = 'ok';
 
 	/**
-	 * Step status: the tool is not registered on this store, or not exposed over MCP.
+	 * Step status: the tool is not registered on this store, or not exposed by the connector.
 	 */
 	protected const STEP_MISSING = 'missing';
 
@@ -50,6 +55,23 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * Step status: the tool exists but the current user's role may not use it.
 	 */
 	protected const STEP_DENIED = 'denied';
+
+	/**
+	 * Skip reason when the connector cannot say whether a tool is switched on.
+	 */
+	private const UNKNOWN_REASON = "couldn't confirm it is switched on";
+
+	/**
+	 * Plain words for the short reason codes a connector may add in brackets to a switched-off
+	 * reason. Unknown codes are dropped rather than shown.
+	 */
+	private const REASON_CODES = array(
+		'disabled' => 'switched off on its tools screen',
+		'held'     => 'new, and waiting to be switched on',
+		'policy'   => 'switched off by its tool settings',
+		'override' => "switched off by the site's configuration",
+		'default'  => 'off unless switched on',
+	);
 
 	/**
 	 * Store profile tool name. A string, not StoreProfile::NAME: referencing that class would load
@@ -72,12 +94,13 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * Ordered steps for this workflow, before availability filtering.
 	 *
 	 * @param string $period One of PERIODS.
-	 * @return array<int, array{tool: string, arguments: array<string, mixed>, why: string}>
+	 * @return array<int, array{tool: string, ability: string, arguments: array<string, mixed>, why: string}>
 	 */
 	abstract protected static function plan( string $period ): array;
 
 	/**
-	 * Workflow-specific instructions (upstream's prompt text plus Blaze additions).
+	 * Workflow-specific instructions (upstream's prompt text plus Blaze additions). Name another tool
+	 * as `{tool:<ability>}`; run() renders it with the connector's name for that ability.
 	 *
 	 * @param string $period One of PERIODS.
 	 */
@@ -139,9 +162,10 @@ abstract class AbstractWorkflow extends AbstractAbility {
 					'type'  => 'array',
 					'items' => array(
 						'type'                 => 'object',
-						'required'             => array( 'tool', 'arguments', 'why' ),
+						'required'             => array( 'tool', 'ability', 'arguments', 'why' ),
 						'properties'           => array(
 							'tool'      => array( 'type' => 'string' ),
+							'ability'   => array( 'type' => 'string' ),
 							'arguments' => array( 'type' => 'object' ),
 							'why'       => array( 'type' => 'string' ),
 						),
@@ -160,6 +184,8 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * @return array|\WP_Error
 	 */
 	protected static function run( array $input ): array|\WP_Error {
+		// Captured once: every name, status and instruction in this plan comes from one connector.
+		$c      = Connectors::execution();
 		$period = isset( $input['period'] ) && in_array( $input['period'], self::PERIODS, true ) ? $input['period'] : static::DEFAULT_PERIOD;
 
 		// Checked here, in both modes: while standing aside the analytics tools are WooCommerce for
@@ -174,26 +200,30 @@ abstract class AbstractWorkflow extends AbstractAbility {
 
 		$steps       = array();
 		$missing     = array();
+		$switched    = array();
 		$denied      = array();
 		$has_profile = false;
 		foreach ( static::plan( $period ) as $step ) {
-			if ( null !== $analytics_reason && str_starts_with( $step['tool'], 'wc-analytics/' ) ) {
+			if ( null !== $analytics_reason && str_starts_with( $step['ability'], 'wc-analytics/' ) ) {
 				continue;
 			}
-			$status = static::step_status( $step['tool'], $step['arguments'] );
+			$step['tool']     = $c->tool_name( $step['ability'] );
+			[ $status, $why ] = static::step_status( $c, $step['ability'], $step['arguments'] );
 			if ( self::STEP_OK === $status ) {
-				$has_profile = $has_profile || self::STORE_PROFILE_TOOL === $step['tool'];
+				$has_profile = $has_profile || self::STORE_PROFILE_TOOL === $step['ability'];
 				// An object, so empty arguments encode as {} rather than [].
 				$step['arguments'] = (object) $step['arguments'];
 				$steps[]           = $step;
 			} elseif ( self::STEP_DENIED === $status ) {
 				$denied[] = $step;
+			} elseif ( null !== $why ) {
+				$switched[] = array( $step, $why );
 			} else {
 				$missing[] = $step;
 			}
 		}
 
-		$instructions = self::preamble( $missing, $denied, $has_profile ) . "\n\n" . static::guidance( $period );
+		$instructions = self::render_tokens( self::preamble( $c, $missing, $switched, $denied, $has_profile ) . "\n\n" . static::guidance( $period ), $c );
 		if ( null !== $analytics_reason ) {
 			$instructions = AnalyticsGuard::MESSAGE_TOKEN . ' ' . AnalyticsGuard::message( $analytics_reason )
 				. "\n\nSTOP: WooCommerce Analytics data for this period is not complete (or could not be checked) on this store, so the analytics steps were left out. Explain the message above to the merchant in plain words, say the figures would be incomplete until it is fixed, and stop: do not run the steps below, report any numbers or write the review.\n\n"
@@ -209,65 +239,101 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	}
 
 	/**
-	 * One step.
+	 * One step. `tool` starts as the ability name; run() replaces it with the connector's name.
 	 *
-	 * @param string               $tool Ability name to run.
-	 * @param array<string, mixed> $args Arguments, valid against that ability's input schema.
-	 * @param string               $why  Why the step is there (and its condition, if conditional).
-	 * @return array{tool: string, arguments: array<string, mixed>, why: string}
+	 * @param string               $ability Ability name to run.
+	 * @param array<string, mixed> $args    Arguments, valid against that ability's input schema.
+	 * @param string               $why     Why the step is there (and its condition, if conditional).
+	 * @return array{tool: string, ability: string, arguments: array<string, mixed>, why: string}
 	 */
-	protected static function step( string $tool, array $args, string $why ): array {
+	protected static function step( string $ability, array $args, string $why ): array {
 		return array(
-			'tool'      => $tool,
+			'tool'      => $ability,
+			'ability'   => $ability,
 			'arguments' => $args,
 			'why'       => $why,
 		);
 	}
 
 	/**
-	 * True when the ability exists, is exposed over MCP (Enable Abilities' execute-ability gateway
-	 * refuses abilities that are not MCP-public), and the current user passes its permission check.
-	 * Never runs the ability, and a denial here is not audited (it is a probe, not a call).
+	 * Replace each `{tool:<ability>}` with the connector's tool name for that ability.
 	 *
-	 * @param string               $tool Ability name.
-	 * @param array<string, mixed> $args Arguments the step would run with.
+	 * @param string    $text Text with tokens.
+	 * @param Connector $c    Connector whose names to use.
 	 */
-	protected static function available( string $tool, array $args = array() ): bool {
-		return self::STEP_OK === static::step_status( $tool, $args );
+	public static function render_tokens( string $text, Connector $c ): string {
+		return (string) preg_replace_callback(
+			'/\{tool:([A-Za-z0-9_\-\/]+)\}/',
+			static fn( array $m ): string => $c->tool_name( $m[1] ),
+			$text
+		);
 	}
 
 	/**
-	 * Why a step can or cannot run: STEP_OK, STEP_MISSING (not registered, or not exposed over
-	 * MCP, e.g. while standing aside for WooCommerce for Claude) or STEP_DENIED (the current
-	 * user's role fails its permission check). Never runs the ability; probes are not audited.
+	 * True when the ability exists, is exposed by the execution connector, and the current user
+	 * passes its permission check. Never runs the ability, and a denial here is not audited (it is a
+	 * probe, not a call).
 	 *
-	 * @param string               $tool Ability name.
-	 * @param array<string, mixed> $args Arguments the step would run with.
+	 * @param string               $ability Ability name.
+	 * @param array<string, mixed> $args    Arguments the step would run with.
 	 */
-	protected static function step_status( string $tool, array $args = array() ): string {
-		if ( ! function_exists( 'wp_has_ability' ) || ! wp_has_ability( $tool ) ) {
-			return self::STEP_MISSING;
-		}
-		$ability = wp_get_ability( $tool );
-		if ( null === $ability || ! self::is_mcp_public( $ability ) ) {
-			return self::STEP_MISSING;
-		}
-
-		return self::probe_permission( $ability, $args ) ? self::STEP_OK : self::STEP_DENIED;
+	protected static function available( string $ability, array $args = array() ): bool {
+		return self::STEP_OK === static::step_status( Connectors::execution(), $ability, $args )[0];
 	}
 
 	/**
-	 * Whether MCP Adapter exposes the ability to MCP clients.
+	 * Why a step can or cannot run through connector $c: STEP_OK, STEP_MISSING or STEP_DENIED (the
+	 * current user's role fails its permission check), plus, for a missing step, the diagnosis when
+	 * one is known. Enable Abilities-style removal reported by any active connector wins; a
+	 * switched-off or unknown state counts only from $c itself. A missing step with no diagnosis is
+	 * simply not on this store (or not exposed, e.g. while standing aside for WooCommerce for
+	 * Claude). Never runs the ability; probes are not audited.
 	 *
-	 * @param \WP_Ability $ability Ability.
+	 * @param Connector            $c       Execution connector.
+	 * @param string               $ability Ability name.
+	 * @param array<string, mixed> $args    Arguments the step would run with.
+	 * @return array{0: string, 1: ?Availability}
 	 */
-	private static function is_mcp_public( \WP_Ability $ability ): bool {
-		if ( class_exists( '\WP\MCP\Abilities\McpAbilityExposure' ) ) {
-			return \WP\MCP\Abilities\McpAbilityExposure::is_public( $ability );
+	protected static function step_status( Connector $c, string $ability, array $args = array() ): array {
+		$removed = self::removed_globally( $ability );
+		if ( null !== $removed ) {
+			return array( self::STEP_MISSING, $removed );
 		}
-		$meta = $ability->get_meta();
+		if ( ! function_exists( 'wp_has_ability' ) || ! wp_has_ability( $ability ) ) {
+			return array( self::STEP_MISSING, null );
+		}
+		$registered = wp_get_ability( $ability );
+		if ( null === $registered ) {
+			return array( self::STEP_MISSING, null );
+		}
+		$exposed = $c->is_exposed( $registered );
+		if ( null === $exposed ) {
+			return array( self::STEP_MISSING, new Availability( Availability::UNKNOWN, $c->id(), self::UNKNOWN_REASON, $c->settings_url() ) );
+		}
+		if ( false === $exposed ) {
+			return array( self::STEP_MISSING, $c->diagnose( $ability ) );
+		}
 
-		return true === ( $meta['mcp']['public'] ?? null );
+		return array( self::probe_permission( $registered, $args ) ? self::STEP_OK : self::STEP_DENIED, null );
+	}
+
+	/**
+	 * The first REMOVED_GLOBALLY diagnosis from an active connector, or null. diagnose() is only
+	 * asked of active connectors.
+	 *
+	 * @param string $ability Ability name.
+	 */
+	private static function removed_globally( string $ability ): ?Availability {
+		foreach ( Connectors::all() as $connector ) {
+			if ( ! $connector->is_active() ) {
+				continue;
+			}
+			$why = $connector->diagnose( $ability );
+			if ( null !== $why && Availability::REMOVED_GLOBALLY === $why->kind ) {
+				return $why;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -276,7 +342,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * tells the AI where the store name may come from, or to leave the Store line out.
 	 *
 	 * @param string $why Why the step is there.
-	 * @return array{tool: string, arguments: array<string, mixed>, why: string}
+	 * @return array{tool: string, ability: string, arguments: array<string, mixed>, why: string}
 	 */
 	protected static function store_profile_step( string $why ): array {
 		return static::step( self::STORE_PROFILE_TOOL, array(), $why );
@@ -335,19 +401,22 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	}
 
 	/**
-	 * Common instructions: how to run the steps, analytics-unavailable handling, skipped steps and,
-	 * when there is no store profile step, where the store name comes from.
+	 * Common instructions: how to run the steps through connector $c, analytics-unavailable
+	 * handling, skipped steps and, when there is no store profile step, where the store name comes
+	 * from.
 	 *
-	 * @param array<int, array{tool: string, arguments: array<string, mixed>, why: string}> $missing     Steps dropped because the tool is not on this store.
-	 * @param array<int, array{tool: string, arguments: array<string, mixed>, why: string}> $denied      Steps dropped because the user's role may not use them.
-	 * @param bool                                                                           $has_profile Whether a store profile step remains.
+	 * @param Connector                                                                                      $c           Execution connector.
+	 * @param array<int, array{tool: string, ability: string, arguments: array<string, mixed>, why: string}> $missing     Steps dropped because the tool is not on this store.
+	 * @param array<int, array{0: array{tool: string, why: string}, 1: Availability}>                        $switched    Steps dropped with a diagnosis (switched off, or not confirmed on).
+	 * @param array<int, array{tool: string, ability: string, arguments: array<string, mixed>, why: string}> $denied      Steps dropped because the user's role may not use them.
+	 * @param bool                                                                                           $has_profile Whether a store profile step remains.
 	 */
-	private static function preamble( array $missing, array $denied, bool $has_profile ): string {
+	private static function preamble( Connector $c, array $missing, array $switched, array $denied, bool $has_profile ): string {
 		$text = implode(
 			"\n",
 			array(
 				'HOW TO USE THIS PLAN',
-				'This tool does not read store data itself. It returns the steps to run. Each step is run with the connector\'s execute-ability tool, using the step\'s "tool" as the ability name and its "arguments" as the parameters, exactly as given. Arguments are already valid, so you don\'t need to look up tool info first.',
+				'This tool does not read store data itself. It returns the steps to run. ' . $c->run_instruction(),
 				'Run the first step alone. If it succeeds, run the remaining unconditional steps (in parallel if you can), then any "Only if" steps whose condition holds. When the steps are done, write the answer described below.',
 				'',
 				'Use the tools quietly. Never tell the merchant about tools, abilities, schemas, steps, parameters or this plan; talk only about their store.',
@@ -366,6 +435,12 @@ abstract class AbstractWorkflow extends AbstractAbility {
 				. "\nDo not try to run them. Work with the remaining data. If the missing check matters to the answer, tell the merchant in one short sentence that it is not available on this store; do not suggest asking an administrator for it.";
 		}
 
+		if ( array() !== $switched ) {
+			$text .= "\n\nSKIPPED STEPS: SWITCHED OFF\nThese steps were left out because the tool is switched off for AI assistants on this store (or it couldn't be confirmed that it is on). Each line says why and where a store administrator can switch it on:\n"
+				. self::switched_lines( $switched )
+				. "\nDo not try to run them. Work with the remaining data. If a skipped check matters to the answer, tell the merchant in one short sentence which check was skipped, why, and where to switch it on, using the place named on its line.";
+		}
+
 		if ( array() !== $denied ) {
 			$text .= "\n\nSKIPPED STEPS: NOT AVAILABLE FOR YOUR ROLE\nThese steps were left out because they are not available for your role (your WordPress user is not allowed to use them):\n"
 				. self::step_lines( $denied )
@@ -380,9 +455,44 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	}
 
 	/**
+	 * Bullet list of steps dropped with a diagnosis: the reason in plain words and where to switch
+	 * the tool on (the reporting connector's name and settings screen).
+	 *
+	 * @param array<int, array{0: array{tool: string, why: string}, 1: Availability}> $switched Dropped steps with their diagnosis.
+	 */
+	private static function switched_lines( array $switched ): string {
+		$lines = array();
+		foreach ( $switched as [ $step, $why ] ) {
+			$where   = Connectors::get( $why->connector_id );
+			$label   = null === $where ? '' : $where->label();
+			$reason  = Availability::UNKNOWN === $why->kind ? self::UNKNOWN_REASON : self::plain_reason( $why->reason );
+			$lines[] = '- ' . $step['tool'] . ': ' . $step['why'] . ' Skipped: ' . ( '' !== $reason ? $reason : 'switched off' ) . '.'
+				. ( '' !== $label ? ' Switch it on in ' . $label . ( '' !== $why->settings_url ? ' (' . $why->settings_url . ')' : '' ) . '.' : '' );
+		}
+
+		return implode( "\n", $lines );
+	}
+
+	/**
+	 * A connector's reason with any trailing bracketed code, e.g. "(held)", turned into plain words
+	 * (or dropped when the code is not known).
+	 *
+	 * @param string $reason Reason from the connector.
+	 */
+	private static function plain_reason( string $reason ): string {
+		if ( 1 !== preg_match( '/^(.*?)\s*\(([a-z_-]+)\)\s*$/', $reason, $m ) ) {
+			return trim( $reason );
+		}
+		$base = trim( $m[1] );
+		$code = self::REASON_CODES[ $m[2] ] ?? '';
+
+		return '' === $code ? $base : $base . ': ' . $code;
+	}
+
+	/**
 	 * Bullet list of dropped steps.
 	 *
-	 * @param array<int, array{tool: string, arguments: array<string, mixed>, why: string}> $steps Dropped steps.
+	 * @param array<int, array{tool: string, ability: string, arguments: array<string, mixed>, why: string}> $steps Dropped steps.
 	 */
 	private static function step_lines( array $steps ): string {
 		$lines = array();

@@ -48,7 +48,7 @@ final class FailedOrderTriage extends AbstractWorkflow {
 	 * Steps.
 	 *
 	 * @param string $period One of PERIODS.
-	 * @return array<int, array{tool: string, arguments: array<string, mixed>, why: string}>
+	 * @return array<int, array{tool: string, ability: string, arguments: array<string, mixed>, why: string}>
 	 */
 	protected static function plan( string $period ): array {
 		return array(
@@ -134,7 +134,7 @@ final class FailedOrderTriage extends AbstractWorkflow {
 				'Use the tools quietly. If you need a progress sentence before the final answer, say only: "I\'ll check the period and separate on-hold payment pipeline from failed checkout risk." Do not tell the merchant you are loading schemas, loading tools, selecting tools, calling tools, using a connector, or constructing filters.',
 				'',
 				'Required data: the steps read the order overview (status breakdown and pipeline diagnostic; treat the current paid-order count as background only, except for the card-testing check below), the store profile, on-hold and failed order aggregates, the oldest on-hold and most recent failed orders, and, when relevant, the channel mix.',
-				'If the order overview returns a comparison range, also run wc-analytics/rows twice more with the same arguments as the two aggregate steps, but with date_start and date_end set to the exact comparison dates (YYYY-MM-DD) in place of period: once with the on-hold status filter and once with the failed status filter. Use these only for current-vs-prior count/value wording; do not compute percentage changes, rates, or shares unless a tool returned them.',
+				'If the order overview returns a comparison range, also run {tool:wc-analytics/rows} twice more with the same arguments as the two aggregate steps, but with date_start and date_end set to the exact comparison dates (YYYY-MM-DD) in place of period: once with the on-hold status filter and once with the failed status filter. Use these only for current-vs-prior count/value wording; do not compute percentage changes, rates, or shares unless a tool returned them.',
 				'',
 				'Card-testing check (this overrides the paid-order rules below): if the number of failed orders in the period is greater than the number of paid orders in the period, lead the Snapshot with that, quote both counts side by side (for example "120 failed orders versus 15 paid orders"), and say it is a likely sign of card testing (bots trying stolen card numbers) or of a checkout or payment-gateway fault worth checking now, not proof of either. Make reviewing the gateway\'s fraud and decline logs and turning on checkout protection (for example a CAPTCHA or the gateway\'s fraud rules) part of Next Actions.',
 				'',
