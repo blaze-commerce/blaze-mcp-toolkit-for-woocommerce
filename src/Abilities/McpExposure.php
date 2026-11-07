@@ -33,7 +33,7 @@ final class McpExposure {
 	}
 
 	/**
-	 * Mark wc-analytics/* abilities public over MCP and visible in REST.
+	 * Mark wc-analytics/* abilities public over MCP, visible in REST and annotated read-only.
 	 *
 	 * @param mixed  $args Ability registration args.
 	 * @param string $name Ability name.
@@ -47,7 +47,15 @@ final class McpExposure {
 		$meta = isset( $args['meta'] ) && is_array( $args['meta'] ) ? $args['meta'] : array();
 		$mcp  = isset( $meta['mcp'] ) && is_array( $meta['mcp'] ) ? $meta['mcp'] : array();
 
+		$annotations = isset( $meta['annotations'] ) && is_array( $meta['annotations'] ) ? $meta['annotations'] : array();
+
+		// Read-only analytics: set the trio unless an annotation is already true (an upstream destructive=true stays).
+		$annotations['readonly']    = true;
+		$annotations['idempotent']  = true;
+		$annotations['destructive'] = true === ( $annotations['destructive'] ?? null );
+
 		$mcp['public']        = true;
+		$meta['annotations']  = $annotations;
 		$meta['mcp']          = $mcp;
 		$meta['show_in_rest'] = true;
 		$args['meta']         = $meta;

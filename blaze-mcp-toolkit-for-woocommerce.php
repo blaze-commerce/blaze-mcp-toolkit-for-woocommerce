@@ -5,7 +5,7 @@
  * Version:           1.0.0
  * Requires at least: 6.9
  * Requires PHP:      8.1
- * Requires Plugins:  woocommerce, mcp-adapter, enable-abilities-for-mcp
+ * Requires Plugins:  woocommerce
  * WC requires at least: 10.9
  * WC tested up to:   11.2
  * Author:            Blaze Commerce

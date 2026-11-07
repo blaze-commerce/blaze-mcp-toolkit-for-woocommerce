@@ -54,6 +54,26 @@ $admins = get_users(
 );
 wp_set_current_user( $admins[0]->ID );
 
+// Dependencies header: WooCommerce only; the MCP connector is chosen at runtime.
+if ( ! function_exists( 'get_plugin_data' ) ) {
+	require_once ABSPATH . 'wp-admin/includes/plugin.php';
+}
+$plugin_data = get_plugin_data( BLZMCP_FILE, false, false );
+blzmcp_it_equals( 'woocommerce', $plugin_data['RequiresPlugins'] ?? null, 'plugin header Requires Plugins is woocommerce only' );
+
+// Annotation filter: sets the read-only trio unless already true, never overrides upstream destructive=true.
+foreach ( $analytics_names as $name ) {
+	$filtered = McpExposure::filter_args( array(), $name );
+	blzmcp_it_equals( true, $filtered['meta']['annotations']['readonly'] ?? null, "filter: {$name} readonly from empty args" );
+	blzmcp_it_equals( false, $filtered['meta']['annotations']['destructive'] ?? null, "filter: {$name} destructive false from empty args" );
+	blzmcp_it_equals( true, $filtered['meta']['annotations']['idempotent'] ?? null, "filter: {$name} idempotent from empty args" );
+}
+$kept = McpExposure::filter_args( array( 'meta' => array( 'annotations' => array( 'destructive' => true, 'readonly' => false ) ) ), 'wc-analytics/totals' );
+blzmcp_it_equals( true, $kept['meta']['annotations']['destructive'] ?? null, 'filter: upstream destructive=true is left as is' );
+blzmcp_it_equals( true, $kept['meta']['annotations']['readonly'] ?? null, 'filter: readonly=false is raised to true' );
+$other = McpExposure::filter_args( array( 'meta' => array() ), 'other/tool' );
+blzmcp_it_equals( array(), $other['meta'], 'filter: non wc-analytics ability untouched' );
+
 $wcfc_constant = defined( 'WOOCOMMERCE_CLAUDE_VERSION' );
 if ( ! function_exists( 'is_plugin_active' ) ) {
 	require_once ABSPATH . 'wp-admin/includes/plugin.php';
@@ -78,6 +98,11 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		$meta = $ability instanceof WP_Ability ? $ability->get_meta() : array();
 		blzmcp_it_equals( true, $meta['mcp']['public'] ?? null, "bundled_tools_registered: {$name} mcp.public" );
 		blzmcp_it_equals( true, $meta['show_in_rest'] ?? null, "bundled_tools_registered: {$name} show_in_rest" );
+		if ( str_starts_with( $name, 'wc-analytics/' ) ) {
+			blzmcp_it_equals( true, $meta['annotations']['readonly'] ?? null, "annotations: {$name} readonly" );
+			blzmcp_it_equals( false, $meta['annotations']['destructive'] ?? null, "annotations: {$name} destructive false" );
+			blzmcp_it_equals( true, $meta['annotations']['idempotent'] ?? null, "annotations: {$name} idempotent" );
+		}
 	}
 	foreach ( $store_names as $name ) {
 		$ability = wp_get_ability( $name );
@@ -620,6 +645,8 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 			blzmcp_it_assert( $ability instanceof WP_Ability, "standaside: {$name} registered by WooCommerce for Claude" );
 			$meta = $ability instanceof WP_Ability ? $ability->get_meta() : array();
 			blzmcp_it_equals( true, $meta['mcp']['public'] ?? null, "standaside: {$name} mcp.public via McpExposure" );
+			blzmcp_it_equals( true, $meta['annotations']['readonly'] ?? null, "standaside: {$name} annotation readonly" );
+			blzmcp_it_equals( false, $meta['annotations']['destructive'] ?? null, "standaside: {$name} annotation destructive false" );
 		}
 		blzmcp_it_assert( wp_has_ability( 'woocommerce-claude/get-store-profile' ), 'standaside: upstream store tools come from WooCommerce for Claude' );
 		$totals = wp_get_ability( 'wc-analytics/totals' );
