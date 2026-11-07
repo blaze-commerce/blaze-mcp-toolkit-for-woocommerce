@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Blaze MCP Toolkit for WooCommerce
  * Description:       Ask Claude or ChatGPT how your WooCommerce store is doing: sales, errors, failed jobs, updates and API access. Our tools are read-only.
- * Version:           1.0.0
+ * Version:           1.1.0
  * Requires at least: 6.9
  * Requires PHP:      8.1
  * Requires Plugins:  woocommerce
@@ -19,7 +19,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'BLZMCP_VERSION', '1.0.0' );
+define( 'BLZMCP_VERSION', '1.1.0' );
 define( 'BLZMCP_FILE', __FILE__ );
 define( 'BLZMCP_DIR', plugin_dir_path( __FILE__ ) );
 

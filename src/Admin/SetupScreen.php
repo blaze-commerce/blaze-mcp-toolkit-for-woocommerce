@@ -11,6 +11,7 @@ namespace Blaze\McpToolkit\Admin;
 
 use Blaze\McpToolkit\Audit\AuditLog;
 use Blaze\McpToolkit\Bundled\Commerce;
+use Blaze\McpToolkit\Connectors\Connectors;
 use Blaze\McpToolkit\Settings;
 
 defined( 'ABSPATH' ) || exit;
@@ -139,10 +140,22 @@ final class SetupScreen {
 			);
 		}
 		echo '</tbody></table>';
+		$owner = Connectors::signin_owner();
+		if ( null === $owner ) {
+			return;
+		}
 		printf(
 			'<p><a href="%1$s">%2$s</a></p>',
-			esc_url( SetupChecks::enable_abilities_url() ),
-			esc_html__( 'Open Enable Abilities settings (Settings > WP Abilities)', 'blaze-mcp-toolkit-for-woocommerce' )
+			esc_url( $owner->settings_url() ),
+			'recommended' === $owner->id()
+				? esc_html__( 'Open Enable Abilities settings (Settings > WP Abilities)', 'blaze-mcp-toolkit-for-woocommerce' )
+				: esc_html(
+					sprintf(
+						/* translators: %s: connection plugin name. */
+						__( 'Open %s settings', 'blaze-mcp-toolkit-for-woocommerce' ),
+						$owner->label()
+					)
+				)
 		);
 	}
 
@@ -150,8 +163,34 @@ final class SetupScreen {
 	 * Connector URL and how to add it.
 	 */
 	private static function render_connector(): void {
+		$owner = Connectors::signin_owner();
+		if ( null === $owner ) {
+			echo '<h2>' . esc_html__( 'Connect your AI assistant', 'blaze-mcp-toolkit-for-woocommerce' ) . '</h2>';
+			echo '<ol class="ul-decimal">';
+			echo '<li>' . esc_html__( 'Recommended: on the Plugins screen, install and activate MCP Adapter and Enable Abilities for MCP.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
+			echo '<li>' . esc_html__( 'Already use Easy MCP AI? Activate it instead. This plugin works with either.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
+			echo '<li>' . esc_html__( 'Come back to this screen. Your connector URL and the steps for Claude and ChatGPT will appear here.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
+			echo '</ol>';
+			return;
+		}
+
 		echo '<h2>' . esc_html__( 'Connector URL', 'blaze-mcp-toolkit-for-woocommerce' ) . '</h2>';
-		printf( '<p><input type="text" class="large-text code" readonly="readonly" aria-label="%1$s" value="%2$s" /></p>', esc_attr__( 'Connector URL', 'blaze-mcp-toolkit-for-woocommerce' ), esc_attr( rest_url( 'mcp/mcp-oauth-server' ) ) );
+		$screen = $owner->connect_screen_url();
+		if ( null !== $screen ) {
+			printf(
+				'<p><a class="button button-primary" href="%1$s">%2$s</a></p><p class="description">%3$s</p>',
+				esc_url( $screen ),
+				esc_html(
+					sprintf(
+						/* translators: %s: connection plugin name. */
+						__( 'Use %s\'s own Connect screen', 'blaze-mcp-toolkit-for-woocommerce' ),
+						$owner->label()
+					)
+				),
+				esc_html__( 'Its guided Connect screen sets the access level for you. Or paste the URL below into Claude or ChatGPT yourself.', 'blaze-mcp-toolkit-for-woocommerce' )
+			);
+		}
+		printf( '<p><input type="text" class="large-text code" readonly="readonly" aria-label="%1$s" value="%2$s" /></p>', esc_attr__( 'Connector URL', 'blaze-mcp-toolkit-for-woocommerce' ), esc_attr( $owner->connect_url() ) );
 		echo '<ul class="ul-disc">';
 		echo '<li>' . esc_html__( 'Claude: Customize > Connectors > Add > Add custom connector, then paste the URL.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';
 		echo '<li>' . esc_html__( 'ChatGPT: Plugins > Add > Add custom MCP server, then paste the URL. In our testing this worked on a Free ChatGPT account.', 'blaze-mcp-toolkit-for-woocommerce' ) . '</li>';

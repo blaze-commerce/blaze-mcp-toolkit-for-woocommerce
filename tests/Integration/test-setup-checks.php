@@ -420,6 +420,22 @@ try {
 		blzmcp_it_assert( str_contains( $html, esc_html( rest_url( 'mcp/mcp-oauth-server' ) ) ), 'connector URL shown' );
 		blzmcp_it_assert( str_contains( $html, 'Plugins' ) && str_contains( $html, 'Add custom MCP server' ), 'ChatGPT wording shown' );
 	}
+	if ( 'recommended' === $state ) {
+		blzmcp_it_assert( str_contains( $html, 'page=ewpa-settings' ) && str_contains( $html, 'Open Enable Abilities settings (Settings &gt; WP Abilities)' ), 'recommended: Enable Abilities settings link shown' );
+	}
+	if ( in_array( $state, array( 'easy-mcp', 'both' ), true ) ) {
+		blzmcp_it_assert( str_contains( $html, esc_html( rest_url( 'easy-mcp-ai/v1/mcp' ) ) ), "{$state}: Easy MCP AI connector URL shown" );
+		blzmcp_it_assert( ! str_contains( $html, esc_html( rest_url( 'mcp/mcp-oauth-server' ) ) ), "{$state}: recommended connector URL not shown" );
+		blzmcp_it_assert( str_contains( $html, 'page=easy-mcp-ai-connections' ), "{$state}: Easy MCP AI connect screen link shown" );
+		blzmcp_it_assert( str_contains( $html, 'page=easy-mcp-ai-tools' ), "{$state}: Easy MCP AI settings link shown" );
+		blzmcp_it_assert( ! str_contains( $html, 'Open Enable Abilities settings' ), "{$state}: no Enable Abilities settings link under the table" );
+	}
+	if ( 'none' === $state ) {
+		blzmcp_it_assert( str_contains( $html, 'Connect your AI assistant' ) && str_contains( $html, 'Easy MCP AI' ), 'none: install steps shown' );
+		blzmcp_it_assert( ! str_contains( $html, 'name="connector' ) && ! str_contains( $html, esc_html( rest_url( 'mcp/mcp-oauth-server' ) ) ), 'none: no connector URL' );
+		blzmcp_it_assert( ! str_contains( $html, 'Open Enable Abilities settings' ), 'none: no Enable Abilities settings link' );
+	}
+	blzmcp_it_assert( str_contains( \Blaze\McpToolkit\Privacy\PolicyText::content(), 'Easy MCP AI' ), 'privacy text names Easy MCP AI' );
 	echo "\n----- RENDERED CHECKS ({$state}) -----\n";
 	foreach ( SetupChecks::run() as $c ) {
 		printf( "%-18s %-5s %s\n", $c['id'], $c['status'], $c['label'] );

@@ -135,7 +135,7 @@ final class SetupChecks {
 					'warn',
 					__( 'Two connection plugins are active', 'blaze-mcp-toolkit-for-woocommerce' ),
 					sprintf(
-						/* translators: %s: connection plugin name. */
+						/* translators: %1$s: connection plugin name (used three times). */
 						__( 'New Claude or ChatGPT connections go through %1$s: for a new connection, use the %1$s connection link below. To use the other one for new connections, deactivate %1$s.', 'blaze-mcp-toolkit-for-woocommerce' ),
 						$easy
 					)
@@ -360,7 +360,14 @@ final class SetupChecks {
 	private static function edge_guidance( Connector $owner ): array {
 		$paths = $owner->firewall_paths();
 		$last  = array_pop( $paths );
-		$list  = $paths ? implode( ', ', $paths ) . ' ' . __( 'and', 'blaze-mcp-toolkit-for-woocommerce' ) . ' ' . $last : (string) $last;
+		$list  = $paths
+			? sprintf(
+				/* translators: 1: comma separated URL paths, 2: the last URL path. */
+				__( '%1$s and %2$s', 'blaze-mcp-toolkit-for-woocommerce' ),
+				implode( ', ', $paths ),
+				(string) $last
+			)
+			: (string) $last;
 		$allow = 'recommended' === $owner->id() ? __( 'Allow', 'blaze-mcp-toolkit-for-woocommerce' ) : __( 'Approve & Continue', 'blaze-mcp-toolkit-for-woocommerce' );
 
 		return self::result(

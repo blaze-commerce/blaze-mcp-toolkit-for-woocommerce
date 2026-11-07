@@ -183,6 +183,8 @@ final class RecommendedConnector implements Connector {
 		if ( $this->is_active() ) {
 			return SetupChecks::result( 'enable_abilities', 'pass', __( 'Enable Abilities for MCP is active', 'blaze-mcp-toolkit-for-woocommerce' ) );
 		}
+		// Unreachable since 1.1: checks() only runs when this connector owns sign-in, which needs it active.
+		// Kept so the 1.0 copy stays on file for parity.
 		return SetupChecks::result( 'enable_abilities', 'fail', __( 'Enable Abilities for MCP is not active', 'blaze-mcp-toolkit-for-woocommerce' ), __( 'Install and activate Enable Abilities for MCP. It provides the connector URL and sign-in that Claude and ChatGPT use.', 'blaze-mcp-toolkit-for-woocommerce' ) );
 	}
 

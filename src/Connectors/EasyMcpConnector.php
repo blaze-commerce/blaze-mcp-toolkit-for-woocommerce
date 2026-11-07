@@ -21,15 +21,16 @@ defined( 'ABSPATH' ) || exit;
 final class EasyMcpConnector implements Connector {
 
 	/**
-	 * Plain words for the short reason codes Tool_State::resolve() returns with a switched-off
-	 * state. Unknown codes are dropped rather than shown.
+	 * Whole plain-English reasons for the short codes Tool_State::resolve() returns with a
+	 * switched-off state. Each reads on its own after "cannot see X:". Unknown codes are dropped
+	 * rather than shown (the generic reason is used).
 	 */
 	private const REASON_WORDS = array(
-		'disabled' => 'switched off on its tools screen',
-		'held'     => 'new, and waiting to be switched on',
-		'policy'   => 'switched off by its tool settings',
+		'disabled' => 'switched off in Easy MCP AI on its tools screen',
+		'held'     => 'new in Easy MCP AI and waiting to be switched on',
+		'policy'   => 'switched off by Easy MCP AI\'s tool settings',
 		'override' => "switched off by the site's configuration",
-		'default'  => 'off unless switched on',
+		'default'  => 'off in Easy MCP AI unless switched on',
 	);
 
 	/**
@@ -107,8 +108,7 @@ final class EasyMcpConnector implements Connector {
 			return new Availability( Availability::UNKNOWN, $this->id(), 'Easy MCP AI did not say whether this is switched on', $this->settings_url() );
 		}
 		if ( false === $state[0] ) {
-			$words  = self::REASON_WORDS[ $state[1] ] ?? '';
-			$reason = 'switched off in Easy MCP AI' . ( '' !== $words ? ': ' . $words : '' );
+			$reason = self::REASON_WORDS[ $state[1] ] ?? 'switched off in Easy MCP AI';
 			return new Availability( Availability::DISABLED_HERE, $this->id(), $reason, $this->settings_url() );
 		}
 		return null;
@@ -335,7 +335,7 @@ final class EasyMcpConnector implements Connector {
 			'warn',
 			__( 'Easy MCP AI\'s WooCommerce tools are on', 'blaze-mcp-toolkit-for-woocommerce' ),
 			__( 'Its order and customer tools return customer names, emails and addresses to your AI provider. Our tools never do.', 'blaze-mcp-toolkit-for-woocommerce' )
-			. ( $hpos ? ' ' . __( 'On this store its sales report shows $0, because orders are kept in the high-performance order tables (HPOS). Ask Claude for "this plugin\'s sales figures" instead.', 'blaze-mcp-toolkit-for-woocommerce' ) : '' )
+			. ( $hpos ? ' ' . __( 'On this store its sales report shows no sales, because orders are kept in the high-performance order tables (HPOS). Ask Claude for "this plugin\'s sales figures" instead.', 'blaze-mcp-toolkit-for-woocommerce' ) : '' )
 			. ' ' . sprintf(
 				/* translators: %s: settings screen URL. */
 				__( 'To turn them off, switch off the WooCommerce group under Easy MCP AI › Tools (%s).', 'blaze-mcp-toolkit-for-woocommerce' ),
