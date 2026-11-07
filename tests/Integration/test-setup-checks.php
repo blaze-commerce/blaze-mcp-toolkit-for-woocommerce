@@ -146,7 +146,10 @@ if ( 'recommended' === $state && ! $denylist ) {
 				$changed[] = $key;
 			}
 		}
-		if ( $changed ) {
+		if ( $changed && 'min' === getenv( 'BLZMCP_FIXTURE_ENV' ) ) {
+			// CI minimum-versions job only: the fixture is bound to the pinned current environment.
+			echo 'NOTE  1.0 fixture comparison not applicable in the minimum-versions environment (fixture captured on WooCommerce ' . ( $fixture['_inputs']['plugins']['woocommerce/woocommerce.php'] ?? '?' ) . ")\n";
+		} elseif ( $changed ) {
 			blzmcp_it_assert( false, 'baseline inputs changed: ' . implode( ', ', $changed ) . ' (the environment differs from the fixture, not the copy)' );
 		} else {
 			$current = array_values( array_filter( blzmcp_fx_rows( SetupChecks::run() ), static fn( $r ) => 'connection' !== $r['id'] ) );

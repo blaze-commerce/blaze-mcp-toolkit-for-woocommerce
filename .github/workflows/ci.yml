@@ -66,6 +66,9 @@ jobs:
       # (the runner reaches wp-env's published localhost:8888). Exits nonzero if any stage fails.
       - name: Integration tests
         shell: bash
+        env:
+          # The 1.0 setup-rows fixture is bound to the pinned current environment; not applicable on min.
+          BLZMCP_FIXTURE_ENV: ${{ matrix.env == 'min' && 'min' || '' }}
         run: bash scripts/run-integration.sh
       - name: Plugin Check (built zip)
         shell: bash

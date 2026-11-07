@@ -20,7 +20,7 @@ fi
 echo "FAST CHECKS ONLY — NOT THE RELEASE GATE (the gate is: bash scripts/run-integration.sh --matrix CANDIDATE.zip)"
 fail=0
 for f in tests/Integration/test-*.php; do
-	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
 	if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
@@ -33,7 +33,7 @@ for f in tests/Integration/test-*.php; do
 done
 # Stand-aside mode (WooCommerce for Claude stub constant loaded before plugins).
 for f in tests/Integration/test-bundled.php tests/Integration/test-workflows.php tests/Integration/test-analytics-naming.php; do
-	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
 	if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
@@ -46,7 +46,7 @@ for f in tests/Integration/test-bundled.php tests/Integration/test-workflows.php
 done
 # Easy MCP AI stub (EASY_MCP_AI_VERSION defined while Enable Abilities stays active: the `both` state).
 for f in tests/Integration/test-connectors.php tests/Integration/test-connector-availability.php tests/Integration/test-workflows.php tests/Integration/test-analytics-naming.php tests/Integration/test-setup-checks.php tests/Integration/test-bundled.php; do
-	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
 	if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
@@ -59,7 +59,7 @@ for f in tests/Integration/test-connectors.php tests/Integration/test-connector-
 done
 # Stand-aside plus the Easy MCP AI stub: analytics naming must hold whoever supplies wc-analytics/*.
 for f in tests/Integration/test-analytics-naming.php; do
-	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
 	if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
@@ -72,7 +72,7 @@ for f in tests/Integration/test-analytics-naming.php; do
 done
 # Easy MCP AI stub plus a stub Tool_State whose resolve() answers from a test global.
 for f in tests/Integration/test-connector-availability.php tests/Integration/test-setup-checks.php; do
-	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp-toolstate.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp-toolstate.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
 	if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
@@ -123,7 +123,7 @@ for entry in \
 	IFS='|' read -r f mode extra <<<"$entry"
 	if [ "$denylist_set" -eq 1 ]; then
 		# shellcheck disable=SC2086 # $extra is a list of wp arguments.
-		out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_EWPA_DENYLIST=1 wp $extra eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+		out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" BLZMCP_EWPA_DENYLIST=1 wp $extra eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 		status=$?
 	else
 		out='FAIL  could not read or set ewpa_thirdparty_disabled'
@@ -158,7 +158,7 @@ trap 'none_restore; exit 130' INT TERM
 trap none_restore EXIT
 f=tests/Integration/test-setup-checks.php
 if [ "$none_active" -eq 1 ] && npx wp-env run cli wp plugin deactivate enable-abilities-for-mcp >/dev/null 2>&1; then
-	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_STATE_NONE=1 wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" BLZMCP_STATE_NONE=1 wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 else
 	out='FAIL  Enable Abilities for MCP was not active, or could not be deactivated'
