@@ -26,7 +26,7 @@ final class RequestContext {
 	private static array $stack = array();
 
 	/**
-	 * Route to connector id resolver. Null means the production lookup, which does not exist until the registry lands.
+	 * Route to connector id resolver. Null means the production lookup, Connectors::id_for_route().
 	 *
 	 * @var callable|null
 	 */
@@ -42,9 +42,9 @@ final class RequestContext {
 	/**
 	 * Test seam: how a route maps to a connector id.
 	 *
-	 * @param callable $fn Receives the route, returns the connector id or null.
+	 * @param callable|null $fn Receives the route, returns the connector id or null. Null restores the production lookup.
 	 */
-	public static function set_resolver( callable $fn ): void {
+	public static function set_resolver( ?callable $fn ): void {
 		self::$resolver = $fn;
 	}
 
@@ -62,7 +62,7 @@ final class RequestContext {
 	 * @param callable $fn           Called exactly once. Its exceptions propagate unchanged.
 	 * @return mixed
 	 */
-	public static function run( ?string $connector_id, callable $fn ) {
+	public static function run( ?string $connector_id, callable $fn ): mixed {
 		$depth         = count( self::$stack );
 		self::$stack[] = $connector_id;
 		try {
@@ -92,6 +92,16 @@ final class RequestContext {
 		if ( ! is_array( $endpoints ) ) {
 			return $endpoints;
 		}
+		$any = false;
+		foreach ( array_keys( $endpoints ) as $route ) {
+			if ( null !== self::resolve( (string) $route ) ) {
+				$any = true;
+				break;
+			}
+		}
+		if ( ! $any ) {
+			return $endpoints;
+		}
 		foreach ( $endpoints as $route => $handlers ) {
 			$id = self::resolve( (string) $route );
 			if ( null === $id || ! is_array( $handlers ) ) {
@@ -105,7 +115,7 @@ final class RequestContext {
 				continue;
 			}
 			foreach ( $handlers as $i => $handler ) {
-				if ( is_array( $handler ) && isset( $handler['callback'] ) && is_callable( $handler['callback'] ) ) {
+				if ( is_int( $i ) && is_array( $handler ) && isset( $handler['callback'] ) && is_callable( $handler['callback'] ) ) {
 					$endpoints[ $route ][ $i ]['callback'] = self::wrap( $handler['callback'], $id );
 				}
 			}
@@ -119,6 +129,6 @@ final class RequestContext {
 	 * @param string $route REST route.
 	 */
 	private static function resolve( string $route ): ?string {
-		return null === self::$resolver ? null : ( self::$resolver )( $route );
+		return null === self::$resolver ? Connectors::id_for_route( $route ) : ( self::$resolver )( $route );
 	}
 }

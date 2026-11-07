@@ -34,7 +34,7 @@ $resolver = static function ( string $route ): ?string {
 	return null;
 };
 RequestContext::set_resolver( $resolver );
-blzmcp_it_cleanup( static fn() => RequestContext::set_resolver( static fn( string $r ): ?string => null ) );
+blzmcp_it_cleanup( static fn() => RequestContext::set_resolver( null ) );
 
 $orig = array(
 	'a'       => static function ( WP_REST_Request $req ) {
@@ -158,11 +158,21 @@ try {
 }
 blzmcp_it_assert( null !== $top && 'top-level' === $top->getMessage(), 'top level: exception propagates out of rest_do_request unchanged' );
 blzmcp_it_equals( null, RequestContext::current(), 'top level: current() is null after the exception' );
-blzmcp_it_equals( null, RequestContext::current(), 'top level: still null on a later direct check' );
+$dispatch( '/blzmcp-test/neither' );
+blzmcp_it_equals( array( 'n:NULL' ), $GLOBALS['blzmcp_rc_log'], 'top level: a later dispatch still sees null' );
+blzmcp_it_equals( null, RequestContext::current(), 'top level: still null after that dispatch' );
 
-// run() direct: returns value, runs once, restores on throw.
+// run() direct: returns value, runs once, and restores the frame when the callback throws.
 $n = 0;
 blzmcp_it_equals( 'x', RequestContext::run( 'easy-mcp', static function () use ( &$n ) { ++$n; return 'x'; } ), 'run returns the callback value' );
 blzmcp_it_equals( 1, $n, 'run calls the callback once' );
+$direct = null;
+try {
+	RequestContext::run( 'easy-mcp', static function () { throw new \RuntimeException( 'direct' ); } );
+} catch ( \RuntimeException $e ) {
+	$direct = $e;
+}
+blzmcp_it_assert( null !== $direct && 'direct' === $direct->getMessage(), 'run: exception propagates unchanged' );
+blzmcp_it_equals( null, RequestContext::current(), 'run: frame restored after a throw' );
 
 blzmcp_it_finish();
