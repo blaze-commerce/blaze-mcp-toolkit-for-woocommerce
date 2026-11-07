@@ -2,10 +2,10 @@
 	"core": null,
 	"phpVersion": "8.3",
 	"plugins": [
-		"https://downloads.wordpress.org/plugin/woocommerce.zip",
-		"https://downloads.wordpress.org/plugin/mcp-adapter.zip",
-		"https://downloads.wordpress.org/plugin/enable-abilities-for-mcp.zip",
-		"https://downloads.wordpress.org/plugin/plugin-check.zip",
+		"https://downloads.wordpress.org/plugin/woocommerce.11.2.2.zip",
+		"https://downloads.wordpress.org/plugin/mcp-adapter.0.7.1.zip",
+		"https://downloads.wordpress.org/plugin/enable-abilities-for-mcp.2.15.0.zip",
+		"https://downloads.wordpress.org/plugin/plugin-check.2.2.0.zip",
 		"."
 	],
 	"mappings": {

@@ -14,7 +14,7 @@
             "enable-abilities-for-mcp/enable-abilities-for-mcp.php": "2.15.0",
             "mcp-adapter/mcp-adapter.php": "0.7.1",
             "plugin-check/plugin.php": "2.2.0",
-            "woocommerce/woocommerce.php": "11.3.0-beta.2"
+            "woocommerce/woocommerce.php": "11.2.2"
         },
         "abilities": [
             "blaze-mcp-toolkit/access-check",
@@ -121,7 +121,6 @@
             "wc-analytics/series",
             "wc-analytics/totals",
             "woocommerce/order-add-note",
-            "woocommerce/order-notes-query",
             "woocommerce/order-update-status",
             "woocommerce/orders-query",
             "woocommerce/product-create",
