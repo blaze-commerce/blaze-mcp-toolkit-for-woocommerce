@@ -83,8 +83,10 @@ denylist_restore() {
 	else
 		npx wp-env run cli wp option delete ewpa_thirdparty_disabled >/dev/null 2>&1
 	fi
+	return $?
 }
-trap 'denylist_restore' EXIT INT TERM
+trap 'denylist_restore; exit 130' INT TERM
+trap denylist_restore EXIT
 denylist_new=$(DL_PREV="$denylist_prev" DL_SLUG="$denylist_slug" python3 -c 'import json,os; p=os.environ["DL_PREV"]; v=json.loads(p) if p else []; v=list(v.values()) if isinstance(v,dict) else (v if isinstance(v,list) else []); v=v+[os.environ["DL_SLUG"]] if os.environ["DL_SLUG"] not in v else v; print(json.dumps(v))')
 f=tests/Integration/test-connector-availability.php
 if [ "$denylist_ok" -eq 1 ] && npx wp-env run cli wp option update ewpa_thirdparty_disabled "$denylist_new" --format=json >/dev/null 2>&1; then
@@ -94,7 +96,10 @@ else
 	out='FAIL  could not read or set ewpa_thirdparty_disabled'
 	status=1
 fi
-denylist_restore
+if ! denylist_restore; then
+	echo "FAIL  ewpa_thirdparty_disabled not restored"
+	fail=1
+fi
 trap - EXIT INT TERM
 summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
 if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then

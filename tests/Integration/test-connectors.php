@@ -42,14 +42,17 @@ blzmcp_it_equals( array( '/.well-known/oauth-*', '/.well-known/openid-configurat
 // Production resolver: a real MCP Adapter route under /mcp/ has its callback wrapped in a recommended frame.
 Blaze\McpToolkit\Connectors\RequestContext::set_resolver( null );
 $blzmcp_route = '/mcp/mcp-adapter-default-server';
-remove_filter( 'rest_endpoints', array( Blaze\McpToolkit\Connectors\RequestContext::class, 'wrap_endpoints' ), PHP_INT_MAX );
+$blzmcp_removed = remove_filter( 'rest_endpoints', array( Blaze\McpToolkit\Connectors\RequestContext::class, 'wrap_endpoints' ), PHP_INT_MAX );
 $blzmcp_raw = rest_get_server()->get_routes()[ $blzmcp_route ][0]['callback'] ?? null;
-add_filter( 'rest_endpoints', array( Blaze\McpToolkit\Connectors\RequestContext::class, 'wrap_endpoints' ), PHP_INT_MAX );
+if ( $blzmcp_removed ) {
+	add_filter( 'rest_endpoints', array( Blaze\McpToolkit\Connectors\RequestContext::class, 'wrap_endpoints' ), PHP_INT_MAX );
+}
 $blzmcp_wrapped = rest_get_server()->get_routes()[ $blzmcp_route ][0]['callback'] ?? null;
 blzmcp_it_assert( null !== $blzmcp_raw, 'MCP Adapter route registered' );
 blzmcp_it_assert( $blzmcp_wrapped instanceof \Closure && $blzmcp_wrapped !== $blzmcp_raw, 'production resolver wraps the MCP Adapter route callback' );
 blzmcp_it_equals( 'recommended', $blzmcp_wrapped instanceof \Closure ? ( ( new \ReflectionFunction( $blzmcp_wrapped ) )->getClosureUsedVariables()['connector_id'] ?? null ) : null, 'wrapped MCP Adapter callback runs in the recommended frame' );
 $blzmcp_wc = rest_get_server()->get_routes()['/wc/v3/orders'][0]['callback'] ?? null;
+blzmcp_it_assert( null !== $blzmcp_wc, '/wc/v3/orders route callback exists' );
 blzmcp_it_assert( ! ( $blzmcp_wc instanceof \Closure ), 'production resolver leaves other routes alone' );
 
 if ( ! $stub ) {
