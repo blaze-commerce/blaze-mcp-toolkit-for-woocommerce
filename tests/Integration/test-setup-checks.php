@@ -252,13 +252,75 @@ if ( $easy ) {
 	blzmcp_it_assert( str_contains( $un['tools_visible']['fix'] ?? '', $unticked ) && str_contains( $un['tools_visible']['fix'] ?? '', 'not ticked in Easy MCP AI' ), 'easy: tools_visible says the tool is not ticked in Easy MCP AI' );
 	blzmcp_sc_set( $enabled_o, $wanted );
 
-	// WooCommerce group on, approval on.
+	// WooCommerce group on, approval on (Round 7 F04/F05). Approval on is a setting, not a
+	// guarantee: Easy MCP AI exempts approval_never matches, never-policy tools and (2.4) a
+	// per-tool requireApproval=false choice, so the row warns and never certifies every change.
+	$blzmcp_no_guarantee = static function ( array $row, string $label ): void {
+		$text = strtolower( ( $row['label'] ?? '' ) . ' ' . ( $row['fix'] ?? '' ) );
+		blzmcp_it_assert( 'pass' !== ( $row['status'] ?? null ), "{$label}: easy_write_tools is not a guarantee pass" );
+		foreach ( array( 'before its tools make changes', 'before every change', 'asks for your approval before', 'every change' ) as $claim ) {
+			blzmcp_it_assert( ! str_contains( $text, $claim ), "{$label}: easy_write_tools makes no \"{$claim}\" claim" );
+		}
+		blzmcp_it_assert( str_contains( $row['fix'] ?? '', 'Custom' ) && str_contains( $row['fix'] ?? '', 'Abilities' ), "{$label}: easy_write_tools keeps the Custom-with-only-our-Abilities guidance" );
+	};
 	blzmcp_sc_set( 'easy_mcp_ai_enabled_plugin_groups', array( 'woocommerce' ) );
 	blzmcp_sc_set( 'easy_mcp_ai_approval_required', true );
 	$grp = blzmcp_sc_run( 'easy woo group' );
 	blzmcp_it_equals( 'warn', $grp['easy_woo_group']['status'] ?? null, 'easy: WooCommerce group on: easy_woo_group warns' );
 	blzmcp_it_assert( str_contains( $grp['easy_woo_group']['fix'] ?? '', 'addresses' ), 'easy: easy_woo_group warns about personal details' );
-	blzmcp_it_equals( 'pass', $grp['easy_write_tools']['status'] ?? null, 'easy: approval on: easy_write_tools passes' );
+	blzmcp_it_equals( 'warn', $grp['easy_write_tools']['status'] ?? null, 'easy: approval on: easy_write_tools warns (exceptions may run without asking)' );
+	blzmcp_it_assert( str_contains( $grp['easy_write_tools']['label'] ?? '', 'approval setting is on' ) && str_contains( $grp['easy_write_tools']['label'] ?? '', 'without asking' ), 'easy: approval on: label reports only the setting and the exceptions' );
+	$blzmcp_no_guarantee( $grp['easy_write_tools'] ?? array(), 'easy: approval on' );
+	// Approval off.
+	blzmcp_sc_set( 'easy_mcp_ai_approval_required', false );
+	$aoff = blzmcp_sc_run( 'easy approval off' );
+	blzmcp_it_equals( 'warn', $aoff['easy_write_tools']['status'] ?? null, 'easy: approval off: easy_write_tools warns' );
+	blzmcp_it_assert( str_contains( $aoff['easy_write_tools']['label'] ?? '', 'approval setting is off' ), 'easy: approval off: label names the setting' );
+	$blzmcp_no_guarantee( $aoff['easy_write_tools'] ?? array(), 'easy: approval off' );
+	// Exceptions, by option values only (2.3.1/2.4 approval_never; 2.4 per-tool requireApproval=false).
+	blzmcp_sc_set( 'easy_mcp_ai_approval_required', true );
+	blzmcp_sc_set( 'easy_mcp_ai_approval_never', array( 'wp_wc_update_product' ) );
+	$never = blzmcp_sc_run( 'easy approval_never' );
+	$blzmcp_no_guarantee( $never['easy_write_tools'] ?? array(), 'easy: approval on + approval_never exception' );
+	blzmcp_sc_set( 'easy_mcp_ai_approval_never', array() );
+	blzmcp_sc_set(
+		'easy_mcp_ai_tool_policy',
+		array(
+			'known'   => array(),
+			'choices' => array( 'wp_wc_update_product' => array( 'requireApproval' => false ) ),
+		)
+	);
+	$choice = blzmcp_sc_run( 'easy per-tool requireApproval=false' );
+	$blzmcp_no_guarantee( $choice['easy_write_tools'] ?? array(), 'easy: approval on + per-tool requireApproval=false' );
+
+	// Easy MCP AI's sales report (legacy /wc/v3/reports/sales): conditional guidance only, from the
+	// HPOS flag, with compatibility sync on or off, never a measured zero. Filters only, no writes.
+	$blzmcp_hpos = static function ( string $hpos, string $sync ): void {
+		$label = "easy: HPOS {$hpos}, sync {$sync}";
+		$h     = static fn() => $hpos;
+		$s     = static fn() => $sync;
+		add_filter( 'pre_option_woocommerce_custom_orders_table_enabled', $h );
+		add_filter( 'pre_option_woocommerce_custom_orders_table_data_sync_enabled', $s );
+		$row = blzmcp_sc_run( $label )['easy_woo_group'] ?? array();
+		remove_filter( 'pre_option_woocommerce_custom_orders_table_enabled', $h );
+		remove_filter( 'pre_option_woocommerce_custom_orders_table_data_sync_enabled', $s );
+		$fix = $row['fix'] ?? '';
+		blzmcp_it_equals( 'warn', $row['status'] ?? null, "{$label}: easy_woo_group warns" );
+		blzmcp_it_assert( str_contains( $fix, 'addresses' ), "{$label}: personal-data warning kept" );
+		blzmcp_it_assert( str_contains( $fix, 'admin.php?page=easy-mcp-ai' ), "{$label}: settings link kept" );
+		foreach ( array( 'shows no sales', 'no sales', 'shows $0', 'shows 0', 'wrong on hpos' ) as $claim ) {
+			blzmcp_it_assert( ! str_contains( strtolower( $fix ), $claim ), "{$label}: no \"{$claim}\" claim" );
+		}
+		if ( 'yes' === $hpos ) {
+			blzmcp_it_assert( str_contains( $fix, 'may be incomplete' ) && str_contains( $fix, "this plugin's sales figures" ), "{$label}: conditional legacy-report guidance" );
+		} else {
+			blzmcp_it_assert( ! str_contains( $fix, 'HPOS' ), "{$label}: no HPOS caveat when HPOS is off" );
+		}
+	};
+	$blzmcp_hpos( 'yes', 'yes' );
+	$blzmcp_hpos( 'yes', 'no' );
+	$blzmcp_hpos( 'no', 'yes' );
+	$blzmcp_hpos( 'no', 'no' );
 	blzmcp_sc_set( 'easy_mcp_ai_enabled_plugin_groups', array() );
 	blzmcp_sc_set( 'easy_mcp_ai_approval_required', false );
 

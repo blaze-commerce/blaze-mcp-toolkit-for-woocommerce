@@ -295,25 +295,40 @@ final class EasyMcpConnector implements Connector {
 	}
 
 	/**
-	 * Easy MCP AI's own write tools, and whether it asks for approval before a change. Counting
-	 * which write tools are on would mean loading Easy MCP AI's tool registry, which is not
-	 * read-only, so this names the risk and checks the approval setting (approval_required in
-	 * 2.4.0 includes/class-config.php).
+	 * Easy MCP AI's own write tools, and its approval setting. Counting which write tools are on,
+	 * or which of them would really ask, would mean loading Easy MCP AI's tool registry, which is
+	 * not read-only. Its approval setting (approval_required in includes/class-config.php) is also
+	 * not a guarantee: Approval_Gate::requires_approval() exempts approval_never matches and tools
+	 * with a "never" policy (2.3.1 and 2.4.0) and honours a per-tool requireApproval=false choice
+	 * (2.4.0). So this reports only the setting it checked, as a warning either way.
 	 *
 	 * @return array{id: string, status: string, label: string, fix: string}
 	 */
 	private function write_tools_row(): array {
+		$settings  = admin_url( 'admin.php?page=easy-mcp-ai-settings' );
+		$read_only = __( 'Our tools are read-only, but these are not. For a read-only connection, choose Custom when you connect and tick only the Abilities entries for this plugin and WooCommerce Analytics.', 'blaze-mcp-toolkit-for-woocommerce' );
 		if ( $this->approval_required() ) {
-			return SetupChecks::result( 'easy_write_tools', 'pass', __( 'Easy MCP AI asks for your approval before its tools make changes', 'blaze-mcp-toolkit-for-woocommerce' ) );
+			return SetupChecks::result(
+				'easy_write_tools',
+				'warn',
+				__( 'Easy MCP AI\'s approval setting is on, but some tools may run without asking', 'blaze-mcp-toolkit-for-woocommerce' ),
+				sprintf(
+					/* translators: 1: sentence about read-only connections, 2: settings screen URL. */
+					__( 'Easy MCP AI comes with its own tools that can create, edit or delete posts, products, orders and settings. Its approval setting is on, but it allows exceptions per tool, so some tools may make changes without asking. %1$s You can review its approval settings under Easy MCP AI › Settings (%2$s).', 'blaze-mcp-toolkit-for-woocommerce' ),
+					$read_only,
+					$settings
+				)
+			);
 		}
 		return SetupChecks::result(
 			'easy_write_tools',
 			'warn',
-			__( 'Easy MCP AI\'s own tools can change your site without asking', 'blaze-mcp-toolkit-for-woocommerce' ),
+			__( 'Easy MCP AI\'s approval setting is off, so its tools can make changes without asking', 'blaze-mcp-toolkit-for-woocommerce' ),
 			sprintf(
-				/* translators: %s: settings screen URL. */
-				__( 'Easy MCP AI comes with its own tools that can create, edit or delete posts, products, orders and settings, and its approval step is off. Our tools are read-only, but these are not. To be asked before every change, turn on approval under Easy MCP AI › Settings (%s). For a read-only connection, choose Custom when you connect and tick only the Abilities entries for this plugin and WooCommerce Analytics.', 'blaze-mcp-toolkit-for-woocommerce' ),
-				admin_url( 'admin.php?page=easy-mcp-ai-settings' )
+				/* translators: 1: sentence about read-only connections, 2: settings screen URL. */
+				__( 'Easy MCP AI comes with its own tools that can create, edit or delete posts, products, orders and settings, and its approval setting is off. %1$s Turning approval on under Easy MCP AI › Settings (%2$s) adds a prompt for most changes.', 'blaze-mcp-toolkit-for-woocommerce' ),
+				$read_only,
+				$settings
 			)
 		);
 	}
@@ -335,7 +350,7 @@ final class EasyMcpConnector implements Connector {
 			'warn',
 			__( 'Easy MCP AI\'s WooCommerce tools are on', 'blaze-mcp-toolkit-for-woocommerce' ),
 			__( 'Its order and customer tools return customer names, emails and addresses to your AI provider. Our tools never do.', 'blaze-mcp-toolkit-for-woocommerce' )
-			. ( $hpos ? ' ' . __( 'On this store its sales report shows no sales, because orders are kept in the high-performance order tables (HPOS). Ask Claude for "this plugin\'s sales figures" instead.', 'blaze-mcp-toolkit-for-woocommerce' ) : '' )
+			. ( $hpos ? ' ' . __( 'Its sales reports use WooCommerce\'s older report tables and may be incomplete when orders are stored in the newer order tables (HPOS) and not fully synced back. Use this plugin\'s sales figures.', 'blaze-mcp-toolkit-for-woocommerce' ) : '' )
 			. ' ' . sprintf(
 				/* translators: %s: settings screen URL. */
 				__( 'To turn them off, switch off the WooCommerce group under Easy MCP AI › Tools (%s).', 'blaze-mcp-toolkit-for-woocommerce' ),
