@@ -128,8 +128,8 @@ final class SetupChecks {
 					'warn',
 					__( 'Two connection plugins are active', 'blaze-mcp-toolkit-for-woocommerce' ),
 					sprintf(
-						/* translators: %1$s: connection plugin name (used three times). */
-						__( 'New Claude or ChatGPT connections go through %1$s: for a new connection, use the %1$s connection link below. To use the other one for new connections, deactivate %1$s.', 'blaze-mcp-toolkit-for-woocommerce' ),
+						/* translators: %1$s: connection plugin name (used four times). */
+						__( 'New Claude or ChatGPT connections go through %1$s: for a new connection, use the %1$s connection link below. A connection made before %1$s was active can\'t be reconnected while it is active; make a new connection with the link below instead. To use the other one for new connections, deactivate %1$s.', 'blaze-mcp-toolkit-for-woocommerce' ),
 						$easy
 					)
 				);

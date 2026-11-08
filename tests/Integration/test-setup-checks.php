@@ -178,6 +178,7 @@ if ( $easy ) {
 		blzmcp_it_equals( 'warn', $by['connection']['status'] ?? null, 'both: connection warns' );
 		blzmcp_it_assert( str_contains( $by['connection']['fix'] ?? '', 'for a new connection, use the Easy MCP AI connection link below' ), 'both: connection fix is the rev 3 copy' );
 		blzmcp_it_assert( ! str_contains( $by['connection']['fix'] ?? '', 'keep working' ), 'both: connection makes no claim about existing connections' );
+		blzmcp_it_assert( str_contains( $by['connection']['fix'] ?? '', 'can\'t be reconnected while it is active' ), 'both: connection warns an earlier connection cannot be reconnected (smoke 2026-11-08, invalid_target)' );
 	} else {
 		blzmcp_it_equals( 'pass', $by['connection']['status'] ?? null, 'easy-mcp: connection passes' );
 	}
@@ -189,6 +190,9 @@ if ( $easy ) {
 	blzmcp_it_equals( 'warn', $by['easy_signin_access']['status'] ?? null, 'easy: sign-in access is a warn reminder' );
 	$access = $by['easy_signin_access']['fix'] ?? '';
 	blzmcp_it_assert( false !== strpos( $access, 'Custom' ) && false !== strpos( $access, 'Full access' ) && strpos( $access, 'Custom' ) < strpos( $access, 'Full access' ), 'easy: sign-in access leads with Custom, then Full access' );
+	blzmcp_it_assert( str_contains( $access, '"Abilities — Blaze-mcp-toolkit"' ) && str_contains( $access, '"Abilities — Wc-analytics"' ), 'easy: sign-in access names both Abilities rows exactly as the consent page does' );
+	blzmcp_it_assert( str_contains( $access, 'Read-only does not include them' ) && str_contains( $access, 'nothing ticked' ), 'easy: sign-in access warns Read-only excludes our tools and approving with nothing ticked fails' );
+	blzmcp_it_assert( ! str_contains( $access, 'default level' ), 'easy: sign-in access makes no claim about the default level (2.3.1 Custom, 2.4.0 Full access)' );
 	blzmcp_it_equals( 'pass', $by['easy_tools_on']['status'] ?? null, 'easy: every tool ticked: easy_tools_on passes' );
 	blzmcp_it_equals( 'warn', $by['easy_write_tools']['status'] ?? null, 'easy: approval off: easy_write_tools warns' );
 	blzmcp_it_equals( 'pass', $by['easy_woo_group']['status'] ?? null, 'easy: WooCommerce group off: easy_woo_group passes' );

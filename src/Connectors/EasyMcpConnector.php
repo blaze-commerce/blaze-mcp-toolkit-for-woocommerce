@@ -255,7 +255,7 @@ final class EasyMcpConnector implements Connector {
 			'easy_signin_access',
 			'warn',
 			__( 'Choose the right access level when you connect', 'blaze-mcp-toolkit-for-woocommerce' ),
-			__( 'When you click Connect, Easy MCP AI asks for an access level. Choose Custom with Abilities ticked: under Customize permissions, tick the Abilities entries for this plugin and for WooCommerce Analytics. Full access also works, but it also turns on Easy MCP AI\'s own tools that can change your site. The default level hides this plugin\'s tools.', 'blaze-mcp-toolkit-for-woocommerce' )
+			__( 'When you click Connect, Easy MCP AI asks for an access level. Choose Custom, open Customize permissions and tick "Abilities — Blaze-mcp-toolkit" and "Abilities — Wc-analytics". Read-only does not include them, so tick them even if you start from Read-only. Full access also works, but it also turns on Easy MCP AI\'s own tools that can change your site. If you approve with nothing ticked, the connection doesn\'t finish and your AI app asks you to connect again: connect again and tick those two rows.', 'blaze-mcp-toolkit-for-woocommerce' )
 		);
 	}
 

@@ -83,7 +83,7 @@ This plugin has no sign-in or keys, and registers no REST routes of its own. It 
 2. Install a connection plugin if you don't have one. Option 1 (recommended): MCP Adapter and Enable Abilities for MCP. Option 2: Easy MCP AI.
 3. Open **WooCommerce > Blaze MCP Toolkit** and read the Setup check. Each line is green, amber or red, with the fix in plain words. It shows the connector URL for the plugin you use.
 4. Option 1: open **Settings > WP Abilities** and turn on OAuth. For ChatGPT, also turn on "ChatGPT & Other OAuth Connectors". While you are there, switch off the tools from other plugins you don't want the AI to use.
-   Option 2: tick this plugin's tools and the WooCommerce Analytics tools under **Easy MCP AI › Tools › Abilities**, then use Easy MCP AI's own Connect screen (link on our setup screen). Choose **Custom** with Abilities ticked when you click Connect. The default level hides this plugin's tools.
+   Option 2: tick this plugin's tools and the WooCommerce Analytics tools under **Easy MCP AI › Tools › Abilities**, then use Easy MCP AI's own Connect screen (link on our setup screen). When you click Connect, choose **Custom** and tick **Abilities — Blaze-mcp-toolkit** and **Abilities — Wc-analytics** under Customize permissions. Read-only does not include them.
 5. Add the connector URL in your assistant, if you didn't use Easy MCP AI's Connect screen. In Claude: Customize > Connectors > Add > Add custom connector. In ChatGPT: Plugins > Add > Add custom MCP server. Log in to wp-admin in the same browser first, then click Connect and click Allow once.
 6. Ask: "Run my weekly store review."
 
@@ -133,11 +133,11 @@ No. Every tool in this plugin only reads. The AI connection as a whole can inclu
 
 = I use Easy MCP AI. Does this work? =
 
-Yes. Install and activate this plugin, then tick this plugin's tools and the WooCommerce Analytics tools under **Easy MCP AI › Tools › Abilities** (on a store where Easy MCP AI was set up before this version, the analytics tools are not ticked for you; the setup screen lists any that are missing). Use Easy MCP AI's own Connect screen (the setup screen links to it) and choose **Custom** with Abilities ticked. Easy MCP AI's default level hides this plugin's tools. The setup screen also tells you how to keep customer details out of AI chats, because some of Easy MCP AI's own tools can return them.
+Yes. Install and activate this plugin, then tick this plugin's tools and the WooCommerce Analytics tools under **Easy MCP AI › Tools › Abilities** (on a store where Easy MCP AI was set up before this version, the analytics tools are not ticked for you; the setup screen lists any that are missing). Use Easy MCP AI's own Connect screen (the setup screen links to it) and choose **Custom**, then tick **Abilities — Blaze-mcp-toolkit** and **Abilities — Wc-analytics** under Customize permissions. Read-only does not include them, and Full access turns on Easy MCP AI's own tools that can change your site. If you approve with nothing ticked, the connection doesn't finish and your AI app asks you to connect again. The setup screen also tells you how to keep customer details out of AI chats, because some of Easy MCP AI's own tools can return them.
 
 = I have both connection plugins active. Which one is used? =
 
-New Claude and ChatGPT connections go through Easy MCP AI, because it takes over the sign-in when it is active. The setup screen shows Easy MCP AI's connection link and warns you that two are active. To use MCP Adapter and Enable Abilities for new connections, deactivate Easy MCP AI.
+New Claude and ChatGPT connections go through Easy MCP AI, because it takes over the sign-in when it is active. The setup screen shows Easy MCP AI's connection link and warns you that two are active. A connection made through MCP Adapter and Enable Abilities before Easy MCP AI was active can't be reconnected while Easy MCP AI is active: make a new connection with Easy MCP AI's link, or deactivate Easy MCP AI. To use MCP Adapter and Enable Abilities for new connections, deactivate Easy MCP AI.
 
 = How do I add it to ChatGPT? =
 
@@ -150,6 +150,8 @@ In claude.ai, open Customize > Connectors > Add > Add custom connector and paste
 = Connecting fails with a 403 error =
 
 A firewall or CDN in front of your site (Cloudflare, Kinsta Bot Protection, a security plugin) is blocking the assistant's server. With Option 1 (Enable Abilities), add path exceptions for `/.well-known/oauth-*`, `/oauth/*` and `/wp-json/mcp/*`. With Option 2 (Easy MCP AI), add them for `/.well-known/oauth-*`, `/.well-known/openid-configuration`, `/easy-mcp-ai/*`, `/wp-json/easy-mcp-ai/*`, `/authorize`, `/token` and `/register`. The setup screen lists the exact paths for your connection. Don't allow it by matching a user agent: that lets anything claiming to be the assistant through.
+
+With Easy MCP AI, your site also fetches the assistant's sign-in details (for Claude, from claude.ai) while you connect. A firewall or security plugin that blocks your site's own outgoing requests makes sign-in fail with an `invalid_client` error: allow outgoing requests to the assistant's domain.
 
 = The sign-in page says the session expired or the state is invalid =
 
