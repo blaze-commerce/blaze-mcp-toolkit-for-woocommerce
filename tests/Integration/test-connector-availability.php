@@ -209,6 +209,16 @@ if ( null !== $second ) {
 	blzmcp_av_easy( $second, false, Availability::DISABLED_HERE, 'easy: not ticked', 'not ticked in Easy MCP AI › Tools › Abilities' );
 }
 
+// Payment health (new in 1.2) on an existing Easy MCP AI install that ticked only the older tools:
+// off and diagnosed as not ticked, with the options left as the owner set them.
+$payment = wp_has_ability( 'blaze-mcp-toolkit/payment-health' ) ? wp_get_ability( 'blaze-mcp-toolkit/payment-health' ) : null;
+blzmcp_it_assert( $payment instanceof \WP_Ability, 'payment-health is registered' );
+if ( $payment instanceof \WP_Ability ) {
+	blzmcp_it_equals( true, $rec->is_exposed( $payment ), 'recommended: payment-health exposed' );
+	blzmcp_it_equals( null, $rec->diagnose( 'blaze-mcp-toolkit/payment-health' ), 'recommended: payment-health has no diagnosis without a denylist entry' );
+	blzmcp_av_easy( $payment, false, Availability::DISABLED_HERE, 'easy: payment-health not ticked on a 1.1 install', 'not ticked in Easy MCP AI › Tools › Abilities' );
+}
+
 if ( $real_toolstate ) {
 	// Real Easy MCP AI: on by default once ticked; switched off through its disabled-tools list.
 	blzmcp_av_easy( $health, true, null, 'real easy: ticked, on by default' );

@@ -63,6 +63,22 @@ $step_for = static function ( $result, string $tool, ?string $subject = null ) {
 };
 
 $profile = 'blaze-mcp-toolkit/store-profile';
+$payment = 'blaze-mcp-toolkit/payment-health';
+// Workflows that list payment health first (RefundTriage gets no payment step).
+$payment_first = array( 'blaze-mcp-toolkit/weekly-store-review', 'blaze-mcp-toolkit/revenue-drop-triage', 'blaze-mcp-toolkit/failed-order-triage' );
+// Clauses from 1.1 that would contradict the Analytics-only stop or the payment-first lead (F03, F17).
+$contradictions = static function ( string $text ): array {
+	$found = array();
+	foreach ( array( 'stop there', 'do not run the other steps', 'and stop.', 'do not run the steps below', 'report any numbers or write the review', 'The first step reads order totals', 'Lead with collected revenue:', 'Treat card-gateway on-hold orders as abnormal', 'Lead with the most important movement.' ) as $clause ) {
+		if ( str_contains( $text, $clause ) ) {
+			$found[] = $clause;
+		}
+	}
+	return $found;
+};
+$whys_of = static function ( $result ): string {
+	return implode( "\n", array_column( (array) ( is_array( $result ) ? $result['steps'] : array() ), 'why' ) );
+};
 
 // Connector naming (1.1): the run sentence 1.0 shipped, and helpers shared by the default and
 // Easy MCP stub runs.
@@ -190,6 +206,45 @@ $shared_connector_checks = static function ( string $mode ) use ( $names_match )
 	blzmcp_it_assert( $names_match( $after, Connectors::signin_owner() ), "{$mode}: a later direct call uses the sign-in owner's names (no stale frame)" );
 };
 
+// Stand-aside plus Easy MCP AI (FEATURE-PLAN item 8): payment health is ours, so it is registered and
+// named for Easy MCP even while WooCommerce for Claude supplies the store and Analytics tools.
+if ( $easy_stub && Commerce::is_standing_aside() ) {
+	echo "Mode: stand-aside+easy\n";
+	if ( ! $easy_real ) {
+		require_once __DIR__ . '/stub-easymcp-toolstate.php';
+	}
+	$sa_opt      = 'easy_mcp_ai_enabled_abilities';
+	$sa_opt_had  = false !== get_option( $sa_opt, false );
+	$sa_opt_prev = get_option( $sa_opt, array() );
+	blzmcp_it_cleanup(
+		static function () use ( $sa_opt, $sa_opt_had, $sa_opt_prev ): void {
+			$sa_opt_had ? update_option( $sa_opt, $sa_opt_prev ) : delete_option( $sa_opt );
+			unset( $GLOBALS['blzmcp_toolstate_return'] );
+		}
+	);
+	update_option( $sa_opt, array_map( static fn( $a ) => $a->get_name(), wp_get_abilities() ) );
+	$GLOBALS['blzmcp_toolstate_return'] = array( true, 'default' );
+	blzmcp_it_assert( null !== wp_get_ability( $payment ), 'stand-aside+easy: payment health still registered' );
+	foreach ( $run_workflows() as $name => $result ) {
+		$text = is_array( $result ) ? $result['instructions'] : '';
+		blzmcp_it_assert( is_array( $result ), "stand-aside+easy {$name}: runs" );
+		blzmcp_it_assert( ! str_contains( $text, '{tool:' ), "stand-aside+easy {$name}: no {tool: token left" );
+		blzmcp_it_equals( array(), $contradictions( $text . "\n" . $whys_of( $result ) ), "stand-aside+easy {$name}: no contradictory stop or lead clause" );
+		if ( in_array( $name, $payment_first, true ) ) {
+			$first = $result['steps'][0] ?? array();
+			blzmcp_it_assert( 'blaze-mcp-toolkit/payment-health' === ( $first['ability'] ?? null ) && 'wp_ability_blaze_mcp_toolkit_payment_health' === ( $first['tool'] ?? null ), "stand-aside+easy {$name}: payment health first under its Easy MCP name" );
+			blzmcp_it_assert( str_contains( $text, "PAYMENT CHECK\n" ), "stand-aside+easy {$name}: payment check paragraph" );
+		} else {
+			blzmcp_it_assert( null === $step_for( $result, $payment ) && ! str_contains( $text, 'PAYMENT CHECK' ), "stand-aside+easy {$name}: no payment step" );
+		}
+		if ( is_array( $result ) && array() === $result['steps'] ) {
+			blzmcp_it_assert( str_contains( $text, 'No step in this plan can run here' ), "stand-aside+easy {$name}: zero steps give no impossible run order" );
+		}
+	}
+	blzmcp_it_finish();
+	return;
+}
+
 if ( $easy_stub ) {
 	$easy = Connectors::get( 'easy-mcp' );
 	if ( $easy_real ) {
@@ -284,6 +339,7 @@ if ( $easy_stub ) {
 		$held                               = wp_get_ability( WeeklyStoreReview::NAME )->execute( array( 'period' => 'last_7_days' ) );
 		$text                               = is_array( $held ) ? $held['instructions'] : '';
 		blzmcp_it_assert( is_array( $held ) && array() === $held['steps'], 'easy-stub held: every step left out' );
+		blzmcp_it_assert( str_contains( $text, 'No step in this plan can run here' ) && ! str_contains( $text, 'Run the first step alone' ), 'easy-stub held: zero surviving steps give no impossible run order' );
 		blzmcp_it_assert( str_contains( $text, 'SWITCHED OFF' ) && str_contains( $text, 'Easy MCP AI' ), 'easy-stub held: switched-off section names Easy MCP AI' );
 		blzmcp_it_assert( ! str_contains( $text, '(held)' ) && ! str_contains( $text, 'held)' ), 'easy-stub held: raw reason code not shown' );
 
@@ -334,6 +390,7 @@ $wf_week   = null === $wf_weekly ? null : $wf_weekly->execute( array( 'period' =
 $wf_text   = is_array( $wf_week ) ? $wf_week['instructions'] : '';
 blzmcp_it_assert( str_starts_with( $wf_text, '[ANALYTICS_UNAVAILABLE] ' ) && str_contains( substr( $wf_text, 0, 800 ), 'STOP' ), "{$wf_mode}: weekly review for last_7_days stops on a missing 5-day-old order" );
 blzmcp_it_assert( array() === array_filter( $tools_of( $wf_week ), static fn( $t ) => str_starts_with( (string) $t, 'wc-analytics/' ) ), "{$wf_mode}: no wc-analytics steps while that week is incomplete" );
+blzmcp_it_assert( is_array( $wf_week ) && 'blaze-mcp-toolkit/payment-health' === ( $wf_week['steps'][0]['ability'] ?? null ), "{$wf_mode}: the incomplete week still runs payment health first" );
 $wf_day  = null === $wf_weekly ? null : $wf_weekly->execute( array( 'period' => 'yesterday' ) );
 $wf_text = is_array( $wf_day ) ? $wf_day['instructions'] : '';
 blzmcp_it_assert( ! str_starts_with( $wf_text, '[ANALYTICS_UNAVAILABLE]' ), "{$wf_mode}: weekly review for yesterday (and the day before) is not stopped by it" );
@@ -397,6 +454,10 @@ if ( Commerce::is_standing_aside() ) {
 		$analytics_steps = array_filter( $tools_of( $result ), static fn( $t ) => str_starts_with( (string) $t, 'wc-analytics/' ) );
 		blzmcp_it_assert( is_array( $result ) && array() === $analytics_steps, "standaside analytics off {$name}: no wc-analytics steps" );
 		blzmcp_it_assert( ! str_contains( $text, '- wc-analytics/' ), "standaside analytics off {$name}: analytics steps not listed as skipped" );
+		if ( in_array( $name, $payment_first, true ) ) {
+			blzmcp_it_assert( 'blaze-mcp-toolkit/payment-health' === ( $result['steps'][0]['ability'] ?? null ), "standaside analytics off {$name}: payment health registered independently and still first" );
+		}
+		blzmcp_it_equals( array(), $contradictions( $text . "\n" . $whys_of( $result ) ), "standaside analytics off {$name}: no contradictory stop clause" );
 	}
 	update_option( 'woocommerce_analytics_enabled', $saved_enabled );
 
@@ -445,12 +506,27 @@ foreach ( $workflows as $name => $default_period ) {
 	blzmcp_it_equals( $default_period, $result['period'] ?? null, "{$name} output period is the default" );
 	blzmcp_it_assert( is_string( $result['instructions'] ?? null ) && strlen( $result['instructions'] ) > 200, "{$name} has instructions" );
 
-	$first = $result['steps'][0] ?? null;
-	blzmcp_it_assert( null !== $first && 'wc-analytics/totals' === $first['tool'] && 'orders' === ( (array) $first['arguments'] )['subject'], "{$name} first step is totals orders" );
-
+	$first  = $result['steps'][0] ?? null;
+	$totals_step = $step_for( $result, 'wc-analytics/totals', 'orders' );
 	$instructions = $result['instructions'];
+	if ( in_array( $name, $payment_first, true ) ) {
+		blzmcp_it_assert( null !== $first && $payment === $first['ability'], "{$name} first step is payment health" );
+		blzmcp_it_equals( 168, ( (array) ( $first['arguments'] ?? array() ) )['since_hours'] ?? null, "{$name} payment health over the capped window (168 hours for {$default_period})" );
+		blzmcp_it_assert( ( $result['steps'][1]['ability'] ?? null ) === 'wc-analytics/totals' && 'orders' === ( (array) $result['steps'][1]['arguments'] )['subject'], "{$name} order totals come straight after payment health" );
+		blzmcp_it_assert( str_contains( $instructions, "PAYMENT CHECK\n" ) && str_contains( $instructions, 'lead the answer with its findings' ), "{$name} instructions lead with red or amber payment findings" );
+		blzmcp_it_assert( str_contains( $instructions, 'rolling look-back, not a reconstruction' ), "{$name} instructions say payment health is a rolling look-back" );
+		blzmcp_it_assert( str_contains( $instructions, 'never present them as Analytics sales, money lost or confirmed charges' ), "{$name} instructions keep payment counts apart from sales and charges" );
+		blzmcp_it_assert( str_contains( $instructions, 'Then run the order totals step alone' ), "{$name} instructions run totals alone after payment" );
+	} else {
+		blzmcp_it_assert( null !== $first && 'wc-analytics/totals' === $first['tool'] && 'orders' === ( (array) $first['arguments'] )['subject'], "{$name} first step is totals orders" );
+		blzmcp_it_assert( null === $step_for( $result, $payment ), "{$name} has no payment step" );
+		blzmcp_it_assert( ! str_contains( $instructions, 'PAYMENT CHECK' ), "{$name} has no PAYMENT CHECK paragraph" );
+	}
+	blzmcp_it_equals( array(), $contradictions( $instructions . "\n" . $whys_of( $result ) ), "{$name} instructions and step reasons carry no contradictory stop or lead clause" );
+	blzmcp_it_assert( str_contains( $instructions, 'stop the Analytics work only' ) && str_contains( $instructions, 'Still run the listed steps that are not Analytics' ), "{$name} analytics unavailable stops only the Analytics work" );
+
 	blzmcp_it_assert( str_contains( $instructions, '[ANALYTICS_UNAVAILABLE]' ), "{$name} instructions handle analytics unavailable" );
-	blzmcp_it_assert( null !== $first && str_contains( $first['why'], '[ANALYTICS_UNAVAILABLE]' ), "{$name} first step why keys on the analytics token" );
+	blzmcp_it_assert( null !== $totals_step && str_contains( $totals_step['why'], '[ANALYTICS_UNAVAILABLE]' ), "{$name} totals step why keys on the analytics token" );
 	blzmcp_it_assert( str_contains( $instructions, 'untrusted_text' ) && str_contains( $instructions, 'read-only' ), "{$name} instructions carry the safety rules" );
 	blzmcp_it_assert( str_contains( $instructions, 'Run the first step alone' ), "{$name} instructions run the first step alone" );
 	blzmcp_it_assert( str_contains( $instructions, 'execute' ), "{$name} instructions say how to run steps" );
@@ -523,7 +599,8 @@ if ( is_array( $weekly ) ) {
 if ( null !== $gateway && isset( $samples['blaze-mcp-toolkit/weekly-store-review'] ) ) {
 	$saved_enabled = get_option( 'woocommerce_analytics_enabled', 'yes' );
 	update_option( 'woocommerce_analytics_enabled', 'no' );
-	$first = $samples['blaze-mcp-toolkit/weekly-store-review']['steps'][0];
+	// Selected by ability and subject, not position: payment health is now the first step (F02).
+	$first = $step_for( $samples['blaze-mcp-toolkit/weekly-store-review'], 'wc-analytics/totals', 'orders' );
 	$out   = $gateway->execute(
 		array(
 			'ability_name' => $first['tool'],
@@ -534,6 +611,12 @@ if ( null !== $gateway && isset( $samples['blaze-mcp-toolkit/weekly-store-review
 	update_option( 'woocommerce_analytics_enabled', $saved_enabled );
 	blzmcp_it_assert( is_array( $off ) && str_starts_with( $off['instructions'], '[ANALYTICS_UNAVAILABLE] ' ), 'analytics off: workflow instructions lead with the analytics-unavailable message' );
 	blzmcp_it_assert( is_array( $off ) && ! in_array( 'wc-analytics/totals', $tools_of( $off ), true ), 'analytics off: workflow drops the analytics steps' );
+	$off_text = is_array( $off ) ? $off['instructions'] : '';
+	blzmcp_it_assert( is_array( $off ) && 'blaze-mcp-toolkit/payment-health' === ( $off['steps'][0]['ability'] ?? null ), 'analytics off: payment health still runs first' );
+	blzmcp_it_assert( null !== $step_for( $off, $health ) && null !== $step_for( $off, $history ), 'analytics off: site error and update steps still run' );
+	blzmcp_it_assert( str_contains( $off_text, 'STOP THE ANALYTICS WORK' ) && str_contains( $off_text, 'Still run the steps below' ) && str_contains( $off_text, 'payment health findings first' ), 'analytics off: only the Analytics work stops, payment findings first' );
+	blzmcp_it_assert( str_contains( $off_text, 'No WooCommerce Analytics step is in this plan' ) && str_contains( $off_text, 'Whatever it returns, carry on: run the remaining' ), 'analytics off: run order and analytics check built from the surviving steps' );
+	blzmcp_it_equals( array(), $contradictions( $off_text . "\n" . $whys_of( $off ) ), 'analytics off: no contradictory stop clause' );
 	blzmcp_it_assert( is_array( $out ) && false === ( $out['success'] ?? null ), 'tripped guard: gateway reports failure' );
 	blzmcp_it_assert( is_array( $out ) && str_starts_with( (string) ( $out['error'] ?? '' ), '[ANALYTICS_UNAVAILABLE] ' ), 'tripped guard: gateway error text starts with the token' );
 }
@@ -566,6 +649,53 @@ if ( is_array( $refund ) ) {
 	blzmcp_it_assert( null !== $step_for( $refund, 'wc-analytics/totals', 'refunds' ), 'refund triage has refund totals' );
 	blzmcp_it_assert( null !== $step_for( $refund, 'wc-analytics/breakdown', 'refunds' ), 'refund triage has refund breakdown' );
 }
+
+// Payment-first wording in each workflow's own guidance (F17).
+if ( is_array( $weekly ) ) {
+	blzmcp_it_assert( str_contains( $weekly['instructions'], 'If payment health returned red or amber findings, open with them. Then cover collected revenue' ), 'weekly headline: payment findings before revenue' );
+}
+if ( is_array( $drop ) ) {
+	blzmcp_it_assert( str_contains( $drop['instructions'], 'After any payment findings, lead with collected revenue' ) && str_contains( $drop['instructions'], 'possible link, not a proven cause' ), 'revenue drop: payment findings first, cautious link' );
+}
+if ( is_array( $failed ) ) {
+	$ft = $failed['instructions'];
+	blzmcp_it_assert( str_contains( $ft, 'straight after any red or amber payment health findings' ) && str_contains( $ft, 'Open with any red or amber payment health findings; then, if failed orders exceed paid orders, the card-testing check' ), 'failed orders: payment findings precede the card-testing narrative' );
+	blzmcp_it_assert( str_contains( $ft, 'some legitimately hold orders while a payment is authorised and captured later' ), 'failed orders: authorisation holds are not called a fault' );
+	blzmcp_it_assert( null === $step_for( $failed, $health ), 'failed orders: still no health-summary step' );
+}
+if ( is_array( $refund ) ) {
+	blzmcp_it_assert( str_contains( $refund['instructions'], 'Run the first step alone. If it succeeds, run the remaining' ), 'refund: totals-first healthy path kept' );
+}
+
+// Payment step denied (core permission filter) or missing totals: instructions follow the surviving steps.
+$deny = static function ( $result, $ability_name ) use ( &$deny_target ) {
+	return $ability_name === $deny_target ? false : $result;
+};
+add_filter( 'wp_ability_permission_result', $deny, 10, 2 );
+$deny_target = $payment;
+$no_pay      = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute( array( 'period' => 'last_7_days' ) );
+$deny_target = 'wc-analytics/totals';
+$no_totals   = wp_get_ability( 'blaze-mcp-toolkit/revenue-drop-triage' )->execute( array( 'period' => 'last_7_days' ) );
+$deny_target = '';
+remove_filter( 'wp_ability_permission_result', $deny, 10 );
+$np = is_array( $no_pay ) ? $no_pay['instructions'] : '';
+blzmcp_it_assert( null === $step_for( $no_pay, $payment ) && 'wc-analytics/totals' === ( $no_pay['steps'][0]['ability'] ?? null ), 'payment denied: totals becomes the first step' );
+blzmcp_it_assert( str_contains( $np, 'NOT AVAILABLE FOR YOUR ROLE' ) && str_contains( $np, $payment ), 'payment denied: listed under not available for your role' );
+blzmcp_it_assert( str_contains( $np, 'The payment health check is not in this plan' ) && ! str_contains( $np, 'lead the answer with its findings' ), 'payment denied: explained once, review continues' );
+blzmcp_it_assert( str_contains( $np, 'Run the first step alone. If it succeeds' ) && ! str_contains( $np, 'it is the payment health check' ), 'payment denied: run order names no payment step' );
+$nt = is_array( $no_totals ) ? $no_totals['instructions'] : '';
+blzmcp_it_assert( null === $step_for( $no_totals, 'wc-analytics/totals', 'orders' ) && 'blaze-mcp-toolkit/payment-health' === ( $no_totals['steps'][0]['ability'] ?? null ), 'totals denied: payment health still first' );
+blzmcp_it_assert( str_contains( $nt, 'Whatever it returns, carry on: run the remaining' ) && ! str_contains( $nt, 'Then run the order totals step alone' ), 'totals denied: run order names no totals step' );
+blzmcp_it_assert( ! str_contains( $nt, 'The order totals step also confirms' ) && str_contains( $nt, 'stop the Analytics work only' ), 'totals denied: the remaining Analytics steps keep the Analytics-only stop' );
+blzmcp_it_equals( array(), $contradictions( $np . "\n" . $nt ), 'denied steps: no contradictory stop clause' );
+
+// Payment step permission follows the user at plan time (cold and warm): never cached.
+$deny_target = $payment;
+add_filter( 'wp_ability_permission_result', $deny, 10, 2 );
+$cold_deny = wp_get_ability( 'blaze-mcp-toolkit/failed-order-triage' )->execute();
+remove_filter( 'wp_ability_permission_result', $deny, 10 );
+$warm_ok = wp_get_ability( 'blaze-mcp-toolkit/failed-order-triage' )->execute();
+blzmcp_it_assert( null === $step_for( $cold_deny, $payment ) && null !== $step_for( $warm_ok, $payment ), 'payment step appears or disappears with the current permission' );
 
 // Recommended connector (1.1): tool equals ability, the 1.0 run sentence byte for byte, tokens rendered.
 blzmcp_it_equals( 'recommended', Connectors::execution()->id(), 'default: execution connector is recommended' );
@@ -616,6 +746,9 @@ foreach ( array_keys( $workflows ) as $name ) {
 	}
 	$tools = $tools_of( $sm );
 	blzmcp_it_assert( ! in_array( $health, $tools, true ) && ! in_array( $history, $tools, true ), "{$name} as shop_manager has no diagnostics steps" );
+	if ( in_array( $name, $payment_first, true ) ) {
+		blzmcp_it_assert( 'blaze-mcp-toolkit/payment-health' === ( $sm['steps'][0]['ability'] ?? null ), "{$name} as shop_manager keeps payment health first (manage_woocommerce)" );
+	}
 	blzmcp_it_assert( in_array( 'wc-analytics/totals', $tools, true ), "{$name} as shop_manager keeps analytics steps" );
 	if ( in_array( $name, array( 'blaze-mcp-toolkit/weekly-store-review', 'blaze-mcp-toolkit/revenue-drop-triage' ), true ) ) {
 		blzmcp_it_assert( str_contains( $sm['instructions'], 'not available for your role' ), "{$name} as shop_manager says steps are not available for your role" );

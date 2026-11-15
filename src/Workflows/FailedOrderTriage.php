@@ -9,8 +9,9 @@
  * (@package WooCommerce\Claude). Licensed GPL-3.0-or-later.
  *
  * Modified by Blaze Commerce: delivered as a tool returning instructions plus ordered steps instead
- * of an MCP prompt; order totals first (Analytics check); failed orders exceeding paid orders is led
- * with as a likely card-testing or monitoring signal.
+ * of an MCP prompt; payment health first, then order totals (Analytics check); failed orders
+ * exceeding paid orders is led with (after payment findings) as a likely card-testing or
+ * monitoring signal.
  *
  * @package Blaze\McpToolkit
  */
@@ -41,7 +42,7 @@ final class FailedOrderTriage extends AbstractWorkflow {
 	 * Description the AI reads in ability discovery.
 	 */
 	protected static function description(): string {
-		return __( 'Failed and on-hold order triage: separate on-hold payment pipeline from failed checkout risk and list the orders to chase first. Use this first when the merchant asks about failed orders or failed payments, stuck, unpaid or on-hold orders, checkout failures, declined cards or possible card testing. Returns a plan, not data: instructions plus an ordered list of other tools to run with their arguments. Run the steps, then write the triage. Read-only.', 'blaze-mcp-toolkit-for-woocommerce' );
+		return __( 'Failed and on-hold order triage: separate on-hold payment pipeline from failed checkout risk and list the orders to chase first. Use this first when the merchant asks about failed orders or failed payments, stuck, unpaid or on-hold orders, checkout failures, declined cards or possible card testing. Returns a plan, not data: instructions plus an ordered list of other tools to run with their arguments, starting with a payment health check. Run the steps, then write the triage. Read-only.', 'blaze-mcp-toolkit-for-woocommerce' );
 	}
 
 	/**
@@ -52,6 +53,7 @@ final class FailedOrderTriage extends AbstractWorkflow {
 	 */
 	protected static function plan( string $period ): array {
 		return array(
+			self::payment_health_step( $period ),
 			self::step(
 				'wc-analytics/totals',
 				array(
@@ -59,7 +61,7 @@ final class FailedOrderTriage extends AbstractWorkflow {
 					'period'  => $period,
 					'compare' => true,
 				),
-				'Status breakdown, pipeline diagnostic, comparison dates and the paid-order count. Also confirms Analytics data is complete: if its error text starts with [ANALYTICS_UNAVAILABLE], explain the rest of that message to the merchant in plain words and stop.'
+				'Status breakdown, pipeline diagnostic, comparison dates and the paid-order count. Also confirms Analytics data is complete: if its error text starts with [ANALYTICS_UNAVAILABLE], explain the rest of that message to the merchant in plain words and skip the other Analytics steps; still run the rest.'
 			),
 			self::store_profile_step( 'Store name, currency, locale and payment setup context. Read once.' ),
 			self::step( 'wc-analytics/rows', self::status_args( $period, 'on-hold', 'aggregate' ), 'On-hold order count and value for the period.' ),
@@ -133,14 +135,16 @@ final class FailedOrderTriage extends AbstractWorkflow {
 				'',
 				'Use the tools quietly. If you need a progress sentence before the final answer, say only: "I\'ll check the period and separate on-hold payment pipeline from failed checkout risk." Do not tell the merchant you are loading schemas, loading tools, selecting tools, calling tools, using a connector, or constructing filters.',
 				'',
-				'Required data: the steps read the order overview (status breakdown and pipeline diagnostic; treat the current paid-order count as background only, except for the card-testing check below), the store profile, on-hold and failed order aggregates, the oldest on-hold and most recent failed orders, and, when relevant, the channel mix.',
+				'Payment health comes first: if it returned red or amber findings (a payment method that stopped taking orders, unpaid checkouts above the method\'s usual share, payment references on unpaid orders, or payment errors), open the Snapshot with them before the on-hold and failed buckets. An unknown payment check is a gap to mention, never a sign that payments are fine. Its counts are orders accepted, unpaid or failed at checkout, not collected revenue or confirmed charges. If Analytics figures are unavailable, still report the payment findings and say the on-hold and failed buckets could not be read.',
+				'',
+				'Required data: the steps read payment health, the order overview (status breakdown and pipeline diagnostic; treat the current paid-order count as background only, except for the card-testing check below), the store profile, on-hold and failed order aggregates, the oldest on-hold and most recent failed orders, and, when relevant, the channel mix.',
 				'If the order overview returns a comparison range, also run {tool:wc-analytics/rows} twice more with the same arguments as the two aggregate steps, but with date_start and date_end set to the exact comparison dates (YYYY-MM-DD) in place of period: once with the on-hold status filter and once with the failed status filter. Use these only for current-vs-prior count/value wording; do not compute percentage changes, rates, or shares unless a tool returned them.',
 				'',
-				'Card-testing check (this overrides the paid-order rules below): if the number of failed orders in the period is greater than the number of paid orders in the period, lead the Snapshot with that, quote both counts side by side (for example "120 failed orders versus 15 paid orders"), and say it is a likely sign of card testing (bots trying stolen card numbers) or of a checkout or payment-gateway fault worth checking now, not proof of either. Make reviewing the gateway\'s fraud and decline logs and turning on checkout protection (for example a CAPTCHA or the gateway\'s fraud rules) part of Next Actions.',
+				'Card-testing check (this overrides the paid-order rules below): if the number of failed orders in the period is greater than the number of paid orders in the period, lead the Snapshot with that, straight after any red or amber payment health findings, quote both counts side by side (for example "120 failed orders versus 15 paid orders"), and say it is a likely sign of card testing (bots trying stolen card numbers) or of a checkout or payment-gateway fault worth checking now, not proof of either. Make reviewing the gateway\'s fraud and decline logs and turning on checkout protection (for example a CAPTCHA or the gateway\'s fraud rules) part of Next Actions.',
 				'',
 				'Rules:',
 				'- Treat on-hold orders as payment pipeline, not failed revenue. Manual methods such as bank transfer, BACS, cheque, and invoice can legitimately sit on-hold while payment clears.',
-				'- Treat card-gateway on-hold orders as abnormal because card gateways should usually complete or fail at checkout.',
+				'- Treat card-gateway on-hold orders as worth checking: most card gateways complete or fail at checkout, but some legitimately hold orders while a payment is authorised and captured later. Check the gateway\'s capture setting before calling it a fault.',
 				'- Treat failed orders as checkout risk, not confirmed lost revenue.',
 				'- Use returned comparison fields, age buckets, payment-method diagnostics, and pipeline over-index fields directly. For status-specific on-hold and failed comparisons, read the current and prior aggregate calls side by side and state count/value movement plainly. Do not hand-calculate percentage changes, rates, shares, averages, or deltas.',
 				'- When comparing current and prior status buckets, use neutral wording such as "larger", "smaller", or "similar" and quote both values. Avoid magnitude labels such as "slight", "modest", "meaningfully", "roughly flat", "broadly flat", "sharp", or "surging" unless a returned comparison field supplies that judgement.',
@@ -171,11 +175,11 @@ final class FailedOrderTriage extends AbstractWorkflow {
 				'',
 				'#### 1. Snapshot',
 				'',
-				'Two or three sentences covering on-hold orders, failed orders, and whether those buckets are growing, shrinking, or flat. You may mention only the current paid-order count as neutral background, never paid-order growth, a denominator, a share, or a reason to downgrade the issue. If failed orders exceed paid orders, lead with the card-testing check above.',
+				'Two or three sentences covering on-hold orders, failed orders, and whether those buckets are growing, shrinking, or flat. You may mention only the current paid-order count as neutral background, never paid-order growth, a denominator, a share, or a reason to downgrade the issue. Open with any red or amber payment health findings; then, if failed orders exceed paid orders, the card-testing check above.',
 				'',
 				'#### 2. Severity',
 				'',
-				'Low, Medium, or High with one sentence explaining why, based on counts, value, movement, stale age buckets, and card-gateway on-hold signals.',
+				'Low, Medium, or High with one sentence explaining why, based on payment health findings, counts, value, movement, stale age buckets, and card-gateway on-hold signals.',
 				'',
 				'#### 3. On-Hold Pipeline',
 				'',

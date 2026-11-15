@@ -46,6 +46,25 @@ if ( function_exists( 'as_schedule_single_action' ) ) {
 	$wpdb->update( $wpdb->prefix . 'actionscheduler_actions', array( 'status' => 'complete' ), array( 'action_id' => $done_id ) );
 }
 
+// A real payment-health result, cached under its access-dependent context key.
+$payment_key = '';
+$admins      = get_users(
+	array(
+		'role'   => 'administrator',
+		'number' => 1,
+	)
+);
+wp_set_current_user( $admins[0]->ID );
+$payment = wp_get_ability( 'blaze-mcp-toolkit/payment-health' );
+blzmcp_it_assert( null !== $payment && is_array( $payment->execute( array( 'since_hours' => 24 ) ) ), 'payment health runs before uninstall' );
+if ( class_exists( \Blaze\McpToolkit\Abilities\PaymentHealth::class ) ) {
+	$payment_key = ( new ReflectionMethod( \Blaze\McpToolkit\Abilities\PaymentHealth::class, 'cache_key' ) )->invoke( null, array( 'since_hours' => 24 ) );
+	$context     = ( new ReflectionMethod( \Blaze\McpToolkit\Abilities\PaymentHealth::class, 'cache_context' ) )->invoke( null );
+	blzmcp_it_assert( str_starts_with( $payment_key, 'blzmcp_c_' ) && is_array( get_transient( $payment_key ) ), 'payment health result is cached under a blzmcp_c_ key' );
+	blzmcp_it_equals( \Blaze\McpToolkit\Abilities\PaymentHealth::CONTEXT_VERSION, $context['v'] ?? null, 'payment cache context carries its contract version, so a later incompatible context never reuses an external object-cache entry' );
+}
+wp_set_current_user( 0 );
+
 $as_count = static function () use ( $wpdb ): int {
 	return (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE hook = %s', $wpdb->prefix . 'actionscheduler_actions', 'blzmcp_daily_cleanup' ) );
 };
@@ -69,6 +88,9 @@ wp_cache_flush();
 blzmcp_it_equals( false, get_option( 'blzmcp_settings' ), 'blzmcp_settings is gone' );
 blzmcp_it_equals( false, get_transient( 'blzmcp_c_test_uninstall' ), 'cached tool result transient is gone' );
 blzmcp_it_equals( false, get_transient( 'blzmcp_anon_test_uninstall' ), 'anonymous-denial transient is gone' );
+if ( '' !== $payment_key ) {
+	blzmcp_it_equals( false, get_transient( $payment_key ), 'payment health result transient is gone' );
+}
 
 // Tables.
 foreach ( array( 'blzmcp_audit', 'blzmcp_events' ) as $table ) {

@@ -141,7 +141,17 @@ if ( 'recommended' === $state && ! $denylist ) {
 	try {
 		$now     = json_decode( (string) wp_json_encode( blzmcp_fx_inputs() ), true );
 		$changed = array();
-		foreach ( (array) ( $fixture['_inputs'] ?? array() ) as $key => $value ) {
+		// Abilities this plugin added after 1.0. The 1.0 fixture stays unchanged; the binding expects
+		// exactly the 1.0 inventory plus these names, so any other drift still fails as before.
+		$added_since_1_0 = array( 'blaze-mcp-toolkit/payment-health' );
+		$bound_inputs    = (array) ( $fixture['_inputs'] ?? array() );
+		if ( isset( $bound_inputs['abilities'] ) && is_array( $bound_inputs['abilities'] ) ) {
+			$bound_abilities = array_values( array_unique( array_merge( $bound_inputs['abilities'], $added_since_1_0 ) ) );
+			sort( $bound_abilities );
+			$bound_inputs['abilities'] = $bound_abilities;
+			blzmcp_it_assert( array() === array_diff( $added_since_1_0, (array) ( $now['abilities'] ?? array() ) ), 'recommended: abilities added since 1.0 are registered (' . implode( ', ', $added_since_1_0 ) . ')' );
+		}
+		foreach ( $bound_inputs as $key => $value ) {
 			if ( ( $now[ $key ] ?? null ) !== $value ) {
 				$changed[] = $key;
 			}
@@ -254,6 +264,18 @@ if ( $easy ) {
 	blzmcp_it_equals( 'warn', $un['easy_tools_on']['status'] ?? null, 'easy: unticked tool: easy_tools_on warns' );
 	blzmcp_it_assert( str_contains( $un['easy_tools_on']['fix'] ?? '', $unticked ), 'easy: easy_tools_on names the unticked tool' );
 	blzmcp_it_assert( str_contains( $un['tools_visible']['fix'] ?? '', $unticked ) && str_contains( $un['tools_visible']['fix'] ?? '', 'not ticked in Easy MCP AI' ), 'easy: tools_visible says the tool is not ticked in Easy MCP AI' );
+
+	// An existing 1.1 Easy MCP AI install: every 1.1 tool ticked, payment health (new in 1.2) not.
+	// Setup warns and names it; the check never ticks it for the owner.
+	$payment = 'blaze-mcp-toolkit/payment-health';
+	$v11     = array_values( array_diff( $wanted, array( $payment ) ) );
+	blzmcp_sc_set( $enabled_o, $v11 );
+	$up = blzmcp_sc_run( 'easy 1.1 install without payment health' );
+	blzmcp_it_assert( in_array( $payment, $wanted, true ), 'easy 1.1 install: payment health is one of ours' );
+	blzmcp_it_equals( 'warn', $up['easy_tools_on']['status'] ?? null, 'easy 1.1 install: easy_tools_on warns' );
+	blzmcp_it_assert( str_contains( $up['easy_tools_on']['fix'] ?? '', $payment ), 'easy 1.1 install: easy_tools_on names payment health' );
+	blzmcp_it_assert( str_contains( $up['tools_visible']['fix'] ?? '', $payment ) && str_contains( $up['tools_visible']['fix'] ?? '', 'not ticked in Easy MCP AI' ), 'easy 1.1 install: tools_visible says payment health is not ticked in Easy MCP AI' );
+	blzmcp_it_equals( $v11, get_option( $enabled_o ), 'easy 1.1 install: setup checks never tick payment health themselves' );
 	blzmcp_sc_set( $enabled_o, $wanted );
 
 	// WooCommerce group on, approval on (Round 7 F04/F05). Approval on is a setting, not a

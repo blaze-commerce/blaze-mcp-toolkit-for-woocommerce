@@ -172,6 +172,161 @@ final class LogSources {
 	}
 
 	/**
+	 * WooCommerce log files whose source is exactly one of $sources (or a rotated `<source>.<n>`),
+	 * modified at or after $since_ts, newest first. Additive structured reader for payment health:
+	 * unlike wc_fatal_files() it reports why nothing was found and whether the 7-file cap cut the
+	 * list. Files are resolved inside the log directory and deduplicated by real path.
+	 *
+	 * File name grammar (WooCommerce 10.9 FileV2): `<source>-YYYY-MM-DD-<hash>.log`.
+	 *
+	 * @param string[]    $sources    Literal source tokens.
+	 * @param int         $since_ts   Unix time.
+	 * @param string|null $wc_log_dir Directory; null means LoggingUtil::get_log_directory( false ).
+	 * @return array{ok:bool,reason:?string,files:array<int,array{path:string,source:string}>,truncated:bool}
+	 */
+	public static function source_files( array $sources, int $since_ts, ?string $wc_log_dir = null ): array {
+		$out = array(
+			'ok'        => false,
+			'reason'    => null,
+			'files'     => array(),
+			'truncated' => false,
+		);
+		if ( null === $wc_log_dir ) {
+			$wc_log_dir = self::wc_log_dir();
+		}
+		if ( null === $wc_log_dir || '' === $wc_log_dir || self::is_stream( $wc_log_dir ) ) {
+			$out['reason'] = 'log_directory_unavailable';
+			return $out;
+		}
+		set_error_handler( static fn(): bool => true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler
+		try {
+			$real_dir = realpath( $wc_log_dir );
+			if ( false === $real_dir || ! is_dir( $real_dir ) || ! is_readable( $real_dir ) ) {
+				$out['reason'] = 'log_directory_unavailable';
+				return $out;
+			}
+			$names = scandir( $real_dir );
+			if ( ! is_array( $names ) ) {
+				$out['reason'] = 'log_directory_unavailable';
+				return $out;
+			}
+			$found      = array();
+			$unreadable = false;
+			foreach ( $names as $name ) {
+				if ( 1 !== preg_match( '/^(.+)-\d{4}-\d{2}-\d{2}-[A-Za-z0-9]+\.log$/', $name, $m ) ) {
+					continue;
+				}
+				$source = preg_replace( '/\.\d+$/', '', $m[1] );
+				if ( ! in_array( $source, $sources, true ) ) {
+					continue;
+				}
+				$path  = $real_dir . DIRECTORY_SEPARATOR . $name;
+				$state = self::check_quiet( $path, $real_dir );
+				if ( ! $state['readable'] || null === $state['path'] ) {
+					$unreadable = true;
+					continue;
+				}
+				$mtime = filemtime( $state['path'] );
+				if ( false === $mtime ) {
+					$unreadable = true;
+					continue;
+				}
+				if ( $mtime < $since_ts ) {
+					continue;
+				}
+				$found[ $state['path'] ] = array(
+					'mtime'  => $mtime,
+					'source' => $source,
+				);
+			}
+			uasort( $found, static fn( array $a, array $b ): int => $b['mtime'] <=> $a['mtime'] );
+			$out['truncated'] = count( $found ) > self::MAX_WC_FILES || $unreadable;
+			foreach ( array_slice( $found, 0, self::MAX_WC_FILES, true ) as $path => $info ) {
+				$out['files'][] = array(
+					'path'   => (string) $path,
+					'source' => $info['source'],
+				);
+			}
+			$out['ok']     = true;
+			$out['reason'] = $unreadable ? 'file_unreadable' : null;
+			return $out;
+		} finally {
+			restore_error_handler();
+		}
+	}
+
+	/**
+	 * Structured bounded tail: like tail() but says whether the read worked and was cut.
+	 *
+	 * @param string   $path      Path from source_files().
+	 * @param int      $max_bytes Bytes from the end (at most 5 MB).
+	 * @param string[] $allowed   Resolved paths that may be read.
+	 * @return array{ok:bool,lines:string[],partial:bool}
+	 */
+	public static function read_bounded( string $path, int $max_bytes, array $allowed ): array {
+		$max_bytes = min( $max_bytes, self::MAX_TAIL_BYTES );
+		$fail      = array(
+			'ok'      => false,
+			'lines'   => array(),
+			'partial' => false,
+		);
+		if ( $max_bytes <= 0 || '' === $path || self::is_stream( $path ) ) {
+			return $fail;
+		}
+		set_error_handler( static fn(): bool => true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler
+		try {
+			$real = realpath( $path );
+			if ( false === $real || ! in_array( $real, $allowed, true ) || ! is_file( $real ) || ! is_readable( $real ) ) {
+				return $fail;
+			}
+			$size = filesize( $real );
+			if ( false === $size ) {
+				return $fail;
+			}
+			$handle = fopen( $real, 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+			if ( false === $handle ) {
+				return $fail;
+			}
+			$partial = $size > $max_bytes;
+			if ( $partial && 0 !== fseek( $handle, $size - $max_bytes ) ) {
+				fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+				return $fail;
+			}
+			$data = stream_get_contents( $handle, $max_bytes );
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			if ( ! is_string( $data ) ) {
+				return $fail;
+			}
+			$lines = '' === $data ? array() : explode( "\n", $data );
+			if ( $partial ) {
+				array_shift( $lines );
+			}
+			$lines = array_map( static fn( string $l ): string => rtrim( $l, "\r" ), $lines );
+			while ( array() !== $lines && '' === end( $lines ) ) {
+				array_pop( $lines );
+			}
+			return array(
+				'ok'      => true,
+				'lines'   => array_values( $lines ),
+				'partial' => $partial,
+			);
+		} finally {
+			restore_error_handler();
+		}
+	}
+
+	/**
+	 * WooCommerce's resolved log directory without creating it, or null.
+	 */
+	public static function wc_log_dir(): ?string {
+		if ( class_exists( \Automattic\WooCommerce\Utilities\LoggingUtil::class ) ) {
+			$dir = \Automattic\WooCommerce\Utilities\LoggingUtil::get_log_directory( false );
+			return is_string( $dir ) && '' !== $dir ? $dir : null;
+		}
+		return defined( 'WC_LOG_DIR' ) && is_string( WC_LOG_DIR ) ? WC_LOG_DIR : null;
+	}
+
+	/**
 	 * Tail read; runs with PHP warnings muted by tail().
 	 *
 	 * @param string   $path      Path.

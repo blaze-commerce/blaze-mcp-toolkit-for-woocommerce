@@ -17,16 +17,46 @@
 # No credentials and no customer data (the fixture's customers are synthetic) go in it.
 set -uo pipefail
 
+#
+# Evidence completeness (exit 5 after writing the record, verdict FAILED): every release state
+# (REQUIRED_STATES) has a STATE line that ran; every state except none has a STORAGE line for each
+# authority/sync combination and storage suite; the performance receipt (PERF_FILE) exists, is
+# bound to this zip's SHA-256 and has 5 complete trials for each storage/window/logger partition,
+# each under the 1500 ms budget. The run's ZIP_SHA256 and VERSION must match the zip (exit 3), and
+# the zip's header Version, BLZMCP_VERSION and readme Stable tag must agree (exit 3). The record is
+# titled and named after the candidate's version, never a fixed one.
+#
+# Privacy: absolute local paths in copied log lines are replaced with <path>; the finished record
+# is then scanned for home directories, host paths, auth headers, secrets and e-mail addresses
+# (other than the fixtures' example.invalid ones). Any hit refuses the record (exit 5, nothing
+# written).
+
 SUMMARY=${1:?summary file}
 VERDICT=${2:?PASSED or FAILED}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT_DIR=${BLZMCP_REPORTS_DIR:-$REPO/../reports}
+REQUIRED_STATES=${BLZMCP_REQUIRED_STATES:-recommended easy-2.3.1 easy-2.4.0 both none}
+STORAGE_COMBOS="hpos:no hpos:yes legacy:yes legacy:no"
+STORAGE_SUITES="test-payment-orders.php test-payment-health.php"
+PKG=blaze-mcp-toolkit-for-woocommerce
 mkdir -p "$OUT_DIR"
+
+zip=$(sed -n 's/^ZIP=//p' "$SUMMARY")
+commit=$(sed -n 's/^COMMIT=//p' "$SUMMARY")
+window_file=$(sed -n 's/^WINDOW_FILE=//p' "$SUMMARY")
+run_sha=$(sed -n 's/^ZIP_SHA256=//p' "$SUMMARY")
+run_version=$(sed -n 's/^VERSION=//p' "$SUMMARY")
+perf_file=$(sed -n 's/^PERF_FILE=//p' "$SUMMARY")
+zip_sha=$(shasum -a 256 "$zip" 2>/dev/null | awk '{print $1}')
+zip_version=$(unzip -p "$zip" "$PKG/$PKG.php" 2>/dev/null | sed -n 's/^ \* Version:[[:space:]]*//p' | head -1 | tr -d '\r')
+zip_constant=$(unzip -p "$zip" "$PKG/$PKG.php" 2>/dev/null | sed -n "s/.*define( *'BLZMCP_VERSION', *'\([^']*\)'.*/\1/p" | head -1)
+zip_stable=$(unzip -p "$zip" "$PKG/readme.txt" 2>/dev/null | sed -n 's/^Stable tag:[[:space:]]*//p' | head -1 | tr -d '\r')
+label=${zip_version:-unknown}
 if [ -n "${BLZMCP_MATRIX_OUT:-}" ]; then
 	OUT=$BLZMCP_MATRIX_OUT
 	[ ! -e "$OUT" ] || { echo "MATRIX RECORD REFUSED: $OUT already exists"; exit 4; }
 else
-	base="$OUT_DIR/v1.1-matrix-$(date -u +%Y-%m-%d)"
+	base="$OUT_DIR/v$label-matrix-$(date -u +%Y-%m-%d)"
 	OUT="$base.md"
 	n=2
 	while [ -e "$OUT" ]; do
@@ -34,10 +64,6 @@ else
 		n=$((n + 1))
 	done
 fi
-
-zip=$(sed -n 's/^ZIP=//p' "$SUMMARY")
-commit=$(sed -n 's/^COMMIT=//p' "$SUMMARY")
-window_file=$(sed -n 's/^WINDOW_FILE=//p' "$SUMMARY")
 # Tie the zip to the evidence commit (see the header): byte identity for every shipped file,
 # vendored commerce files against vendor-src/, and an inventory of what must be present.
 PKG=blaze-mcp-toolkit-for-woocommerce
@@ -93,13 +119,68 @@ rm -rf "$check_dir"
 [ "$same" -gt 0 ] || differ+=("(no tracked files matched)")
 [ "$vendored" -gt 0 ] || differ+=("(no vendored commerce files matched)")
 for m in "${missing[@]}"; do differ+=("$m (missing from zip)"); done
+# Candidate identity: the run's hash and version label must be this zip's.
+[ -n "$run_sha" ] && [ "$run_sha" == "$zip_sha" ] || differ+=("(candidate SHA-256 differs from the run's: run ${run_sha:-none}, zip ${zip_sha:-unreadable})")
+[ -n "$run_version" ] && [ "$run_version" == "$zip_version" ] || differ+=("(run labelled version ${run_version:-none}, candidate header is ${zip_version:-none})")
+[ -n "$zip_version" ] && [ "$zip_version" == "$zip_constant" ] && [ "$zip_version" == "$zip_stable" ] || differ+=("(version mismatch in the zip: header ${zip_version:-none}, BLZMCP_VERSION ${zip_constant:-none}, readme Stable tag ${zip_stable:-none})")
 [ "${#differ[@]}" -eq 0 ] || VERDICT=FAILED
+
+# Evidence completeness: required states ran, storage combinations ran, performance receipt bound.
+incomplete=()
+for s in $REQUIRED_STATES; do
+	r=$(grep "^STATE=$s|" "$SUMMARY" | head -1 | cut -d'|' -f2)
+	case "$r" in
+	PASSED | FAILED) ;;
+	*) incomplete+=("state $s did not run (${r:-no STATE line})") ;;
+	esac
+	[ "$s" == none ] && continue
+	for c in $STORAGE_COMBOS; do
+		for f in $STORAGE_SUITES; do
+			sr=$(grep -F "STORAGE=$s|$c|$f|" "$SUMMARY" | head -1 | cut -d'|' -f4)
+			case "$sr" in
+			PASSED) ;;
+			FAILED) VERDICT=FAILED ;;
+			*) incomplete+=("storage $s $c $f did not run (${sr:-no STORAGE line})") ;;
+			esac
+		done
+	done
+done
+perf_ok=0
+if [ -z "$perf_file" ] || [ ! -f "$perf_file" ] || ! jq -e '.schema == "blzmcp-payment-performance/1"' "$perf_file" >/dev/null 2>&1; then
+	incomplete+=("no performance receipt (PERF_FILE)")
+elif [ "$(jq -r '.candidate_sha256 // ""' "$perf_file")" != "$zip_sha" ]; then
+	incomplete+=("performance receipt is not bound to this zip (candidate_sha256 $(jq -r '.candidate_sha256 // "none"' "$perf_file"))")
+else
+	pmissing=$(jq -r '[("legacy", "hpos") as $s | (24, 168) as $w | ("file", "db") as $l | . as $r
+		| ($r.partitions | map(select(.storage == $s and .window == $w and .logger == $l and (.trials_ms | length) == 5 and .complete == true)) | length) as $n
+		| select($n != 1) | "\($s)/\($w)h/\($l)"] | join(", ")' "$perf_file")
+	hmissing=$(jq -r '[("legacy", "hpos") as $s | (24, 168) as $w | ("cold", "warm") as $k | . as $r
+		| ((($r.http // []) | map(select(.storage == $s and .window == $w and .kind == $k and .http_code == "200" and .valid_body == true and ((.total_ms | type) == "number")))) | length) as $n
+		| select($n < 1) | "\($s)/\($w)h/\($k)"] | join(", ")' "$perf_file")
+	if [ -n "$pmissing" ]; then
+		incomplete+=("performance partitions incomplete: $pmissing")
+	elif [ -n "$hmissing" ]; then
+		incomplete+=("performance receipt has no HTTP latency figure for: $hmissing")
+	elif [ "$(jq -r '.all_pass and ([.partitions[].max_ms] | all(. < 1500))' "$perf_file")" != true ]; then
+		incomplete+=("performance budget missed: $(jq -r '[.partitions[] | select(.max_ms >= 1500) | "\(.storage)/\(.window)h/\(.logger) \(.max_ms) ms"] | join(", ")' "$perf_file")")
+	else
+		perf_ok=1
+	fi
+fi
+[ "${#incomplete[@]}" -eq 0 ] || VERDICT=FAILED
 name_commit=$(basename "$zip" .zip | sed -n 's/^candidate-//p')
 dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommerce.php uninstall.php readme.txt vendor-src | wc -l | tr -d ' ')
+TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 {
-	echo "# Blaze MCP Toolkit 1.1 — real-plugin matrix"
+	echo "# Blaze MCP Toolkit $label - real-plugin matrix"
 	echo
 	echo "- Result: **MATRIX $VERDICT**"
+	echo "- Candidate version: $label (header, BLZMCP_VERSION and readme Stable tag: ${zip_version:-none} / ${zip_constant:-none} / ${zip_stable:-none})"
+	if [ "${#incomplete[@]}" -eq 0 ]; then
+		echo "- Evidence: complete (states $REQUIRED_STATES; payment storage loop in every combination; performance receipt bound to this zip)"
+	else
+		echo "- Evidence: **INCOMPLETE** in ${#incomplete[@]} item(s): ${incomplete[*]:0:20}"
+	fi
 	echo "- Run (UTC): $(date -u '+%Y-%m-%d %H:%M')"
 	echo "- Git commit: \`$commit\`$([ "$dirty" != 0 ] && echo " (WARNING: $dirty uncommitted change(s) under src/ or the plugin files at record time)")"
 	echo "- Candidate: \`$(basename "$zip")\` (build commit per its name: \`${name_commit:-unknown}\`)"
@@ -131,6 +212,30 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 		echo "| $state | $result | $p | $f | ${wpv:-?} | ${phpv:-?} | ${active:-?} |"
 	done
 	echo
+	echo "## Payment health order storage"
+	echo
+	echo "| State | Authority:sync | Suite | Result | Passed | Failed |"
+	echo "|---|---|---|---|---|---|"
+	grep '^STORAGE=' "$SUMMARY" | sed 's/^STORAGE=//' | while IFS='|' read -r state combo suite result p f; do
+		echo "| $state | $combo | $suite | $result | $p | $f |"
+	done
+	echo
+	echo "## Payment health cold performance"
+	echo
+	if [ -n "$perf_file" ] && [ -f "$perf_file" ]; then
+		echo "- Receipt SHA-256: \`$(shasum -a 256 "$perf_file" | awk '{print $1}')\`; budget $(jq -r '.budget_ms' "$perf_file") ms per partition (maximum of the trials); $(jq -r '.meaning' "$perf_file")"
+		echo "- Seed: $(jq -r '"\(.seed.recent_orders) recent checkout orders over \(.seed.horizon_days) days + \(.seed.older_orders) older, methods \(.seed.methods | join(", "))"' "$perf_file")"
+		echo
+		echo "| Storage | Window | Logger | Max ms | Trials (ms) | Warm max ms | Pass |"
+		echo "|---|---|---|---|---|---|---|"
+		jq -r '.partitions[] | "| \(.storage) | \(.window)h | \(.logger) | \(.max_ms) | \(.trials_ms | map(tostring) | join(", ")) | \(.warm_ms_max) | \(.pass) |"' "$perf_file"
+		echo
+		echo "- HTTP latency (abilities REST route, ms): $(jq -r '(.http // []) | map("\(.storage)/\(.window)h/\(.kind) \(.total_ms)") | join(", ") | if . == "" then "none" else . end' "$perf_file")"
+		echo "- Background jobs timed on: $(jq -r '.jobs_path // "not recorded"' "$perf_file")"
+	else
+		echo "- (no performance receipt)"
+	fi
+	echo
 	echo "## Coverage notes"
 	echo
 	echo "- NOT COVERED: Easy MCP AI's auto-tick after an admin visits its Tools screen. On a store seeded before 1.1, Easy MCP AI did not tick the newly annotated wc-analytics tools on its own (its tool policy only records once that screen has been visited). Such stores rely on the setup screen's easy_tools_on row, which tells the owner to tick the analytics tools; the matrix asserts that row warns and names them."
@@ -146,7 +251,7 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 	lines=$(for f in "$log_dir"/*.log; do
 		[ -f "$f" ] || continue
 		grep -E '^(FAIL|INCOMPLETE COVERAGE|TRANSPORT UNREACHABLE|WINDOW CHANGED|CLEANUP ERROR|NOTE)' "$f" | cut -c1-300 | sed "s|^|$(basename "$f" .log): |"
-	done | sort -u)
+	done | sed -E 's#(/(Users|home|private|var|tmp|opt|root)/[^ )"'"'"']*)#<path>#g' | sort -u)
 	if [ -n "$lines" ]; then
 		printf '%s\n' "$lines" | sed 's/^/- /'
 	else
@@ -158,9 +263,22 @@ dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommer
 	grep '^STATE=' "$SUMMARY" | sed 's/^STATE=//' | while IFS='|' read -r state _ _ _ _ _ plugins; do
 		echo "- **$state**: \`$(jq -c '.' <<<"${plugins:-[]}" 2>/dev/null)\`"
 	done
-} >"$OUT"
+} >"$TMP_OUT"
+# Privacy scan of the finished record: nothing local, no auth material, no real e-mail address.
+leaks=$(grep -nE -e "${HOME:-/nonexistent-home}" -e '/(Users|home)/[A-Za-z0-9._-]+' -e 'Authorization:|Bearer [A-Za-z0-9]|SECRET=|password=|app_password|sk_(live|test)_|whsec_' "$TMP_OUT" | cut -c1-80)
+emails=$(grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$TMP_OUT" | grep -vE '@example\.invalid$' | head -3)
+if [ -n "$leaks" ] || [ -n "$emails" ]; then
+	rm -f "$TMP_OUT"
+	echo "MATRIX RECORD REFUSED: the record would contain local or private data (lines: $(printf '%s' "$leaks" | cut -d: -f1 | paste -sd, -)${emails:+; e-mail addresses})"
+	exit 5
+fi
+mv "$TMP_OUT" "$OUT"
 echo "Evidence: $OUT"
 if [ "${#differ[@]}" -ne 0 ]; then
 	echo "CANDIDATE DOES NOT MATCH THE EVIDENCE COMMIT: ${#differ[@]} item(s): ${differ[*]:0:20}"
 	exit 3
+fi
+if [ "${#incomplete[@]}" -ne 0 ]; then
+	echo "EVIDENCE INCOMPLETE: ${#incomplete[@]} item(s): ${incomplete[*]:0:20}"
+	exit 5
 fi

@@ -107,6 +107,74 @@ final class Blzmcp_Test_Throw_Ability extends AbstractAbility {
 	}
 }
 
+/**
+ * Test-only ability with a settable cache context. The context can also derive from the current
+ * user's effective capability, or throw.
+ */
+final class Blzmcp_Test_Context_Ability extends AbstractAbility {
+	public const NAME = 'blaze-mcp-toolkit/test-context';
+
+	public static int $runs = 0;
+
+	public static int $context_calls = 0;
+
+	/** @var array<string, mixed> */
+	public static array $context = array();
+
+	public static bool $with_capability = false;
+
+	public static bool $throw = false;
+
+	protected static function label(): string {
+		return 'Test context';
+	}
+
+	protected static function description(): string {
+		return 'Integration-test ability with a cache context.';
+	}
+
+	protected static function input_schema(): array {
+		return array(
+			'type'                 => 'object',
+			'properties'           => array( 'message' => array( 'type' => 'string' ) ),
+			'additionalProperties' => false,
+		);
+	}
+
+	protected static function output_schema(): array {
+		return array( 'type' => 'object' );
+	}
+
+	protected static function can(): bool {
+		return current_user_can( 'manage_options' );
+	}
+
+	protected static function cache_context(): array {
+		++self::$context_calls;
+		if ( self::$throw ) {
+			throw new \RuntimeException( 'context secret /var/www/html/wp-config.php' );
+		}
+		$context = self::$context;
+		if ( self::$with_capability ) {
+			$context['diagnostics'] = current_user_can( 'blzmcp_test_diagnostics' );
+		}
+		return $context;
+	}
+
+	public static function key_for( array $input ): string {
+		return self::cache_key( $input );
+	}
+
+	protected static function run( array $input ): array|\WP_Error {
+		++self::$runs;
+		return array(
+			'checked_at' => 'run-' . self::$runs,
+			'context'    => self::$context,
+			'items'      => array( 1 ),
+		);
+	}
+}
+
 global $wpdb, $wp_filter;
 $table = $wpdb->prefix . 'blzmcp_audit';
 
@@ -120,6 +188,7 @@ $saved = $wp_filter['wp_abilities_api_init'] ?? null;
 unset( $wp_filter['wp_abilities_api_init'] );
 add_action( 'wp_abilities_api_init', array( Blzmcp_Test_Echo_Ability::class, 'register' ) );
 add_action( 'wp_abilities_api_init', array( Blzmcp_Test_Throw_Ability::class, 'register' ) );
+add_action( 'wp_abilities_api_init', array( Blzmcp_Test_Context_Ability::class, 'register' ) );
 do_action( 'wp_abilities_api_init', WP_Abilities_Registry::get_instance() );
 unset( $wp_filter['wp_abilities_api_init'] );
 if ( null !== $saved ) {
@@ -268,7 +337,136 @@ blzmcp_it_assert( $purged >= 2345, 'batched purge reports all deleted rows (got 
 blzmcp_it_equals( 0, $count( 'blaze-mcp-toolkit/test-bulk' ), 'batched purge removes every old row' );
 blzmcp_it_equals( 1, $count( 'blaze-mcp-toolkit/test-fresh' ), 'batched purge keeps the fresh row' );
 
+// Cache context: an empty context keeps the original key bytes.
+wp_set_current_user( $admins[0]->ID );
+$legacy_roles = array_map( 'strval', (array) wp_get_current_user()->roles );
+sort( $legacy_roles );
+$legacy_key = AbstractAbility::CACHE_PREFIX . md5( Blzmcp_Test_Echo_Ability::NAME . wp_json_encode( AuditLog::normalise( array( 'message' => $unique ) ) ) . implode( ',', $legacy_roles ) );
+blzmcp_it_equals( $legacy_key, Blzmcp_Test_Echo_Ability::key_for( array( 'message' => $unique ) ), 'empty cache context keeps the 1.1 key bytes' );
+
+$ctx_ability = wp_get_ability( Blzmcp_Test_Context_Ability::NAME );
+blzmcp_it_assert( $ctx_ability instanceof WP_Ability, 'test-context ability is registered' );
+$ctx_input = array( 'message' => $unique );
+$ctx_keys  = array();
+$ctx_key   = static function ( array $context ) use ( $ctx_input, &$ctx_keys ): string {
+	Blzmcp_Test_Context_Ability::$context = $context;
+	$key                                  = Blzmcp_Test_Context_Ability::key_for( $ctx_input );
+	$ctx_keys[]                           = $key;
+	return $key;
+};
+blzmcp_it_cleanup(
+	static function () use ( &$ctx_keys ) {
+		foreach ( array_unique( $ctx_keys ) as $k ) {
+			delete_transient( $k );
+		}
+	}
+);
+$empty_ctx_key = $ctx_key( array() );
+$on_key        = $ctx_key( array( 'diag' => true, 'blog' => 1 ) );
+blzmcp_it_assert( $on_key !== $empty_ctx_key, 'a non-empty cache context changes the key' );
+blzmcp_it_equals( $on_key, $ctx_key( array( 'blog' => 1, 'diag' => true ) ), 'cache context key order does not change the key' );
+blzmcp_it_assert( $on_key !== $ctx_key( array( 'diag' => false, 'blog' => 1 ) ), 'a changed context value changes the key' );
+blzmcp_it_assert( $on_key !== $ctx_key( array( 'diag' => true, 'blog' => 2 ) ), 'a different blog ID changes the key' );
+blzmcp_it_assert( 1 === preg_match( '/^' . AbstractAbility::CACHE_PREFIX . '[0-9a-f]{32}$/', $on_key ), 'context keys keep the blzmcp_c_ prefix and md5 shape' );
+
+// Late-static dispatch through execute(): context resolved per call, changes miss without a flush.
+foreach ( array( $on_key, $ctx_key( array( 'diag' => false, 'blog' => 1 ) ) ) as $k ) {
+	delete_transient( $k );
+}
+Blzmcp_Test_Context_Ability::$runs          = 0;
+Blzmcp_Test_Context_Ability::$context_calls = 0;
+Blzmcp_Test_Context_Ability::$context       = array( 'diag' => true, 'blog' => 1 );
+$first = $ctx_ability->execute( $ctx_input );
+$again = $ctx_ability->execute( $ctx_input );
+blzmcp_it_equals( 1, Blzmcp_Test_Context_Ability::$runs, 'identical context and input is a cache hit' );
+blzmcp_it_equals( 'run-1', is_array( $again ) ? ( $again['checked_at'] ?? null ) : null, 'cache hit reuses the original checked_at' );
+blzmcp_it_assert( Blzmcp_Test_Context_Ability::$context_calls >= 2, 'cache context is resolved by execute() through static dispatch' );
+Blzmcp_Test_Context_Ability::$context = array( 'diag' => false, 'blog' => 1 );
+$down = $ctx_ability->execute( $ctx_input );
+blzmcp_it_equals( 2, Blzmcp_Test_Context_Ability::$runs, 'context on-to-off misses the cache without a flush' );
+blzmcp_it_equals( array( 'diag' => false, 'blog' => 1 ), is_array( $down ) ? ( $down['context'] ?? null ) : null, 'downgraded context gets its own result, not the privileged one' );
+Blzmcp_Test_Context_Ability::$context = array( 'diag' => true, 'blog' => 1 );
+$up = $ctx_ability->execute( $ctx_input );
+blzmcp_it_equals( 2, Blzmcp_Test_Context_Ability::$runs, 'context off-to-on reuses the still-valid on entry' );
+blzmcp_it_equals( 'run-1', is_array( $up ) ? ( $up['checked_at'] ?? null ) : null, 'restored context returns its own original checked_at' );
+delete_transient( $on_key );
+$regen = $ctx_ability->execute( $ctx_input );
+blzmcp_it_equals( 3, Blzmcp_Test_Context_Ability::$runs, 'expired or absent cache regenerates' );
+blzmcp_it_equals( 'run-3', is_array( $regen ) ? ( $regen['checked_at'] ?? null ) : null, 'regenerated result has a new checked_at' );
+blzmcp_it_equals( is_array( $first ) ? $first['checked_at'] : 'x', 'run-1', 'first call ran fresh' );
+
+// Identical roles, different effective capability: context derived from the capability splits the key.
+Blzmcp_Test_Context_Ability::$context         = array();
+Blzmcp_Test_Context_Ability::$with_capability = true;
+wp_set_current_user( $admins[0]->ID );
+$cap_user = wp_get_current_user(); // The live current-user object, so cap changes apply at once.
+blzmcp_it_cleanup(
+	static function () use ( $cap_user ) {
+		$cap_user->remove_cap( 'blzmcp_test_diagnostics' );
+	}
+);
+$cap_user->remove_cap( 'blzmcp_test_diagnostics' );
+$roles_before = $cap_user->roles;
+$no_cap_key   = Blzmcp_Test_Context_Ability::key_for( $ctx_input );
+$cap_user->add_cap( 'blzmcp_test_diagnostics' );
+blzmcp_it_assert( current_user_can( 'blzmcp_test_diagnostics' ) && $roles_before === $cap_user->roles, 'capability fixture: same roles, capability granted' );
+$cap_key = Blzmcp_Test_Context_Ability::key_for( $ctx_input );
+$cap_user->remove_cap( 'blzmcp_test_diagnostics' );
+$ctx_keys[] = $no_cap_key;
+$ctx_keys[] = $cap_key;
+blzmcp_it_assert( $no_cap_key !== $cap_key, 'same roles with different effective capability get different keys' );
+Blzmcp_Test_Context_Ability::$with_capability = false;
+
+// Denied caller: never executes, so the context is not resolved and nothing is served from cache.
+Blzmcp_Test_Context_Ability::$context = array( 'diag' => true, 'blog' => 1 );
+$ctx_ability->execute( $ctx_input ); // Re-seed the privileged entry.
+wp_set_current_user( $sub_id );
+$runs_before  = Blzmcp_Test_Context_Ability::$runs;
+$calls_before = Blzmcp_Test_Context_Ability::$context_calls;
+$denied_ctx   = $ctx_ability->execute( $ctx_input );
+blzmcp_it_assert( is_wp_error( $denied_ctx ), 'denied caller of a context ability gets a WP_Error' );
+blzmcp_it_equals( $runs_before, Blzmcp_Test_Context_Ability::$runs, 'denied caller never reaches run()' );
+blzmcp_it_equals( $calls_before, Blzmcp_Test_Context_Ability::$context_calls, 'denied caller never resolves the cache context' );
+blzmcp_it_equals( 1, $count( Blzmcp_Test_Context_Ability::NAME, 'denied' ), 'denied context call is audited once' );
+wp_set_current_user( $admins[0]->ID );
+
+// Throwing context: generic error, one error row, no run, no cache read or write, no leak.
+set_transient( $ctx_key( array() ), array( 'checked_at' => 'poisoned' ), 300 );
+$errors_before                      = $count( Blzmcp_Test_Context_Ability::NAME, 'error' );
+$runs_before                        = Blzmcp_Test_Context_Ability::$runs;
+Blzmcp_Test_Context_Ability::$throw = true;
+$logged                             = array();
+add_filter( 'woocommerce_logger_log_message', $log_filter, 10, 3 );
+$ctx_thrown = $ctx_ability->execute( $ctx_input );
+remove_filter( 'woocommerce_logger_log_message', $log_filter, 10 );
+Blzmcp_Test_Context_Ability::$throw = false;
+blzmcp_it_assert( is_wp_error( $ctx_thrown ) && 'blzmcp_ability_failed' === $ctx_thrown->get_error_code(), 'throwing cache context returns the generic WP_Error' );
+blzmcp_it_assert( is_wp_error( $ctx_thrown ) && ! str_contains( $ctx_thrown->get_error_message(), 'wp-config' ), 'throwing cache context does not leak its message' );
+blzmcp_it_equals( $runs_before, Blzmcp_Test_Context_Ability::$runs, 'throwing cache context never runs the ability' );
+blzmcp_it_equals( $errors_before + 1, $count( Blzmcp_Test_Context_Ability::NAME, 'error' ), 'throwing cache context writes one error row' );
+$ctx_trace = implode( "\n", array_column( $logged, 1 ) );
+blzmcp_it_assert( str_contains( $ctx_trace, 'RuntimeException' ) && ! str_contains( $ctx_trace, 'context secret' ), 'throwing cache context is logged by class only' );
+
+// Invalid context values (object, non-finite float) fail the same way and never fall back to a shared key.
+foreach ( array( 'object' => array( 'o' => new stdClass() ), 'nested object' => array( 'a' => array( 'b' => new ArrayObject() ) ), 'NAN' => array( 'f' => NAN ), 'INF' => array( 'f' => INF ) ) as $label => $bad ) {
+	Blzmcp_Test_Context_Ability::$context = $bad;
+	$errors_before                        = $count( Blzmcp_Test_Context_Ability::NAME, 'error' );
+	$runs_before                          = Blzmcp_Test_Context_Ability::$runs;
+	$bad_result                           = $ctx_ability->execute( $ctx_input );
+	blzmcp_it_assert( is_wp_error( $bad_result ) && 'blzmcp_ability_failed' === $bad_result->get_error_code(), "invalid cache context ({$label}) returns the generic WP_Error, not the poisoned shared entry" );
+	blzmcp_it_equals( $runs_before, Blzmcp_Test_Context_Ability::$runs, "invalid cache context ({$label}) never runs the ability" );
+	blzmcp_it_equals( $errors_before + 1, $count( Blzmcp_Test_Context_Ability::NAME, 'error' ), "invalid cache context ({$label}) writes one error row" );
+}
+Blzmcp_Test_Context_Ability::$context = array( 'ok' => 1.5, 'n' => null, 'list' => array( 'a', 2, false ) );
+$valid_mixed                          = $ctx_ability->execute( $ctx_input );
+$ctx_key( Blzmcp_Test_Context_Ability::$context );
+blzmcp_it_assert( is_array( $valid_mixed ), 'finite floats, null and nested lists are a valid context' );
+blzmcp_it_equals( array( 'checked_at' => 'poisoned' ), get_transient( $ctx_key( array() ) ), 'failed context calls leave other cache entries untouched' );
+
 // Cleanup.
+foreach ( array_unique( $ctx_keys ) as $k ) {
+	delete_transient( $k );
+}
 foreach ( array( array( 'message' => $unique ), array( 'extra' => 'x', 'message' => $unique ) ) as $cached_input ) {
 	delete_transient( Blzmcp_Test_Echo_Ability::key_for( $cached_input ) );
 }

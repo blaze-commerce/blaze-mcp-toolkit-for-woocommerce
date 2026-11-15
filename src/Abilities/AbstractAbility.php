@@ -91,6 +91,20 @@ abstract class AbstractAbility {
 	}
 
 	/**
+	 * Extra facts the cached result depends on beyond input and roles, e.g. effective permissions,
+	 * blog ID or store configuration. Empty by default, which keeps the original cache key.
+	 *
+	 * Values must be scalars, null or nested arrays of them. Resolved before the transient is read;
+	 * a throwing or invalid context fails the call through the base error path and is never cached.
+	 * This is not an authorisation check: permission() still runs before execute().
+	 *
+	 * @return array<string, mixed>
+	 */
+	protected static function cache_context(): array {
+		return array();
+	}
+
+	/**
 	 * Register with the Abilities API. Must run on wp_abilities_api_init.
 	 */
 	public static function register(): void {
@@ -193,8 +207,19 @@ abstract class AbstractAbility {
 		$input   = self::to_array( $input );
 		$user_id = get_current_user_id();
 		$ttl     = static::cache_ttl();
-		$key     = $ttl > 0 ? self::cache_key( $input ) : '';
 		$start   = hrtime( true );
+
+		try {
+			$key = $ttl > 0 ? self::cache_key( $input ) : '';
+		} catch ( \Throwable $e ) {
+			// A broken cache context must never fall back to a shared key.
+			self::log_exception( $e );
+			AuditLog::record( $user_id, static::NAME, $input, 0, self::elapsed_ms( $start ), 'error' );
+			return new \WP_Error(
+				'blzmcp_ability_failed',
+				__( 'This tool could not complete. Please try again later.', 'blaze-mcp-toolkit-for-woocommerce' )
+			);
+		}
 
 		if ( '' !== $key ) {
 			$cached = get_transient( $key );
@@ -232,15 +257,52 @@ abstract class AbstractAbility {
 	}
 
 	/**
-	 * Cache key: name + normalised input + the current user's sorted roles.
+	 * Cache key: name + normalised input + the current user's sorted roles, plus the normalised
+	 * cache context when the ability supplies one. An empty context gives the original key bytes.
 	 *
 	 * @param array $input Input.
+	 * @throws \UnexpectedValueException When the cache context holds a non-encodable value.
 	 */
 	protected static function cache_key( array $input ): string {
 		$roles = array_map( 'strval', (array) wp_get_current_user()->roles );
 		sort( $roles );
 
-		return self::CACHE_PREFIX . md5( static::NAME . wp_json_encode( AuditLog::normalise( $input ) ) . implode( ',', $roles ) );
+		$material = static::NAME . wp_json_encode( AuditLog::normalise( $input ) ) . implode( ',', $roles );
+
+		$context = static::cache_context();
+		if ( array() !== $context ) {
+			self::assert_context( $context );
+			$encoded = wp_json_encode( AuditLog::normalise( $context ) );
+			if ( ! is_string( $encoded ) ) {
+				throw new \UnexpectedValueException( 'Cache context cannot be encoded.' );
+			}
+			// The NUL separator cannot occur in a role slug, so context keys never collide with empty-context keys.
+			$material .= "\0context:" . $encoded;
+		}
+
+		return self::CACHE_PREFIX . md5( $material );
+	}
+
+	/**
+	 * Reject cache context values that do not encode deterministically.
+	 *
+	 * @param array $context Cache context.
+	 * @throws \UnexpectedValueException On an object, resource or non-finite number.
+	 */
+	private static function assert_context( array $context ): void {
+		foreach ( $context as $value ) {
+			if ( is_array( $value ) ) {
+				self::assert_context( $value );
+				continue;
+			}
+			if ( null === $value || is_bool( $value ) || is_int( $value ) || is_string( $value ) ) {
+				continue;
+			}
+			if ( is_float( $value ) && is_finite( $value ) ) {
+				continue;
+			}
+			throw new \UnexpectedValueException( 'Cache context holds an unsupported value.' );
+		}
 	}
 
 	/**

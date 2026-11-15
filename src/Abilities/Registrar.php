@@ -32,6 +32,7 @@ final class Registrar {
 		HealthSummary::class,
 		UpdateHistory::class,
 		AccessCheck::class,
+		PaymentHealth::class,
 		WeeklyStoreReview::class,
 		RevenueDropTriage::class,
 		FailedOrderTriage::class,

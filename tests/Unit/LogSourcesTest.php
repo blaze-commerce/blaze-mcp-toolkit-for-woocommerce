@@ -262,4 +262,89 @@ final class LogSourcesTest extends TestCase {
 			$this->assertTrue( $s['readable'], var_export( $v, true ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export
 		}
 	}
+
+	// ---------------------------------------------------------------- payment-health structured reader.
+
+	private function wc_file( string $dir, string $name, string $content ): string {
+		$path = $dir . '/' . $name;
+		file_put_contents( $path, $content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		return $path;
+	}
+
+	public function test_source_files_match_exact_source_and_rotation(): void {
+		$dir = $this->tmp_dir();
+		$this->wc_file( $dir, 'woocommerce-gateway-stripe-2026-11-14-abc123.log', "x\n" );
+		$this->wc_file( $dir, 'woocommerce-gateway-stripe.1-2026-11-13-abc123.log', "x\n" );
+		$this->wc_file( $dir, 'woocommerce-gateway-stripe-extra-2026-11-14-abc123.log', "x\n" );
+		$this->wc_file( $dir, 'my-woocommerce-gateway-stripe-2026-11-14-abc123.log', "x\n" );
+		$this->wc_file( $dir, 'woocommerce-gateway-stripe.log', "x\n" );
+		$r = LogSources::source_files( array( 'woocommerce-gateway-stripe' ), 0, $dir );
+		$this->assertTrue( $r['ok'] );
+		$this->assertCount( 2, $r['files'], 'exact source and its rotation only' );
+		$this->assertFalse( $r['truncated'] );
+		foreach ( $r['files'] as $f ) {
+			$this->assertSame( 'woocommerce-gateway-stripe', $f['source'] );
+		}
+	}
+
+	public function test_source_files_reports_missing_directory_and_no_source(): void {
+		$missing = LogSources::source_files( array( 'woocommerce-gateway-stripe' ), 0, sys_get_temp_dir() . '/blzmcp_missing_' . uniqid() );
+		$this->assertFalse( $missing['ok'] );
+		$this->assertSame( 'log_directory_unavailable', $missing['reason'] );
+		$this->assertFalse( LogSources::source_files( array( 'x1' ), 0, 'php://memory' )['ok'], 'streams are never a log directory' );
+
+		$empty = LogSources::source_files( array( 'woocommerce-gateway-stripe' ), 0, $this->tmp_dir() );
+		$this->assertTrue( $empty['ok'] );
+		$this->assertSame( array(), $empty['files'], 'readable directory, no matching source' );
+	}
+
+	public function test_source_files_cap_and_since(): void {
+		$dir = $this->tmp_dir();
+		for ( $i = 1; $i <= 9; $i++ ) {
+			$p = $this->wc_file( $dir, sprintf( 'woocommerce-gateway-stripe-2026-11-%02d-abc.log', $i ), "x\n" );
+			touch( $p, 1794000000 + $i * 86400 );
+		}
+		$r = LogSources::source_files( array( 'woocommerce-gateway-stripe' ), 0, $dir );
+		$this->assertCount( LogSources::MAX_WC_FILES, $r['files'] );
+		$this->assertTrue( $r['truncated'], 'cap is reported, not silent' );
+		$this->assertStringContainsString( '2026-11-09', $r['files'][0]['path'], 'newest first' );
+		$recent = LogSources::source_files( array( 'woocommerce-gateway-stripe' ), 1794000000 + 8 * 86400, $dir );
+		$this->assertCount( 2, $recent['files'] );
+		$this->assertFalse( $recent['truncated'] );
+	}
+
+	public function test_source_files_rejects_escaping_symlink(): void {
+		$dir     = $this->tmp_dir();
+		$outside = $this->tmp_file( "2026-11-14T20:05:00+00:00 ERROR secret\n" );
+		symlink( $outside, $dir . '/woocommerce-gateway-stripe-2026-11-14-abc.log' );
+		$this->cleanup[] = $dir . '/woocommerce-gateway-stripe-2026-11-14-abc.log';
+		$r               = LogSources::source_files( array( 'woocommerce-gateway-stripe' ), 0, $dir );
+		$this->assertSame( array(), $r['files'] );
+		$this->assertTrue( $r['truncated'], 'a skipped candidate makes the listing incomplete' );
+		$this->assertSame( 'file_unreadable', $r['reason'] );
+	}
+
+	public function test_read_bounded_flags_partial_and_failures(): void {
+		$f    = $this->tmp_file( "first line cut\nsecond\nthird\n" );
+		$real = realpath( $f );
+		$full = LogSources::read_bounded( $f, 1000, array( $real ) );
+		$this->assertTrue( $full['ok'] );
+		$this->assertFalse( $full['partial'] );
+		$this->assertSame( array( 'first line cut', 'second', 'third' ), $full['lines'] );
+
+		$cut = LogSources::read_bounded( $f, 10, array( $real ) );
+		$this->assertTrue( $cut['partial'] );
+		$this->assertSame( array( 'third' ), $cut['lines'], 'partial first line dropped' );
+
+		$this->assertFalse( LogSources::read_bounded( $f, 1000, array() )['ok'], 'not on the allow list' );
+		$this->assertFalse( LogSources::read_bounded( '/dev/null', 1000, array( '/dev/null' ) )['ok'], 'device' );
+		$this->assertFalse( LogSources::read_bounded( $f . '/../' . basename( $f ) . 'x', 1000, array( $real ) )['ok'], 'traversal to a missing file' );
+
+		$empty = LogSources::read_bounded( $this->tmp_file( '' ), 1000, array( realpath( end( $this->cleanup ) ) ) );
+		$this->assertTrue( $empty['ok'], 'empty readable file is a successful read' );
+		$this->assertSame( array(), $empty['lines'] );
+
+		unlink( $f ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
+		$this->assertFalse( LogSources::read_bounded( $f, 1000, array( $real ) )['ok'], 'file disappearing after discovery' );
+	}
 }

@@ -142,6 +142,122 @@ final class JobsHealth {
 	}
 
 	/**
+	 * Failed actions for payment health: hooks named in $hooks or in a group named in $groups,
+	 * whose last attempt falls in [$since, $now). Additive; summary() is unchanged.
+	 *
+	 * The database store gives one grouped query with exact counts. Any other store gives a
+	 * bounded sample of the newest SAMPLE failed actions, flagged exact false (a lower bound).
+	 * Never runs, cancels or reschedules an action and never reads arguments or log messages.
+	 *
+	 * @param string[] $hooks  Literal hook names.
+	 * @param string[] $groups Literal group slugs.
+	 * @param int      $since  Window start (Unix time).
+	 * @param int      $now    Window end, exclusive.
+	 * @return array{available:bool,read_failed:bool,exact:bool,rows:array<int,array{hook:string,group:string,count:int}>}
+	 */
+	public static function payment_failures( array $hooks, array $groups, int $since, int $now ): array {
+		$out = array(
+			'available'   => false,
+			'read_failed' => false,
+			'exact'       => false,
+			'rows'        => array(),
+		);
+		if ( array() === $hooks && array() === $groups ) {
+			$out['available'] = true;
+			$out['exact']     = true;
+			return $out;
+		}
+		if ( ! self::available() ) {
+			return $out;
+		}
+		if ( class_exists( '\ActionScheduler_DBStore' ) && method_exists( '\ActionScheduler', 'store' ) && \ActionScheduler::store() instanceof \ActionScheduler_DBStore ) {
+			$rows = self::payment_failures_db( $hooks, $groups, $since, $now );
+			if ( false === $rows ) {
+				return array( 'read_failed' => true ) + $out;
+			}
+			return array(
+				'available'   => true,
+				'read_failed' => false,
+				'exact'       => true,
+				'rows'        => $rows,
+			);
+		}
+
+		$actions = self::sample(
+			array(
+				'status'           => 'failed',
+				'modified'         => $since,
+				'modified_compare' => '>=',
+			)
+		);
+		if ( false === $actions ) {
+			return array( 'read_failed' => true ) + $out;
+		}
+		$counts = array();
+		foreach ( $actions as $action ) {
+			$hook  = is_object( $action ) && method_exists( $action, 'get_hook' ) ? (string) $action->get_hook() : '';
+			$group = is_object( $action ) && method_exists( $action, 'get_group' ) ? (string) $action->get_group() : '';
+			if ( ! in_array( $hook, $hooks, true ) && ! in_array( $group, $groups, true ) ) {
+				continue;
+			}
+			$key            = $hook . "\0" . $group;
+			$counts[ $key ] = ( $counts[ $key ] ?? 0 ) + 1;
+		}
+		foreach ( $counts as $key => $count ) {
+			list( $hook, $group ) = explode( "\0", (string) $key, 2 );
+			$out['rows'][]        = array(
+				'hook'  => $hook,
+				'group' => $group,
+				'count' => $count,
+			);
+		}
+		$out['available'] = true;
+		return $out;
+	}
+
+	/**
+	 * One grouped query over the database store's tables, or false when a read failed.
+	 *
+	 * @param string[] $hooks  Hook names.
+	 * @param string[] $groups Group slugs.
+	 * @param int      $since  Start.
+	 * @param int      $now    End (exclusive).
+	 * @return array<int,array{hook:string,group:string,count:int}>|false
+	 */
+	public static function payment_failures_db( array $hooks, array $groups, int $since, int $now ): array|false {
+		global $wpdb;
+		$actions = $wpdb->prefix . 'actionscheduler_actions';
+		$table_g = $wpdb->prefix . 'actionscheduler_groups';
+		$hooks   = array() === $hooks ? array( '' ) : array_values( $hooks );
+		$groups  = array() === $groups ? array( '' ) : array_values( $groups );
+		$hp      = implode( ', ', array_fill( 0, count( $hooks ), '%s' ) );
+		$gp      = implode( ', ', array_fill( 0, count( $groups ), '%s' ) );
+		$wpdb->last_error = '';
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- only %s placeholder lists are interpolated; values passed as one array.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- one grouped read; the ability caches its result.
+		$results = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT a.hook AS hook, COALESCE(g.slug, '') AS grp, COUNT(*) AS c FROM %i a LEFT JOIN %i g ON g.group_id = a.group_id WHERE a.status = %s AND a.last_attempt_gmt >= %s AND a.last_attempt_gmt < %s AND ( a.hook IN ({$hp}) OR g.slug IN ({$gp}) ) GROUP BY a.hook, g.slug",
+				array_merge( array( $actions, $table_g, 'failed', gmdate( 'Y-m-d H:i:s', $since ), gmdate( 'Y-m-d H:i:s', $now ) ), $hooks, $groups )
+			),
+			ARRAY_A
+		);
+		// phpcs:enable
+		if ( '' !== $wpdb->last_error || ! is_array( $results ) ) {
+			return false;
+		}
+		$rows = array();
+		foreach ( $results as $r ) {
+			$rows[] = array(
+				'hook'  => (string) $r['hook'],
+				'group' => (string) $r['grp'],
+				'count' => (int) $r['c'],
+			);
+		}
+		return $rows;
+	}
+
+	/**
 	 * Exact per-hook counts from the Action Scheduler table, null when the database store is
 	 * not in use, or false when a read failed ($wpdb->last_error is set after the query).
 	 *

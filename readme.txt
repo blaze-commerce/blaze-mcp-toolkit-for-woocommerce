@@ -4,15 +4,15 @@ Tags: woocommerce, mcp, ai, analytics, store health
 Requires at least: 6.9
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 1.1.0
+Stable tag: 1.2.0
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
-Ask Claude or ChatGPT how your WooCommerce store is doing: sales, errors, failed jobs, updates and API access. Our tools are read-only.
+Ask Claude or ChatGPT how your WooCommerce store is doing: sales, payments, errors, failed jobs, updates and API access. Our tools are read-only.
 
 == Description ==
 
-Blaze MCP Toolkit for WooCommerce connects your WooCommerce store to Claude or ChatGPT so you can ask plain questions and get straight answers: How did we do this week? Why did sales drop on Tuesday? Is anything broken? WooCommerce's own AI connection can look up products and orders. This plugin adds what it can't see: sales totals that match your WooCommerce reports, PHP errors, failed background jobs, recent plugin updates, and who has API access to your store.
+Blaze MCP Toolkit for WooCommerce connects your WooCommerce store to Claude or ChatGPT so you can ask plain questions and get straight answers: How did we do this week? Why did sales drop on Tuesday? Is anything broken? WooCommerce's own AI connection can look up products and orders. This plugin adds what it can't see: sales totals that match your WooCommerce reports, whether each payment method is still taking orders, PHP errors, failed background jobs, recent plugin updates, and who has API access to your store.
 
 It's read-only by default: out of the box it never changes your store, never sends customer names, emails or addresses from your orders to the AI, and adds nothing to the pages your customers load. It's a weekly check-up you can run in two minutes, so you spot problems before your customers do.
 
@@ -21,6 +21,7 @@ One thing to know up front: the same connection also carries tools from WooComme
 = What you can ask =
 
 * "Run my weekly store review."
+* "Are payments working? Has any payment method gone quiet?"
 * "Sales were down yesterday. Did anything change on the site?"
 * "Are there failed orders I should chase?"
 * "What's driving refunds this month?"
@@ -34,17 +35,22 @@ One thing to know up front: the same connection also carries tools from WooComme
 * **Store health** (`health-summary`): red, amber or green for PHP errors, background jobs and updates, plus your WordPress, WooCommerce and PHP versions. It reads the tail of your PHP and WooCommerce error logs, groups repeated errors, names the plugin or theme they come from, and strips out emails, card numbers, API keys and passwords before anything reaches the AI. If the site has no error log it can read (common on managed hosts), it says so and shows amber rather than a false green. Background jobs covers failed and overdue Action Scheduler jobs from the last 7 days, with order emails, subscription renewals, webhooks and stock syncs called out.
 * **Update history** (`update-history`): a dated list of plugin, theme and WordPress updates, installs, activations, deactivations and theme switches, recorded from the day you activate the plugin and kept for 180 days. Changes made outside WordPress, such as a deploy over SSH or git, are not seen.
 * **Access check** (`access-check`): WooCommerce REST API keys, webhooks and application passwords, with flags for write keys unused for 90 days and webhooks that send order data. It never returns keys, secrets, full webhook addresses or user names.
+* **Payment health** (`payment-health`): for each payment method, red, amber, green or unknown for four questions. Is it still taking checkout orders, judged against its own last 28 days of orders and the store's busy and quiet hours? Were recent checkouts left unpaid or cancelled unpaid more often than the method's own earlier orders? For supported payment plugins (Stripe today), did the plugin log errors or fail background jobs, and is its webhook record healthy? For other payment plugins those checks are not run and don't count either way: the method's colour then comes from its order checks alone. It looks back over a rolling window you choose (1 to 168 hours, 24 by default), not a past calendar period.
+  * It only asks: it never changes orders, settings or payments, never retries anything and never contacts your payment provider. Any fix it suggests is yours to make.
+  * Unknown means it could not check, not that all is well. It says which checks it couldn't run and why, for example too few orders to judge, a supported payment plugin's log it couldn't fully read, or a role that can't see diagnostics.
+  * Its colours are screening signals from your own order records, not proof. A quiet method or a pile of unpaid orders is a reason to look, not proof that checkout is down, that a customer was charged or that money was lost. Counts are orders accepted, not money collected.
+  * It returns counts, times, fixed summary categories and up to 5 example order numbers per method with their totals and admin links. It never returns customer names, emails or addresses, raw log lines, log file names, background job details, gateway settings, keys or transaction references.
 
 **Workflows**
 
 A workflow is a recipe: it tells the AI which tools to call, in what order, and how to write up the answer, so you get the same review every week without writing a long prompt.
 
-* **Weekly store review**: sales, orders, customers, refunds, top products and channels for the last 7 days against the week before, plus store health and this week's updates.
-* **Revenue drop triage**: works out where a drop came from (order count, order value, customers, products, channels) and checks for updates or new PHP errors in the same window.
-* **Failed order triage**: failed and on-hold orders, the ones to chase first, and a plain warning when failed orders outnumber paid ones (a common sign of card testing or a broken payment gateway).
+* **Weekly store review**: payment health first, then sales, orders, customers, refunds, top products and channels for the last 7 days against the week before, plus store health and this week's updates.
+* **Revenue drop triage**: payment health first, then works out where a drop came from (order count, order value, customers, products, channels) and checks for updates or new PHP errors in the same window.
+* **Failed order triage**: payment health first, then failed and on-hold orders, the ones to chase first, and a plain warning when failed orders outnumber paid ones (a common sign of card testing or a broken payment gateway).
 * **Refund triage**: refund rate, the products and countries behind it, and whether it is getting worse.
 
-Each workflow checks first that WooCommerce Analytics data is complete. If Analytics is off, its import hasn't finished, or recent orders haven't synced, the AI says so instead of reporting zeros as fact.
+The weekly review, revenue drop and failed order workflows start with payment health, so a payment problem is the first thing you hear about. Next they check that WooCommerce Analytics data is complete. If Analytics is off, its import hasn't finished, or recent orders haven't synced, the AI says so and leaves out the sales figures instead of reporting zeros as fact, but still reports what payment health and the other checks found. Refund triage has no payment step and checks Analytics first. If a step can't run for your role or your connection, the AI says once which check was skipped and carries on.
 
 **Sales analytics (from WooCommerce for Claude)**
 
@@ -58,7 +64,7 @@ Store profile, product search, product details, an AI-readiness score for your c
 
 Every tool checks the WordPress role of the person who connected the AI:
 
-* Workflows: anyone who can manage WooCommerce (Administrator, Shop Manager).
+* Workflows and payment health: anyone who can manage WooCommerce (Administrator, Shop Manager). Payment health only reads the logs and background jobs of supported payment plugins (Stripe today), and only for people allowed to see store diagnostics (Administrators, and Shop Managers if you switch that on); for others those checks show as not checked, and the order checks still run.
 * Sales analytics and store tools: WooCommerce's own permissions (Administrator, Shop Manager).
 * Store health and update history: Administrators. Shop Managers only if you switch that on in the plugin's settings.
 * Access check: Administrators only.
@@ -93,6 +99,7 @@ This plugin has no sign-in or keys, and registers no REST routes of its own. It 
 
 = Privacy =
 
+* Payment health returns counts, times, fixed summary categories and a few example order numbers with their totals and admin links. It sends no customer names, emails, phone numbers or addresses, no raw log messages, no gateway settings or keys and no transaction references to the AI.
 * Our diagnostics tools (store health, update history, access check) don't return customer contact details. They remove emails, phone numbers, card numbers and secrets from log lines, but log lines are free text and may still contain a name someone typed.
 * The sales analytics tools (from WooCommerce for Claude) return totals, counts and, when asked, order rows with customers pseudonymised (Customer #N, never names or emails). They accept location filters such as billing city, state and postcode, but never filters on names or emails.
 * Text that comes from the site (log lines, labels people typed in) is shortened and marked as untrusted, so the AI treats it as data and not as instructions.
@@ -133,7 +140,7 @@ No. Every tool in this plugin only reads. The AI connection as a whole can inclu
 
 = I use Easy MCP AI. Does this work? =
 
-Yes. Install and activate this plugin, then tick this plugin's tools and the WooCommerce Analytics tools under **Easy MCP AI › Tools › Abilities** (on a store where Easy MCP AI was set up before this version, the analytics tools are not ticked for you; the setup screen lists any that are missing). Use Easy MCP AI's own Connect screen (the setup screen links to it) and choose **Custom**, then tick **Abilities — Blaze-mcp-toolkit** and **Abilities — Wc-analytics** under Customize permissions. Read-only does not include them, and Full access turns on Easy MCP AI's own tools that can change your site. If you approve with nothing ticked, the connection doesn't finish and your AI app asks you to connect again. The setup screen also tells you how to keep customer details out of AI chats, because some of Easy MCP AI's own tools can return them.
+Yes. Install and activate this plugin, then tick this plugin's tools and the WooCommerce Analytics tools under **Easy MCP AI › Tools › Abilities** (on a store where Easy MCP AI was set up before this version, newer tools such as the analytics tools and payment health are not ticked for you; the setup screen lists any that are missing, and a workflow says once that it skipped them). Use Easy MCP AI's own Connect screen (the setup screen links to it) and choose **Custom**, then tick **Abilities — Blaze-mcp-toolkit** and **Abilities — Wc-analytics** under Customize permissions. Read-only does not include them, and Full access turns on Easy MCP AI's own tools that can change your site. If you approve with nothing ticked, the connection doesn't finish and your AI app asks you to connect again. The setup screen also tells you how to keep customer details out of AI chats, because some of Easy MCP AI's own tools can return them.
 
 = I have both connection plugins active. Which one is used? =
 
@@ -183,7 +190,22 @@ Yes. The PHP errors section shows amber and says no error log is available, rath
 
 Yes, with High-Performance Order Storage on or off.
 
+= Payment health says a method has gone quiet. Is checkout broken? =
+
+Not necessarily. It means the method has taken fewer orders than its own recent pattern would expect for this time of day and week. Holidays, a sale ending, a method you switched off or a quiet week can all do that. Place a small test order with that method, and check the payment plugin's own dashboard. Payment health never places orders or contacts the provider itself.
+
+= Why is payment health unknown for some checks? =
+
+Unknown means it couldn't check, not that everything is fine. Common reasons: fewer than 10 orders in the last 28 days, a supported payment plugin (Stripe today) whose logs or jobs couldn't be fully read, or a role that isn't allowed to see store diagnostics. For other payment plugins the log, job and webhook checks are not run at all, so they never make a method unknown or green on their own; the answer says they were not checked. It also says which checks were skipped and why.
+
 == Changelog ==
+
+= 1.2.0 =
+* New payment health tool: for each payment method, whether it is still taking checkout orders, whether recent checkouts were left unpaid more than usual, and, for supported payment plugins (Stripe today), whether the plugin logged errors, failed background jobs or recorded webhook problems. For other payment plugins those checks are not run and don't count either way. Ask-only: it never changes orders, settings or payments and never contacts a payment provider.
+* Every check says red, amber, green or unknown, whether it was checked and how complete its evidence was. Unknown is reported as a gap, never as healthy.
+* Payment plugin logs and background jobs are only read for supported payment plugins (Stripe today), and only for people allowed to see store diagnostics. The order checks work for anyone who can manage WooCommerce.
+* The weekly review, revenue drop and failed order workflows now start with payment health. If WooCommerce Analytics is unavailable they skip only the Analytics steps and still report the payment findings.
+* On an existing Easy MCP AI connection, tick payment health under Easy MCP AI › Tools › Abilities. The setup screen lists it until you do.
 
 = 1.1.0 =
 * Works with Easy MCP AI as well as MCP Adapter with Enable Abilities for MCP. You only need one of them.
@@ -200,6 +222,9 @@ Yes, with High-Performance Order Storage on or off.
 * Bundles the commerce-abilities package from WooCommerce for Claude by Automattic (https://github.com/woocommerce/woocommerce-claude, GPL-3.0-or-later), version 0.4.5, commit cdab921aab8d07ef813121ff78b3558af28f39fa, unmodified. It provides the wc-analytics tools and the store knowledge tools.
 
 == Upgrade Notice ==
+
+= 1.2.0 =
+Adds a read-only payment health check, run first by the weekly, revenue drop and failed order workflows. Easy MCP AI users: tick payment health under Easy MCP AI › Tools › Abilities.
 
 = 1.1.0 =
 Now works with Easy MCP AI or the recommended setup, uses the correct tool names for each, and fixes the long-range confirmation prompt. Your recommended setup is unchanged.

@@ -26,3 +26,42 @@ phpunit.xml
 *-brief.md
 *.md
 UPSTREAM
+# Run, report and receipt folders (tech-lead runs, matrix evidence, performance receipts).
+reports
+receipts
+attempts
+_sentinel
+RUN-STATE.json
+run-*.json
+*.jsonl
+# Local agent, editor and tool state.
+.codex
+.orca
+.cursor
+.vscode
+.idea
+.phpunit.cache
+.phpcs.xml
+phpcs.xml.dist
+phpunit.xml.dist
+phpstan.neon
+phpstan.neon.dist
+*.swp
+*.bak
+*~
+# Secrets, configuration and data artefacts.
+.env
+.env.*
+*.env
+auth.json
+wp-config.php
+wp-config-*.php
+*.pem
+*.key
+*.p12
+*.sql
+*.sql.gz
+*.csv
+*.log
+*.zip
+*.tar.gz

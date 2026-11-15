@@ -28,6 +28,8 @@ $expectations = array(
 	'blaze-mcp-toolkit/health-summary'      => BLZMCP_PM_DIAG,
 	'blaze-mcp-toolkit/update-history'      => BLZMCP_PM_DIAG,
 	'blaze-mcp-toolkit/access-check'        => BLZMCP_PM_ADMIN_ONLY,
+	// Order and configuration checks at manage_woocommerce; logs and jobs are gated again inside.
+	'blaze-mcp-toolkit/payment-health'      => BLZMCP_PM_WOO,
 	'blaze-mcp-toolkit/store-profile'       => BLZMCP_PM_WOO,
 	'blaze-mcp-toolkit/search-products'     => BLZMCP_PM_WOO,
 	'blaze-mcp-toolkit/product-details'     => BLZMCP_PM_WOO,
@@ -161,6 +163,20 @@ try {
 					blzmcp_it_assert( $is_permission_error( $result ), "{$label} denied (direct)" . ( is_wp_error( $result ) ? ' code ' . $result->get_error_code() : ' got data' ) );
 				}
 				$denied_direct = $is_permission_error( $result );
+
+				// Payment health: logs and jobs only for diagnostics viewers, never served from another role's cache.
+				if ( 'blaze-mcp-toolkit/payment-health' === $name && is_array( $result ) ) {
+					$diag_ok = 'administrator' === $role || ( 'shop_manager' === $role && $sm_diag );
+					$leak    = false;
+					foreach ( $result['methods'] as $pm_method ) {
+						foreach ( array( 'logs', 'jobs' ) as $pm_part ) {
+							$pm_reason = (string) $pm_method['errors'][ $pm_part ]['reason'];
+							$blocked   = \Blaze\McpToolkit\Abilities\PaymentHealth::reason_text( 'diagnostics_not_permitted' ) === $pm_reason;
+							$leak      = $leak || ( ! $diag_ok && ( ! empty( $pm_method['errors'][ $pm_part ]['checked'] ) || ( $pm_method['errors'][ $pm_part ]['applicable'] && ! $blocked ) ) ) || ( $diag_ok && $blocked );
+						}
+					}
+					blzmcp_it_assert( ! $leak, "{$label} diagnostics shown only to diagnostics viewers" );
+				}
 
 				if ( null !== $gateway ) {
 					$out = $gateway->execute(

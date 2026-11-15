@@ -19,7 +19,12 @@ if [ "${1:-}" == --matrix ]; then
 fi
 echo "FAST CHECKS ONLY — NOT THE RELEASE GATE (the gate is: bash scripts/run-integration.sh --matrix CANDIDATE.zip)"
 fail=0
+# test-payment-orders.php and test-payment-health.php run in the storage loop below instead.
+# test-payment-methods.php and test-payment-errors.php run here, in the default storage mode.
 for f in tests/Integration/test-*.php; do
+	case "$f" in
+		tests/Integration/test-payment-orders.php | tests/Integration/test-payment-health.php) continue ;;
+	esac
 	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
@@ -31,6 +36,76 @@ for f in tests/Integration/test-*.php; do
 		echo "PASS  $f ($summary)"
 	fi
 done
+# Order storage loop (payment health, FEATURE-PLAN items 3 and 7): each authority/sync combination is
+# switched in one process and asserted in a fresh one, so the reader sees a fully initialised store.
+# The store's original storage mode is restored on every exit path and checked at the end.
+pf_dir=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration
+pf_opt() {
+	npx wp-env run cli wp option get "$1" 2>/dev/null | tr -d '\r' | grep -E '^(yes|no)$' | tail -1
+}
+pf_orig_hpos=$(pf_opt woocommerce_custom_orders_table_enabled)
+pf_orig_sync=$(pf_opt woocommerce_custom_orders_table_data_sync_enabled)
+[ "$pf_orig_hpos" == yes ] && pf_orig_set=hpos || pf_orig_set=legacy
+[ -n "$pf_orig_sync" ] || pf_orig_sync=no
+pf_restore() {
+	npx wp-env run cli env BLZMCP_PF_SET="$pf_orig_set" BLZMCP_PF_SYNC="$pf_orig_sync" wp eval-file "$pf_dir/test-payment-orders.php" >/dev/null 2>&1
+}
+trap 'pf_restore; exit 130' INT TERM
+trap pf_restore EXIT
+for combo in hpos:no hpos:yes legacy:yes legacy:no; do
+	pf_set=${combo%%:*}
+	pf_sync=${combo##*:}
+	label="storage=$pf_set sync=$pf_sync"
+	switch_out=$(npx wp-env run cli env BLZMCP_PF_SET="$pf_set" BLZMCP_PF_SYNC="$pf_sync" wp eval-file "$pf_dir/test-payment-orders.php" 2>&1)
+	if ! printf '%s\n' "$switch_out" | grep -qE '^[0-9]+ passed, 0 failed'; then
+		echo "FAIL  order storage switch [$label]"
+		printf '%s\n' "$switch_out" | awk '/^FAIL/ && n++ < 20'
+		fail=1
+		continue
+	fi
+	for f in tests/Integration/test-payment-orders.php tests/Integration/test-payment-health.php; do
+		out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" BLZMCP_EXPECT_AUTHORITY="$pf_set" BLZMCP_EXPECT_SYNC="$pf_sync" wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+		status=$?
+		summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
+		seen=$(printf '%s\n' "$out" | grep -E '^STORAGE ' | tail -1)
+		if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed' || ! printf '%s' "$seen" | grep -q "authority=$pf_set sync=$pf_sync"; then
+			echo "FAIL  $f [$label] (${summary:-no summary}; ${seen:-no STORAGE line})"
+			printf '%s\n' "$out" | awk '/^FAIL/ && n++ < 20'
+			fail=1
+		else
+			echo "PASS  $f [$label] ($summary)"
+		fi
+	done
+	# Gateway registry genuinely unbuilt: seed, check (no rest_api_init, so nothing builds it), clean.
+	for entry in "tests/Integration/test-payment-methods.php|BLZMCP_PM_STEP" "tests/Integration/test-payment-health.php|BLZMCP_PH_STEP"; do
+		IFS='|' read -r f step_var <<<"$entry"
+		for step in seed check clean; do
+			extra=''
+			[ "$step" == check ] && extra="--require=$pf_dir/payment-no-rest-init.php"
+			# shellcheck disable=SC2086 # $extra is one wp argument or empty.
+			out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 "$step_var=$step" wp $extra eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+			status=$?
+			summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
+			if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed'; then
+				echo "FAIL  $f [$label, registry unbuilt: $step] (${summary:-no summary})"
+				printf '%s\n' "$out" | awk '/^FAIL/ && n++ < 20'
+				fail=1
+			else
+				echo "PASS  $f [$label, registry unbuilt: $step] ($summary)"
+			fi
+		done
+	done
+done
+pf_restore
+trap - EXIT INT TERM
+pf_now_hpos=$(pf_opt woocommerce_custom_orders_table_enabled)
+pf_now_sync=$(pf_opt woocommerce_custom_orders_table_data_sync_enabled)
+if [ "${pf_now_hpos:-no}" != "${pf_orig_hpos:-no}" ] || [ "${pf_now_sync:-no}" != "$pf_orig_sync" ]; then
+	echo "FAIL  order storage not restored (was hpos=${pf_orig_hpos:-no} sync=$pf_orig_sync, now hpos=${pf_now_hpos:-no} sync=${pf_now_sync:-no})"
+	fail=1
+else
+	echo "PASS  order storage restored to $pf_orig_set (sync=$pf_orig_sync)"
+fi
 # Stand-aside mode (WooCommerce for Claude stub constant loaded before plugins).
 for f in tests/Integration/test-bundled.php tests/Integration/test-workflows.php tests/Integration/test-analytics-naming.php; do
 	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
@@ -57,8 +132,9 @@ for f in tests/Integration/test-connectors.php tests/Integration/test-connector-
 		echo "PASS  $f [easy-stub] ($summary)"
 	fi
 done
-# Stand-aside plus the Easy MCP AI stub: analytics naming must hold whoever supplies wc-analytics/*.
-for f in tests/Integration/test-analytics-naming.php; do
+# Stand-aside plus the Easy MCP AI stub: analytics naming must hold whoever supplies wc-analytics/*,
+# and the workflows still lead with payment health under its Easy MCP name.
+for f in tests/Integration/test-analytics-naming.php tests/Integration/test-workflows.php; do
 	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-wcfc.php --require=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/stub-easymcp.php eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
 	summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)

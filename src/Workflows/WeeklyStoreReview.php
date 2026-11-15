@@ -9,8 +9,8 @@
  * (@package WooCommerce\Claude). Licensed GPL-3.0-or-later.
  *
  * Modified by Blaze Commerce: delivered as a tool returning instructions plus ordered steps instead
- * of an MCP prompt; order totals first (Analytics check); site health and update history steps and
- * the rule linking dips to updates or errors in the same window.
+ * of an MCP prompt; payment health first, then order totals (Analytics check); site health and
+ * update history steps and the rule linking dips to updates or errors in the same window.
  *
  * @package Blaze\McpToolkit
  */
@@ -44,7 +44,7 @@ final class WeeklyStoreReview extends AbstractWorkflow {
 	 * Description the AI reads in ability discovery.
 	 */
 	protected static function description(): string {
-		return __( 'Weekly store review: produce a weekly WooCommerce performance review covering revenue, orders, customers, products, channels, refunds, and next actions. Use this first when the merchant asks how the store did this week (or over another recent period), wants a weekly review or report, or asks how sales are going. Returns a plan, not data: instructions plus an ordered list of other tools to run with their arguments, including site errors and recent plugin or theme updates. Run the steps, then write the review. Read-only.', 'blaze-mcp-toolkit-for-woocommerce' );
+		return __( 'Weekly store review: produce a weekly WooCommerce performance review covering revenue, orders, customers, products, channels, refunds, and next actions. Use this first when the merchant asks how the store did this week (or over another recent period), wants a weekly review or report, or asks how sales are going. Returns a plan, not data: instructions plus an ordered list of other tools to run with their arguments, starting with a payment health check and including site errors and recent plugin or theme updates. Run the steps, then write the review. Read-only.', 'blaze-mcp-toolkit-for-woocommerce' );
 	}
 
 	/**
@@ -55,6 +55,7 @@ final class WeeklyStoreReview extends AbstractWorkflow {
 	 */
 	protected static function plan( string $period ): array {
 		return array(
+			self::payment_health_step( $period ),
 			self::step(
 				'wc-analytics/totals',
 				array(
@@ -62,7 +63,7 @@ final class WeeklyStoreReview extends AbstractWorkflow {
 					'period'  => $period,
 					'compare' => true,
 				),
-				'Orders, status mix and pipeline versus the previous period. Also confirms Analytics data is complete: if its error text starts with [ANALYTICS_UNAVAILABLE], explain the rest of that message to the merchant in plain words and stop.'
+				'Orders, status mix and pipeline versus the previous period. Also confirms Analytics data is complete: if its error text starts with [ANALYTICS_UNAVAILABLE], explain the rest of that message to the merchant in plain words and skip the other Analytics steps; still run the rest.'
 			),
 			self::store_profile_step( 'Store name, currency, locale, payment methods and shipping context. Read once.' ),
 			self::step(
@@ -143,9 +144,11 @@ final class WeeklyStoreReview extends AbstractWorkflow {
 				'',
 				'Use the tools quietly. Do not tell the merchant you are loading schemas, selecting tools, making parallel calls, or pulling data through a named connector.',
 				'',
-				'Required data: the steps read order totals, the store profile, revenue, customer and refund totals (all compared with the previous period), the top five products, the channel mix, site errors and recent updates.',
+				'Required data: the steps read payment health, order totals, the store profile, revenue, customer and refund totals (all compared with the previous period), the top five products, the channel mix, site errors and recent updates.',
 				'',
 				'Rules:',
+				'- Payment health comes first. Red or amber payment findings lead the Headline and go in the Watch List; an unknown payment check is a gap to mention, never a sign that payments are fine. Its counts are orders accepted at checkout, not collected revenue.',
+				'- If Analytics figures are unavailable, say so in one sentence in the Headline instead of quoting sales figures, and still report the payment, site error and update findings.',
 				'- Only report numbers returned by tools. Do not invent targets, forecasts, margins, conversion rates, sessions, ad spend, ROAS, or customer identities.',
 				'- Use returned comparison fields for movement. Do not hand-calculate deltas or percentages unless the exact field is present in the response.',
 				'- Keep customer details pseudonymised.',
@@ -167,7 +170,7 @@ final class WeeklyStoreReview extends AbstractWorkflow {
 				'',
 				'#### 1. Headline',
 				'',
-				'Two or three sentences covering collected revenue, orders, average order value, customer count, and refund rate. Lead with the most important movement.',
+				'Two or three sentences. If payment health returned red or amber findings, open with them. Then cover collected revenue, orders, average order value, customer count, and refund rate, leading with the most important movement.',
 				'',
 				'#### 2. What changed',
 				'',
@@ -183,7 +186,7 @@ final class WeeklyStoreReview extends AbstractWorkflow {
 				'',
 				'#### 5. Watch List',
 				'',
-				'List up to three issues worth checking, including refunds or low refund risk, and site errors or recent updates that overlap a dip.',
+				'List up to three issues worth checking, including payment findings or payment checks that could not be run, refunds or low refund risk, and site errors or recent updates that overlap a dip.',
 				'',
 				'#### 6. Next Actions',
 				'',

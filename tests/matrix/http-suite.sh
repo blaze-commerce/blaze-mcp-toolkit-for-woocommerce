@@ -69,9 +69,12 @@ BLAZE_ABILITIES=(
 	blaze-mcp-toolkit/failed-order-triage blaze-mcp-toolkit/refund-triage
 	blaze-mcp-toolkit/store-profile blaze-mcp-toolkit/search-products blaze-mcp-toolkit/product-details
 	blaze-mcp-toolkit/readiness-score blaze-mcp-toolkit/recommendations
-	blaze-mcp-toolkit/suggest-improvements
+	blaze-mcp-toolkit/suggest-improvements blaze-mcp-toolkit/payment-health
 )
+PAY=blaze-mcp-toolkit/payment-health
 WORKFLOWS=(weekly-store-review revenue-drop-triage failed-order-triage refund-triage)
+# The sales workflows list payment health first; refund triage has no payment step.
+PAYMENT_FIRST=(weekly-store-review revenue-drop-triage failed-order-triage)
 ANALYTICS=(wc-analytics/confirm-large-range wc-analytics/totals wc-analytics/breakdown wc-analytics/series wc-analytics/rows)
 
 # Easy MCP AI tool name rule (2.3.1 = 2.4.0; no slug here is over 64 characters).
@@ -80,7 +83,7 @@ easy_name() { printf 'wp_ability_%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:low
 # Arguments for a direct call of each Blaze ability.
 args_for() {
 	case "$1" in
-	blaze-mcp-toolkit/health-summary) echo '{"since_hours":24}' ;;
+	blaze-mcp-toolkit/health-summary | blaze-mcp-toolkit/payment-health) echo '{"since_hours":24}' ;;
 	blaze-mcp-toolkit/update-history) echo '{"days":7}' ;;
 	blaze-mcp-toolkit/search-products) echo '{"query":"Matrix"}' ;;
 	blaze-mcp-toolkit/product-details | blaze-mcp-toolkit/suggest-improvements) echo "{\"product_id\":$PRODUCT_ID}" ;;
@@ -278,7 +281,7 @@ if has_transport easy && [ "$PREFLIGHT" != 1 ]; then
 	for a in "${BLAZE_ABILITIES[@]}" "${ANALYTICS[@]}"; do
 		jq -e --arg a "$a" 'index($a) != null' <<<"${seeded:-[]}" >/dev/null 2>&1 || missing+=("$a")
 	done
-	eq "fresh activation after Blaze: Easy MCP AI seeds all 13 Blaze tools and 5 wc-analytics tools (missing: ${missing[*]:-none})" 0 "${#missing[@]}"
+	eq "fresh activation after Blaze: Easy MCP AI seeds all ${#BLAZE_ABILITIES[@]} Blaze tools and ${#ANALYTICS[@]} wc-analytics tools (missing: ${missing[*]:-none})" 0 "${#missing[@]}"
 	FRESH_SEED=$seeded
 fi
 
@@ -353,6 +356,13 @@ for s in "${TRANSPORTS[@]}"; do
 		fi
 		truthy "$s: $w has no unrendered {tool:…} placeholder" "$(jq -r '(.instructions | test("\\{tool:")) | not' "$plan")"
 		truthy "$s: $w names no obsolete alias" "$(jq -r '(.instructions | test("wc-analytics-confirm-large-range")) | not' "$plan")"
+		if [[ " ${PAYMENT_FIRST[*]} " == *" $w "* ]]; then
+			eq "$s: $w runs payment health first, as $(tool_of "$s" "$PAY")" "$PAY $(tool_of "$s" "$PAY")" "$(jq -r '.steps[0] | "\(.ability) \(.tool)"' "$plan")"
+			eq "$s: $w order totals come straight after payment health" 'wc-analytics/totals orders' "$(jq -r '.steps[1] | "\(.ability) \(.arguments.subject)"' "$plan")"
+			truthy "$s: $w has the PAYMENT CHECK paragraph" "$(jq -r '.instructions | contains("PAYMENT CHECK")' "$plan")"
+		else
+			truthy "$s: $w has no payment step and no PAYMENT CHECK paragraph" "$(jq -r --arg p "$PAY" '([.steps[].ability] | index($p) == null) and (.instructions | contains("PAYMENT CHECK") | not)' "$plan")"
+		fi
 		i=0
 		while [ "$i" -lt "$nsteps" ]; do
 			tool=$(jq -r ".steps[$i].tool" "$plan")
@@ -380,7 +390,11 @@ for s in "${TRANSPORTS[@]}"; do
 	rows_name=$(tool_of "$s" wc-analytics/rows)
 	if [ -f "$plan" ]; then
 		truthy "$s: failed-order guidance names $rows_name for the comparison period" "$(jq -r --arg n "$rows_name" '.instructions | contains("run " + $n + " twice more")' "$plan")"
-		call_tool "$s" "$(jq -r '.steps[0].tool' "$plan")" "$(jq -c '.steps[0].arguments' "$plan")"
+		# The order totals step, selected by ability and subject (payment health is now step 1).
+		totals_step=$(jq -c '[.steps[] | select(.ability == "wc-analytics/totals" and .arguments.subject == "orders")][0] // empty' "$plan")
+		[ -n "$totals_step" ] && ok "$s: failed-order plan has the order totals step" || no "$s: failed-order plan has the order totals step"
+		[ -n "$totals_step" ] || totals_step='{}'
+		call_tool "$s" "$(jq -r '.tool // ""' <<<"$totals_step")" "$(jq -c '.arguments // {}' <<<"$totals_step")"
 		cmp_start=$(call_get '.comparison.period.start // empty')
 		cmp_end=$(call_get '.comparison.period.end // empty')
 		failed_step=$(jq -c '[.steps[] | select(.ability == "wc-analytics/rows" and ((.arguments | tostring) | test("failed")))][0] // empty' "$plan")
@@ -547,6 +561,105 @@ if [ "$STATE" == both ]; then
 		wpc option update ewpa_thirdparty_disabled "${prev:-[]}" --format=json >/dev/null
 	done
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Payment health over HTTP (FEATURE-PLAN item 9). Seeded after every fixed Analytics comparison
+# above, and removed again here (tests/matrix/payment-fixture.php), so those figures never move.
+# ---------------------------------------------------------------------------------------------
+UNDO+=("helper payment-fixture.php cleanup")
+pay_seed=$(helper payment-fixture.php seed)
+seeded=$(sed -n 's/^SEEDED=//p' <<<"$pay_seed")
+[ "${seeded:-0}" -gt 0 ] && ok "payment fixture seeded ($seeded synthetic checkout orders)" || no "payment fixture seeded ($(head -c 200 <<<"$pay_seed"))"
+ROLE_NOTE='not allowed to see store diagnostics'
+PAY_KEYS='checked_at,coverage,findings,findings_total,findings_truncated,methods,notes,overall,schema_version,since_hours,store_wide,timezone'
+pay_call() { # session [clear] -> payment health with since_hours 24; clear=1 empties the toolkit result cache first
+	[ "${2:-0}" == 1 ] && helper payment-fixture.php clear-cache >/dev/null
+	call_ability "$1" "$PAY" '{"since_hours":24}'
+}
+role_note() { jq -r --arg n "$ROLE_NOTE" '[.ok.notes[]? | contains($n)] | any' "$CALL_OUT"; }
+for s in "${TRANSPORTS[@]}"; do
+	pay_call "$s" 1
+	if ! call_ok; then
+		no "$s: payment health runs over HTTP ($(call_err | head -c 200))"
+		continue
+	fi
+	ok "$s: payment health runs over HTTP as $(tool_of "$s" "$PAY")"
+	eq "$s: payment health returns exactly the contract's top-level keys" "$PAY_KEYS" "$(call_get 'keys | sort | join(",")')"
+	eq "$s: schema_version 1, since_hours 24" '1 24' "$(call_get '"\(.schema_version) \(.since_hours)"')"
+	eq "$s: overall red, store-wide quiet green" 'red green' "$(call_get '"\(.overall) \(.store_wide.status)"')"
+	eq "$s: silent cheque method is red on its quiet check" 'red red' "$(call_get '[.methods[] | select(.id == "cheque")][0] | "\(.status) \(.quiet.status)"')"
+	truthy "$s: method_quiet finding for cheque, method_not_registered for the absent plugin" "$(call_get '[.findings[] | "\(.code) \(.method_id)"] | (index("method_quiet cheque") != null and index("method_not_registered blzmcp_gone") != null)')"
+	truthy "$s: busy cod method keeps taking orders (quiet green)" "$(call_get '[.methods[] | select(.id == "cod")][0].quiet.status == "green"')"
+	truthy "$s: no customer address or gateway settings in the response" "$(call_get 'tostring | (test("example\\.invalid") or test("woocommerce_cod_settings")) | not')"
+	eq "$s: administrator sees no diagnostics role note" false "$(role_note)"
+	first_at=$(call_get '.checked_at')
+	pay_call "$s"
+	eq "$s: a warm repeat is served from the 5-minute cache with its original checked_at" "$first_at" "$(call_get '.checked_at')"
+done
+
+# Diagnostics permission: off, on, then off again after the on result is warm (no cache flush).
+save_option blzmcp_settings
+set_sm_diag() { wpc eval "Blaze\\McpToolkit\\Settings::update( array( 'shop_manager_diagnostics' => $1 ) );" >/dev/null; }
+set_sm_diag false
+for s in "${sm_sessions[@]}"; do
+	pay_call "$s" 1
+	call_ok && ok "$s: shop manager runs payment health (manage_woocommerce)" || no "$s: shop manager runs payment health ($(call_err | head -c 200))"
+	eq "$s: shop manager, diagnostics off: logs and jobs reported as not checked for the role" true "$(role_note)"
+done
+set_sm_diag true
+for s in "${sm_sessions[@]}"; do
+	pay_call "$s"
+	eq "$s: shop manager, diagnostics switched on: a fresh result without the role note (no flush)" false "$(role_note)"
+done
+set_sm_diag false
+for s in "${sm_sessions[@]}"; do
+	pay_call "$s"
+	eq "$s: shop manager, diagnostics switched off after warming: never served the privileged result" true "$(role_note)"
+done
+
+# Analytics unavailable: payment health still first and its counts still reported.
+wpc option update woocommerce_analytics_enabled no >/dev/null
+for s in "${TRANSPORTS[@]}"; do
+	call_ability "$s" blaze-mcp-toolkit/weekly-store-review '{"period":"last_7_days"}'
+	if ! call_ok; then
+		no "$s: Analytics off: weekly review returns a plan ($(call_err | head -c 200))"
+		continue
+	fi
+	jq '.ok' "$CALL_OUT" >"$WORK/plan-off-$s.json"
+	eq "$s: Analytics off: weekly review still runs payment health first" "$PAY" "$(jq -r '.steps[0].ability' "$WORK/plan-off-$s.json")"
+	call_tool "$s" "$(jq -r '.steps[0].tool' "$WORK/plan-off-$s.json")" "$(jq -c '.steps[0].arguments' "$WORK/plan-off-$s.json")"
+	truthy "$s: Analytics off: payment health still reports its counts and findings" "$(call_get '(.overall == "red") and (([.methods[] | select(.id == "cheque")][0].quiet.taken_28d // 0) > 0)')"
+done
+wpc option update woocommerce_analytics_enabled yes >/dev/null
+
+# Payment health switched off: recommended through Enable Abilities' list, Easy MCP AI by leaving
+# it unticked (an existing 1.1 install). Setup warns; the review explains the skipped step once.
+if has_transport rec; then
+	save_option ewpa_thirdparty_disabled
+	prev=$(option_json ewpa_thirdparty_disabled)
+	wpc option update ewpa_thirdparty_disabled "$(jq -c --arg s "$PAY" '(if type == "array" then . elif type == "object" then [.[]] else [] end) + [$s] | unique' <<<"${prev:-[]}")" --format=json >/dev/null
+	open_session pay_off_rec rec admin_app || no "payment off: recommended session"
+	grep -qxF "$PAY" <<<"$(list_names pay_off_rec)" && no "payment off: absent from recommended discovery" || ok "payment off: absent from recommended discovery"
+	call_ability pay_off_rec blaze-mcp-toolkit/weekly-store-review '{"period":"last_7_days"}'
+	truthy "payment off (recommended): weekly review leaves the step out and says payments were not checked" "$(jq -r --arg p "$PAY" '(.ok | ([.steps[].ability] | index($p) == null) and (.instructions | contains("The payment health check is not in this plan")))' "$CALL_OUT")"
+	wpc option update ewpa_thirdparty_disabled "${prev:-[]}" --format=json >/dev/null
+fi
+if has_transport easy; then
+	save_option easy_mcp_ai_enabled_abilities
+	prev=$(option_json easy_mcp_ai_enabled_abilities)
+	wpc option update easy_mcp_ai_enabled_abilities "$(jq -c --arg s "$PAY" 'map(select(. != $s))' <<<"${prev:-[]}")" --format=json >/dev/null
+	open_session pay_off_easy easy admin_easy || no "payment off: Easy MCP AI session"
+	grep -qxF "$(easy_name "$PAY")" <<<"$(list_names pay_off_easy)" && no "payment off: absent from Easy MCP AI tools/list" || ok "payment off: absent from Easy MCP AI tools/list"
+	call_ability pay_off_easy blaze-mcp-toolkit/weekly-store-review '{"period":"last_7_days"}'
+	truthy "payment off (Easy MCP AI): weekly review leaves the step out and says payments were not checked" "$(jq -r --arg p "$PAY" '(.ok | ([.steps[].ability] | index($p) == null) and (.instructions | contains("The payment health check is not in this plan")))' "$CALL_OUT")"
+	row=$(setup_row easy_tools_on)
+	eq "payment off (Easy MCP AI): easy_tools_on warns" warn "$(jq -r '.status' <<<"$row")"
+	truthy "payment off (Easy MCP AI): easy_tools_on names payment health" "$(jq -r --arg p "$PAY" '(.label + " " + .fix) | contains($p)' <<<"$row")"
+	eq "payment off (Easy MCP AI): the setup check never ticks it for the owner" false "$(jq -r --arg p "$PAY" 'index($p) != null' <<<"$(option_json easy_mcp_ai_enabled_abilities)")"
+	wpc option update easy_mcp_ai_enabled_abilities "${prev:-[]}" --format=json >/dev/null
+fi
+removed=$(helper payment-fixture.php cleanup | sed -n 's/^REMOVED=//p')
+eq "payment fixture removed (only its own orders)" "${seeded:-0}" "${removed:-0}"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

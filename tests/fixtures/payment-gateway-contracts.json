@@ -1,0 +1,260 @@
+{
+  "schema_version": 1,
+  "verified_on": "2026-11-15",
+  "purpose": "Source-verified, non-secret contracts for the 1.2 payment-health readers (FEATURE-PLAN.md item 1). Every name below was read from a tagged release; provenance and checksums are in the run receipt receipts/payment-source-verification.md. All values in synthetic_cases are invented test shapes, never store data.",
+  "sources": {
+    "stripe": {
+      "plugin_slug": "woocommerce-gateway-stripe",
+      "primary": {
+        "version": "11.2.0",
+        "url": "https://plugins.svn.wordpress.org/woocommerce-gateway-stripe/tags/11.2.0/",
+        "wc_requires_at_least": "11.0"
+      },
+      "cross_check": {
+        "version": "10.9.1",
+        "url": "https://plugins.svn.wordpress.org/woocommerce-gateway-stripe/tags/10.9.1/",
+        "wc_requires_at_least": "10.8",
+        "note": "Newest checked tag installable on the toolkit's WooCommerce 10.9 floor. Webhook option names, int validation, mode logic and logger source are identical to 11.2.0."
+      }
+    },
+    "woocommerce": {
+      "version": "10.9.0",
+      "url": "https://github.com/woocommerce/woocommerce/tree/10.9.0/plugins/woocommerce",
+      "commit": "0d7095c6066504a6fca229185ff363fd5785742d"
+    },
+    "wordpress": {
+      "version": "6.9.0",
+      "url": "https://github.com/WordPress/wordpress-develop/tree/6.9.0/src",
+      "commit": "3a87241015aff96c7a38c1304949908b9588b218"
+    }
+  },
+  "stripe": {
+    "family": "stripe",
+    "plugin": "woocommerce-gateway-stripe",
+    "method_ids": {
+      "main": "stripe",
+      "main_carries": ["card", "link"],
+      "upe_pattern": "stripe_<STRIPE_ID>",
+      "upe_examples": ["stripe_sepa_debit", "stripe_klarna", "stripe_ideal"],
+      "note": "Card and Link orders are recorded under the main gateway ID 'stripe'; other UPE methods use 'stripe_' plus the method's STRIPE_ID."
+    },
+    "kind": {
+      "stripe": "instant",
+      "stripe_*": "unknown",
+      "delayed_authorisation": {
+        "setting_key": "capture",
+        "automatic_when": "missing, empty or 'yes'",
+        "manual_when": "'no'",
+        "manual_effect": "order set to on-hold with a transaction ID and no paid timestamp until the merchant captures; this is verified authorisation behaviour, not a broken checkout",
+        "async_pending_charge_effect": "a captured charge still pending at Stripe sets on-hold with a transaction ID; the webhook later completes it"
+      }
+    },
+    "settings": {
+      "option": "woocommerce_stripe_settings",
+      "type": "array (serialized); non-array is treated by Stripe as an empty array",
+      "secret_bearing": true,
+      "secret_keys_never_read": ["secret_key", "test_secret_key", "webhook_secret", "test_webhook_secret"],
+      "allowed_keys": ["enabled", "testmode", "capture"],
+      "enabled": "'yes' means enabled; anything else is not enabled",
+      "testmode": "'yes' means test mode; missing key inside an array means live (Stripe default 'no')"
+    },
+    "mode": {
+      "test_when": "settings array testmode === 'yes'",
+      "live_when": "settings array exists and testmode !== 'yes'",
+      "unknown_when": "settings option absent or not an array (toolkit rule; Stripe itself would fall back to live)"
+    },
+    "webhook_state": {
+      "storage": "separate scalar options, not keys of a structured option",
+      "live": {
+        "monitoring_began_at": "wc_stripe_wh_monitor_began_at",
+        "last_success_at": "wc_stripe_wh_last_success_at",
+        "last_failure_at": "wc_stripe_wh_last_failure_at",
+        "last_error": "wc_stripe_wh_last_error",
+        "pending_webhooks": "wc_stripe_wh_live_pending_webhooks"
+      },
+      "test": {
+        "monitoring_began_at": "wc_stripe_wh_test_monitor_began_at",
+        "last_success_at": "wc_stripe_wh_test_last_success_at",
+        "last_failure_at": "wc_stripe_wh_test_last_failure_at",
+        "last_error": "wc_stripe_wh_test_last_error",
+        "pending_webhooks": "wc_stripe_wh_test_pending_webhooks"
+      },
+      "toolkit_reads": ["monitoring_began_at", "last_success_at", "last_failure_at"],
+      "toolkit_never_reads": ["last_error", "pending_webhooks"],
+      "timestamp_format": "integer UTC Unix seconds stored as int or digit-only string",
+      "valid_value": "scalar whose string form is ctype_digit; 0 means none recorded since monitoring began",
+      "invalid_value": "non-scalar, empty string, sign, decimal point, exponent or any non-digit: Stripe reads it as 0, the toolkit treats it as malformed",
+      "missing_value": "get_option default 0 in Stripe; the toolkit treats an absent option as missing, not as 0",
+      "success_written": "after signature validation passes, the event's account matches and the event is dispatched (including deferred dispatch to Action Scheduler); value is the Stripe event's created time, not local processing time",
+      "failure_written": "when signature validation fails; value is local time() at receipt",
+      "neither_written": ["request is not POST to wc-api=wc_stripe", "event belongs to another Stripe account (acknowledged 200)", "agentic v1.delegated_checkout.* hooks"],
+      "last_error_codes": ["validation_succeeded", "empty_headers", "empty_body", "empty_secret", "user_agent_invalid", "signature_invalid", "duplicate_webhooks", "timestamp_out_of_range", "signature_mismatch"],
+      "reset": "when monitoring_began_at for the active mode reads as 0, Stripe sets it to now and resets success and failure to 0 and last_error to validation_succeeded",
+      "status_code_logic": "Stripe's own status: success > failure is nominal; both 0 is none received; success > 0 otherwise is failure after success; else failure with no prior success. Equal non-zero values fall into failure after success in Stripe's message, which the toolkit does not adopt.",
+      "clock_caveat": "success uses Stripe's event creation clock, failure uses the site clock; a successfully processed retry of an older event keeps an older success time",
+      "webhook_required_for_order_completion": {
+        "stripe": false,
+        "reason": "card payments that succeed are completed at checkout in process_response via payment_complete; the webhook is not the only completion path",
+        "async_pending_charges": "completed by webhook, but which stripe_* IDs are always async is not verified per method in this pass"
+      }
+    },
+    "logs": {
+      "source": "woocommerce-gateway-stripe",
+      "error_level_always_logged": true,
+      "error_level_note": "WC_Stripe_Logger::error does not check Stripe's own logging setting; WooCommerce's logging_enabled and level threshold still apply",
+      "verified_webhook_failure_message_prefix": "Webhook validation failed (",
+      "verified_webhook_failure_level": "error",
+      "context_warning": "the failure entry's context carries request headers and the event body; never output it"
+    },
+    "action_scheduler": {
+      "group": "woocommerce_stripe",
+      "hooks": ["wc_stripe_deferred_webhook", "wc_stripe_process_payment_intent_metadata", "wc_stripe_process_checkout_session_metadata"],
+      "note": "Hooks verified in the webhook handler; not claimed to be the plugin's complete hook list."
+    },
+    "replacements": {
+      "stripe_sepa": ["stripe_sepa_debit"]
+    },
+    "replacement_note": "Legacy method order 'stripe_sepa' maps to UPE 'sepa_debit' (gateway ID 'stripe_sepa_debit'). Legacy 'stripe' maps to UPE 'card', which keeps gateway ID 'stripe', so it is not a replacement.",
+    "registry_risk": "Constructing Stripe UPE method objects reads payment method configuration; when its 20-minute cache is cold and the PMC API is enabled, Stripe fetches it from api.stripe.com and writes a cooldown option. Payment-health must not force gateway construction to read enabled state."
+  },
+  "core_manual_gateways": {
+    "bacs": { "kind": "manual", "default_status": "on-hold", "filter": "woocommerce_bacs_process_payment_order_status" },
+    "cheque": { "kind": "manual", "default_status": "on-hold", "filter": "woocommerce_cheque_process_payment_order_status" },
+    "cod": { "kind": "manual", "default_status": "processing, or on-hold when the order has a downloadable item", "filter": "woocommerce_cod_process_payment_order_status", "paid_timestamp_note": "processing status triggers maybe_set_date_paid, so COD orders get a paid timestamp before any money is collected" }
+  },
+  "woocommerce": {
+    "authority": {
+      "hpos_enabled": "OrderUtil::custom_orders_table_usage_is_enabled() (option woocommerce_custom_orders_table_enabled === 'yes')",
+      "sync_option": "woocommerce_custom_orders_table_data_sync_enabled",
+      "placeholder_post_type": "shop_order_placehold",
+      "note": "Sync being on does not change which store is authoritative; read only the authoritative store."
+    },
+    "hpos": {
+      "orders_table": "{prefix}wc_orders",
+      "operational_table": "{prefix}wc_order_operational_data",
+      "meta_table": "{prefix}wc_orders_meta",
+      "columns": {
+        "type": "wc_orders.type",
+        "status": "wc_orders.status (stored with wc- prefix)",
+        "created": "wc_orders.date_created_gmt (datetime, UTC)",
+        "payment_method": "wc_orders.payment_method",
+        "transaction_id": "wc_orders.transaction_id",
+        "currency": "wc_orders.currency",
+        "total": "wc_orders.total_amount",
+        "parent": "wc_orders.parent_order_id",
+        "created_via": "wc_order_operational_data.created_via",
+        "paid": "wc_order_operational_data.date_paid_gmt (datetime, UTC, NULL when unset)"
+      },
+      "join": "wc_order_operational_data.order_id = wc_orders.id (unique key order_id)",
+      "indexes": "wc_orders has type_status_date (type, status, date_created_gmt); wc_order_operational_data has no index on date_paid_gmt",
+      "date_write_format": "Y-m-d H:i:s in UTC"
+    },
+    "legacy": {
+      "orders": "{prefix}posts with post_type 'shop_order'",
+      "status": "posts.post_status (wc- prefix)",
+      "created": "posts.post_date_gmt",
+      "meta": {
+        "payment_method": "_payment_method",
+        "transaction_id": "_transaction_id",
+        "created_via": "_created_via",
+        "currency": "_order_currency",
+        "total": "_order_total",
+        "date_paid": "_date_paid",
+        "paid_date_legacy": "_paid_date"
+      },
+      "paid_precedence": "use _date_paid when its first row is truthy (non-empty and not '0'); otherwise _paid_date",
+      "date_paid_format": "UTC Unix seconds as a numeric string; empty string when unset",
+      "paid_date_legacy_format": "Y-m-d H:i:s in the site's local time (WC_DateTime::date); parse in the store timezone for that local time, not today's offset; empty string when unset",
+      "duplicate_meta": "WordPress loads meta ORDER BY meta_id ASC and WooCommerce reads [0], so the lowest meta_id row of a key wins"
+    },
+    "created_via": { "classic_checkout": "checkout", "store_api": "store-api" },
+    "statuses": {
+      "store_api_draft": "checkout-draft",
+      "is_paid_default": ["processing", "completed"],
+      "is_paid_filter": "woocommerce_order_is_paid_statuses",
+      "payment_complete_from": ["on-hold", "pending", "failed", "cancelled"]
+    },
+    "order_types": { "order": "shop_order", "refund": "shop_order_refund" },
+    "gateway_registry": {
+      "verified_by": "lane core, 2026-11-15: includes/class-wc-payment-gateways.php at the 10.9.0 tag commit 0d7095c6066504a6fca229185ff363fd5785742d, SHA-256 1c9c8c9ab4b8ca6635dea7982c794bdbea4c5f9b023cc132bcd3063f6a72c725",
+      "initialised_action": "wc_payment_gateways_initialized (fired at the end of WC_Payment_Gateways::init(), since 8.5.0; line 137)",
+      "instances_property": "WC_Payment_Gateways::instance()->payment_gateways (public array of WC_Payment_Gateway objects keyed by sort position; line 30)",
+      "construction_note": "init() instantiates every class named by the woocommerce_payment_gateways filter (lines 92-104); the toolkit reads the registry only after the action has fired and never calls init() or a gateway method",
+      "core_classes": ["WC_Gateway_BACS", "WC_Gateway_Cheque", "WC_Gateway_COD", "WC_Gateway_Paypal"],
+      "settings_option": "woocommerce_<id>_settings (WC_Settings_API); the toolkit reads only the enabled key, plus testmode for Stripe",
+      "stripe_main_gateway_class": "WC_Stripe_UPE_Payment_Gateway (includes/payment-methods/class-wc-stripe-upe-payment-gateway.php:16 in both 11.2.0 and 10.9.1)"
+    },
+    "edit_url": {
+      "helper": "OrderUtil::get_order_admin_edit_url( int $order_id )",
+      "legacy_shape": "admin_url( 'post.php?post=<id>' ) . '&action=edit'",
+      "hpos_shape": "admin_url( 'admin.php?page=wc-orders&action=edit&id=<id>' ) for shop_order",
+      "hpos_side_effect": "the helper calls wc_get_order() under HPOS and writes a debug log entry when the order is missing; build the shop_order URL directly to avoid hydration and log writes"
+    },
+    "hold_stock": {
+      "option": "woocommerce_hold_stock_minutes",
+      "settings_default": "60",
+      "cancellation_runs_when": "held minutes >= 1 AND woocommerce_manage_stock === 'yes' AND the woocommerce_cancel_unpaid_orders_interval_minutes filter result >= 1",
+      "selects": "pending orders of any registered order type whose last modified time is older than the hold window (not creation time)",
+      "cancels_only": "created_via 'checkout' or 'store-api', filterable by woocommerce_cancel_unpaid_order",
+      "scheduler": "Action Scheduler hook woocommerce_cancel_unpaid_orders, group woocommerce (WP-Cron fallback)",
+      "parse": "absent option uses the core default '60'; empty, 0 or non-numeric means not configured; positive integer with stock management on is configuration evidence, not proof a cancellation ran"
+    },
+    "logging": {
+      "enabled": "LoggingUtil::logging_is_enabled() (option woocommerce_logs_logging_enabled, default true)",
+      "default_handler": "LoggingUtil::get_default_handler() (constant WC_LOG_HANDLER, then option woocommerce_logs_default_handler, default Automattic\\WooCommerce\\Internal\\Admin\\Logging\\LogHandlerFileV2)",
+      "db_handler_class": "WC_Log_Handler_DB",
+      "level_threshold": "LoggingUtil::get_level_threshold() (constant WC_LOG_THRESHOLD, then option woocommerce_logs_level_threshold, default 'none' meaning all levels)",
+      "retention_days": "LoggingUtil::get_retention_period() (filter woocommerce_logger_days_to_retain_logs, else option woocommerce_logs_retention_period_days, default 30)",
+      "log_directory": "LoggingUtil::get_log_directory( false ) - pass false; the default true creates the directory",
+      "file_name": "<source>-YYYY-MM-DD-<hash>.log; source is everything before the last 4 dash segments; rotated files add .<n> to the source",
+      "file_line": "<ISO-8601 UTC 'c' time> <LEVEL upper case> <message>[ CONTEXT: <json>]; filterable by woocommerce_format_log_entry",
+      "db_table": "{prefix}woocommerce_log (log_id, timestamp datetime UTC, level smallint, source varchar(200), message longtext, context longtext NULL); index on level only",
+      "level_severity": { "emergency": 800, "alert": 700, "critical": 600, "error": 500, "warning": 400, "notice": 300, "info": 200, "debug": 100 }
+    }
+  },
+  "synthetic_cases": {
+    "now": 1794700800,
+    "now_iso": "2026-11-15T00:00:00+00:00",
+    "red_failure_window_hours": 72,
+    "stale_success_days": 7,
+    "webhook": [
+      { "id": "success_newer", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "1794664800" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "green", "mode": "live", "category": "delivery_ok" } },
+      { "id": "newer_failure_within_72h", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794528000", "last_failure_at": "1794693600" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "red", "mode": "live", "category": "delivery_failed" } },
+      { "id": "newer_failure_outside_72h", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1793980800", "last_failure_at": "1794340800" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "green", "mode": "live", "category": "delivery_ok", "note": "failure is newer but 100 hours old; contract C8 makes it red only inside 72 hours; the 200-hour success is stale but webhook_required is false, so no stale allegation" } },
+      { "id": "older_failure", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "1794340800" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "green", "mode": "live", "category": "delivery_ok" } },
+      { "id": "failure_no_success_ever", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1792108800", "last_success_at": "0", "last_failure_at": "1794682800" }, "accepted_orders_7d": 3, "webhook_required": false, "expect": { "status": "red", "mode": "live", "category": "delivery_failed" } },
+      { "id": "equal_timestamps", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794690000", "last_failure_at": "1794690000" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": "live", "category": "order_unclear", "note": "proposed: equal values do not establish a newer failure (C8) and the two clocks differ, so ordering is unknown; lead to confirm" } },
+      { "id": "malformed_success_letters", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "abc", "last_failure_at": "0" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": "live", "category": "record_malformed" } },
+      { "id": "malformed_success_decimal", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200.5", "last_failure_at": "0" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": "live", "category": "record_malformed" } },
+      { "id": "malformed_failure_negative", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "-5" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": "live", "category": "record_malformed" } },
+      { "id": "future_failure", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "1794708000" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": "live", "category": "record_malformed" } },
+      { "id": "records_missing", "settings": { "testmode": "no" }, "live": {}, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": "live", "category": "record_missing" } },
+      { "id": "no_events_since_monitoring", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1793836800", "last_success_at": "0", "last_failure_at": "0" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": "live", "category": "no_events_recorded" } },
+      { "id": "stale_success_recent_orders_required", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794009600", "last_failure_at": "0" }, "accepted_orders_7d": 5, "webhook_required": true, "expect": { "status": "amber", "mode": "live", "category": "success_stale" } },
+      { "id": "stale_success_recent_orders_not_required", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794009600", "last_failure_at": "0" }, "accepted_orders_7d": 5, "webhook_required": false, "expect": { "status": "green", "mode": "live", "category": "delivery_ok", "note": "no verified expectation that these orders need the webhook, so no stale allegation" } },
+      { "id": "stale_success_recent_orders_unverified", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794009600", "last_failure_at": "0" }, "accepted_orders_7d": 5, "webhook_required": null, "expect": { "status": "unknown", "mode": "live", "category": "webhook_stale_unverified", "note": "added by lane core, fix round 2 (pre-review miss 3, Q4): async stripe_* methods have no verified expectation either way, so a stale success with recent orders is unknown, neither amber nor green" } },
+      { "id": "stale_success_no_recent_orders", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794009600", "last_failure_at": "0" }, "accepted_orders_7d": 0, "webhook_required": true, "expect": { "status": "green", "mode": "live", "category": "delivery_ok" } },
+      { "id": "test_mode_reads_test_keys_only", "settings": { "testmode": "yes" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794528000", "last_failure_at": "1794697200" }, "test": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "0" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "green", "mode": "test", "category": "delivery_ok" } },
+      { "id": "live_mode_ignores_test_failure", "settings": { "testmode": "no" }, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "0" }, "test": { "monitoring_began_at": "1789516800", "last_success_at": "0", "last_failure_at": "1794697200" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "green", "mode": "live", "category": "delivery_ok" } },
+      { "id": "testmode_key_missing_is_live", "settings": {}, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "0" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "green", "mode": "live", "category": "delivery_ok" } },
+      { "id": "settings_absent_mode_unknown", "settings": null, "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "0" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": null, "category": "mode_unknown" } },
+      { "id": "settings_not_array_mode_unknown", "settings": "corrupted", "live": { "monitoring_began_at": "1789516800", "last_success_at": "1794697200", "last_failure_at": "0" }, "accepted_orders_7d": 12, "webhook_required": false, "expect": { "status": "unknown", "mode": null, "category": "mode_unknown" } }
+    ],
+    "legacy_paid_date": [
+      { "id": "date_paid_wins", "meta": { "_date_paid": ["1794600000"], "_paid_date": ["2026-11-01 10:00:00"] }, "timezone": "Australia/Melbourne", "expect_paid_utc": 1794600000 },
+      { "id": "falls_back_to_paid_date_local", "meta": { "_date_paid": [""], "_paid_date": ["2026-11-14 11:00:00"] }, "timezone": "Australia/Melbourne", "expect_paid_utc": 1794614400 },
+      { "id": "zero_date_paid_falls_back", "meta": { "_date_paid": ["0"], "_paid_date": ["2026-11-14 00:00:00"] }, "timezone": "UTC", "expect_paid_utc": 1794614400 },
+      { "id": "duplicate_rows_first_wins", "meta": { "_date_paid": ["1794600000", "1794690000"] }, "timezone": "UTC", "expect_paid_utc": 1794600000 },
+      { "id": "neither_set", "meta": { "_date_paid": [""], "_paid_date": [""] }, "timezone": "UTC", "expect_paid_utc": null }
+    ],
+    "hold_stock": [
+      { "id": "default", "hold_stock_minutes": "60", "manage_stock": "yes", "expect": { "hold_stock_minutes": 60, "hold_stock_configured": true } },
+      { "id": "empty", "hold_stock_minutes": "", "manage_stock": "yes", "expect": { "hold_stock_minutes": null, "hold_stock_configured": false } },
+      { "id": "zero", "hold_stock_minutes": "0", "manage_stock": "yes", "expect": { "hold_stock_minutes": null, "hold_stock_configured": false } },
+      { "id": "stock_management_off", "hold_stock_minutes": "60", "manage_stock": "no", "expect": { "hold_stock_minutes": 60, "hold_stock_configured": false } },
+      { "id": "non_numeric", "hold_stock_minutes": "abc", "manage_stock": "yes", "expect": { "hold_stock_minutes": null, "hold_stock_configured": false } },
+      { "id": "option_absent_core_default", "hold_stock_minutes": null, "manage_stock": "yes", "expect": { "hold_stock_minutes": 60, "hold_stock_configured": true, "note": "wc_cancel_unpaid_orders reads get_option( 'woocommerce_hold_stock_minutes', '60' ), so an absent option behaves as 60" } },
+      { "id": "manage_stock_absent", "hold_stock_minutes": "60", "manage_stock": null, "expect": { "hold_stock_minutes": 60, "hold_stock_configured": false, "note": "core compares 'yes' !== get_option( 'woocommerce_manage_stock' ) with no default" } }
+    ]
+  }
+}

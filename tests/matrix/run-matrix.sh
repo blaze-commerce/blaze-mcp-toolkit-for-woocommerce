@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Real-plugin matrix: the 1.1 release gate. Called by `scripts/run-integration.sh --matrix ZIP`.
+# Real-plugin matrix: the release gate. Called by `scripts/run-integration.sh --matrix ZIP`.
+# Besides the suites and the HTTP suite per state, it runs the payment-health storage loop
+# (test-payment-orders and test-payment-health in every authority/sync combination, every state
+# except none) and, in recommended, the cold performance budget (tests/matrix/perf-suite.sh; set
+# BLZMCP_MATRIX_PERF=0 to skip it, which makes the evidence record fail as incomplete).
 #
 #   bash tests/matrix/run-matrix.sh dist/candidate-<commit>.zip
 #
@@ -35,8 +39,12 @@ export PATH="$REPO/node_modules/.bin:$PATH" # so frontend-curl.sh's `npx wp-env`
 
 # Suite lists (round 5). Recommended: the full existing suite. Easy-only and both: the
 # shared-invariant suites plus the connector-aware ones. None: lifecycle plus the none setup checks.
-ALL_SUITES=$(cd "$REPO/tests/Integration" && ls test-*.php | tr '\n' ' ')
-SHARED_SUITES="test-permission-matrix.php test-health-summary.php test-update-history.php test-access-check.php test-no-frontend.php test-uninstall.php test-bundled.php"
+# The storage suites run in the order-storage loop (every authority/sync combination, each switched
+# in one process and asserted in a fresh one), not in the plain list.
+STORAGE_SUITES="test-payment-orders.php test-payment-health.php"
+STORAGE_COMBOS="hpos:no hpos:yes legacy:yes legacy:no"
+ALL_SUITES=$(cd "$REPO/tests/Integration" && ls test-*.php | grep -vxF -e test-payment-orders.php -e test-payment-health.php | tr '\n' ' ')
+SHARED_SUITES="test-permission-matrix.php test-health-summary.php test-update-history.php test-access-check.php test-no-frontend.php test-uninstall.php test-bundled.php test-payment-methods.php test-payment-errors.php"
 CONNECTOR_SUITES="test-connectors.php test-connector-availability.php test-workflows.php test-setup-checks.php test-analytics-naming.php"
 suites_for() {
 	case "$1" in
@@ -56,6 +64,13 @@ required_for() {
 port_for() { jq -r '.port' "$REPO/tests/matrix/$1.wp-env.json"; }
 
 declare -A RESULT PASSES FAILS VERSIONS PHPV WPV
+STORAGE_LINES=()
+PERF_FILE=''
+ZIP_SHA256=$(shasum -a 256 "$ZIP" | awk '{print $1}')
+CAND_VERSION=$(unzip -p "$ZIP" "$SLUG/$SLUG.php" | sed -n 's/^ \* Version:[[:space:]]*//p' | head -1 | tr -d '\r')
+for f in $STORAGE_SUITES; do
+	[ -f "$REPO/tests/Integration/$f" ] || { echo "MATRIX FAILED: required storage suite $f does not exist"; exit 1; }
+done
 fail=0
 FIRST_DATE=''
 
@@ -176,6 +191,49 @@ run_state() {
 			echo "PASS  [$state] $f ($summary)"
 		fi
 	done
+	# Order storage loop (payment health): every authority/sync combination, switched in one process
+	# and asserted in a fresh one. Every combination and suite must report its own STORAGE line, or
+	# the state fails with INCOMPLETE COVERAGE. The state's original storage mode is restored after.
+	if [ "$state" != none ]; then
+		local orig_hpos orig_sync orig_set combo st sy seen
+		orig_hpos=$(wp option get woocommerce_custom_orders_table_enabled | tr -d '\r' | tail -1)
+		orig_sync=$(wp option get woocommerce_custom_orders_table_data_sync_enabled | tr -d '\r' | tail -1)
+		[ "$orig_hpos" == yes ] && orig_set=hpos || orig_set=legacy
+		[ "$orig_sync" == yes ] || orig_sync=no
+		for combo in $STORAGE_COMBOS; do
+			st=${combo%%:*}
+			sy=${combo##*:}
+			if ! "$WPE" run cli env BLZMCP_PF_SET="$st" BLZMCP_PF_SYNC="$sy" wp eval-file "$T/Integration/test-payment-orders.php" 2>&1 | grep -qE '^[0-9]+ passed, 0 failed'; then
+				echo "INCOMPLETE COVERAGE: [$state] could not switch order storage to storage=$st sync=$sy"
+				FAILS[$state]=$((FAILS[$state] + 1))
+				for f in $STORAGE_SUITES; do STORAGE_LINES+=("$state|$combo|$f|NOT RUN|0|1"); done
+				continue
+			fi
+			for f in $STORAGE_SUITES; do
+				out=$("$WPE" run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_EXPECT_AUTHORITY="$st" BLZMCP_EXPECT_SYNC="$sy" wp eval-file "$T/Integration/$f" 2>&1)
+				status=$?
+				summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
+				seen=$(printf '%s\n' "$out" | grep -E '^STORAGE ' | tail -1)
+				printf '%s\n' "$out" >"$LOG_DIR/$state-$f-$st-$sy.log"
+				p=$(sed -E 's/^([0-9]+) passed.*/\1/' <<<"${summary:-0 passed}")
+				q=$(sed -E 's/.* ([0-9]+) failed.*/\1/' <<<"${summary:-x 1 failed}")
+				PASSES[$state]=$((PASSES[$state] + p))
+				if [ "$status" -ne 0 ] || [ -z "$summary" ] || [ "$q" != 0 ] || ! grep -q "authority=$st sync=$sy" <<<"$seen" || grep -q 'Fatal error' <<<"$out"; then
+					echo "FAIL  [$state] $f [storage=$st sync=$sy] (${summary:-no summary}; ${seen:-no STORAGE line})"
+					printf '%s\n' "$out" | awk '/^FAIL|Fatal error/ && n++ < 20'
+					FAILS[$state]=$((FAILS[$state] + (q == 0 ? 1 : q)))
+					STORAGE_LINES+=("$state|$combo|$f|FAILED|$p|$((q == 0 ? 1 : q))")
+				else
+					echo "PASS  [$state] $f [storage=$st sync=$sy] ($summary)"
+					STORAGE_LINES+=("$state|$combo|$f|PASSED|$p|0")
+				fi
+			done
+		done
+		if ! "$WPE" run cli env BLZMCP_PF_SET="$orig_set" BLZMCP_PF_SYNC="$orig_sync" wp eval-file "$T/Integration/test-payment-orders.php" 2>&1 | grep -qE '^[0-9]+ passed, 0 failed'; then
+			echo "FAIL  [$state] order storage not restored to storage=$orig_set sync=$orig_sync"
+			FAILS[$state]=$((FAILS[$state] + 1))
+		fi
+	fi
 	# test-no-frontend.php runs with BLZMCP_SKIP_HTTP=1; its HTTP half is frontend-curl.sh from the
 	# host, so every state that lists test-no-frontend must run it (else INCOMPLETE COVERAGE).
 	if [[ " $suites " == *" test-no-frontend.php "* ]]; then
@@ -226,6 +284,34 @@ run_state() {
 	fi
 	out=$(wp eval-file "$T/matrix/fixture.php" cleanup)
 	echo "fixture cleanup: $out"
+	# Cold performance budget (FEATURE-PLAN item 10), recommended state only, on the candidate.
+	if [ "$state" == recommended ] && [ "${BLZMCP_MATRIX_PERF:-1}" != 0 ]; then
+		PERF_FILE="$LOG_DIR/payment-performance.json"
+		# A temporary application password for the HTTP latency figures, from the matrix's own
+		# credentials helper. It lives only in shell variables and is revoked straight after.
+		local cred perf_id perf_secret
+		cred=$(wp eval-file "$T/matrix/credentials.php" app-password create admin)
+		perf_id=$(sed -n 's/^ID=//p' <<<"$cred" | head -1)
+		perf_secret=$(sed -n 's/^SECRET=//p' <<<"$cred" | head -1)
+		unset cred
+		[ -n "$perf_id" ] && [ -n "$perf_secret" ] || echo "FAIL  [$state] perf: no application password for the HTTP latency figures"
+		echo "perf: Action Scheduler store before timing: $(wp eval 'echo get_class( ActionScheduler::store() );')"
+		if WPE="$WPE" BLZMCP_T="$T" BLZMCP_PERF_OUT="$PERF_FILE" BLZMCP_PERF_CANDIDATE="$ZIP" \
+			BLZMCP_PERF_PORT="$port" BLZMCP_PERF_LOGIN=admin BLZMCP_PERF_APP_PASSWORD="$perf_secret" \
+			bash "$REPO/tests/matrix/perf-suite.sh" >"$LOG_DIR/$state-perf.log" 2>&1; then
+			echo "PASS  [$state] perf-suite.sh ($(grep -c '^partition' "$LOG_DIR/$state-perf.log") partitions under 1500 ms)"
+			PASSES[$state]=$((PASSES[$state] + 1))
+		else
+			echo "FAIL  [$state] perf-suite.sh (payment health cold budget; see payment-performance.json)"
+			grep -E '^(partition|FAIL|CLEANUP)' "$LOG_DIR/$state-perf.log" | head -10
+			FAILS[$state]=$((FAILS[$state] + 1))
+		fi
+		unset perf_secret
+		if [ -n "$perf_id" ] && ! wp eval-file "$T/matrix/credentials.php" app-password revoke admin "$perf_id" >/dev/null; then
+			echo "CLEANUP ERROR  [$state] perf application password not revoked"
+			FAILS[$state]=$((FAILS[$state] + 1))
+		fi
+	fi
 	[ "${FAILS[$state]}" -eq 0 ] && RESULT[$state]=PASSED
 	return 0
 }
@@ -238,6 +324,8 @@ stop_state() {
 attempt=1
 while :; do
 	restart=0
+	STORAGE_LINES=()
+	PERF_FILE=''
 	FIRST_DATE=''
 	for state in $STATES; do
 		[ -f "$REPO/tests/matrix/$state.wp-env.json" ] || { echo "INCOMPLETE COVERAGE: no config for $state"; RESULT[$state]=FAILED; FAILS[$state]=1; continue; }
@@ -263,10 +351,16 @@ for state in $STATES; do
 done
 {
 	echo "ZIP=$ZIP"
+	echo "ZIP_SHA256=$ZIP_SHA256"
+	echo "VERSION=$CAND_VERSION"
 	echo "COMMIT=$(git -C "$REPO" rev-parse HEAD)"
 	echo "WINDOW_FILE=$(ls "$LOG_DIR"/*.window 2>/dev/null | head -1)"
+	echo "PERF_FILE=$PERF_FILE"
 	for state in $STATES; do
 		echo "STATE=$state|${RESULT[$state]:-NOT RUN}|${PASSES[$state]:-0}|${FAILS[$state]:-1}|${WPV[$state]:-}|${PHPV[$state]:-}|${VERSIONS[$state]:-[]}"
+	done
+	for line in "${STORAGE_LINES[@]}"; do
+		echo "STORAGE=$line"
 	done
 } >"$LOG_DIR/summary.txt"
 bash "$REPO/tests/matrix/record.sh" "$LOG_DIR/summary.txt" "$([ "$fail" -eq 0 ] && echo PASSED || echo FAILED)" || fail=1

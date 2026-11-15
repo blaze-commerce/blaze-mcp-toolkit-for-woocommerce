@@ -74,6 +74,11 @@ if ( ! function_exists( 'as_schedule_recurring_action' ) ) {
 		return 1;
 	}
 }
+if ( ! function_exists( 'current_user_can' ) ) {
+	function current_user_can( string $capability, ...$args ): bool {
+		return in_array( $capability, (array) ( $GLOBALS['blzmcp_test_caps'] ?? array() ), true );
+	}
+}
 if ( ! function_exists( 'wp_json_encode' ) ) {
 	function wp_json_encode( $value, int $flags = 0, int $depth = 512 ) {
 		return json_encode( $value, $flags, $depth );
