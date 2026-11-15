@@ -8,6 +8,8 @@
  *   wp eval-file .../seed-payment-volume.php verify <recent> <old>           Counts in the authoritative store, plus a CRUD sample
  *   wp eval-file .../seed-payment-volume.php diag <file|db> <now>            Near-budget Stripe logs and failed jobs, logger switched
  *   wp eval-file .../seed-payment-volume.php cleanup                         Remove every order, log and job this fixture made
+ *   wp eval-file .../seed-payment-volume.php diag-cleanup                    Remove only the logs, jobs and logger settings
+ *                                                                            (both print CLEANUP=<json>: what was removed and what remains)
  *   wp eval-file .../seed-payment-volume.php distribution                   Print the seed distribution as JSON
  *
  * Orders go through WooCommerce CRUD (new WC_Order, one save), origin `checkout`, tagged with
@@ -123,6 +125,39 @@ function blzmcp_perf_cleanup( bool $orders = true ): int {
 	}
 	wp_cache_flush_group( 'orders' );
 	return count( $ids );
+}
+
+/**
+ * What is left of the fixture after a cleanup, as a machine-readable result (wave 4: the cleanup
+ * outcome is part of the performance receipt).
+ *
+ * @param string   $mode    orders|diagnostics.
+ * @param int|null $removed Orders removed (null for a diagnostics-only cleanup).
+ * @return array<string,mixed>
+ */
+function blzmcp_perf_cleanup_result( string $mode, ?int $removed ): array {
+	global $wpdb;
+	$logs  = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . 'woocommerce_log' ) ) )
+		? (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE message LIKE %s', $wpdb->prefix . 'woocommerce_log', $wpdb->esc_like( BLZMCP_PERF_PREFIX ) . '%' ) )
+		: 0;
+	$dir   = blzmcp_perf_log_dir();
+	$files = null === $dir ? 0 : count( (array) glob( $dir . '/woocommerce-gateway-stripe-*-blzmcpperf*.log' ) );
+	$jobs  = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . 'actionscheduler_actions' ) ) )
+		? (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE args LIKE %s', $wpdb->prefix . 'actionscheduler_actions', '%blzmcp_perf%' ) )
+		: 0;
+	$tagged   = count( blzmcp_perf_ids() );
+	$settings = null === get_option( BLZMCP_PERF_SAVED, null );
+	$diag_ok  = 0 === $logs && 0 === $files && 0 === $jobs && $settings;
+	return array(
+		'mode'                     => $mode,
+		'orders_removed'           => $removed,
+		'tagged_remaining'         => $tagged,
+		'diag_log_rows_remaining'  => $logs,
+		'diag_log_files_remaining' => $files,
+		'diag_jobs_remaining'      => $jobs,
+		'settings_restored'        => $settings,
+		'ok'                       => $diag_ok && ( 'diagnostics' === $mode || 0 === $tagged ),
+	);
 }
 
 /** WooCommerce's resolved log directory, or null. */
@@ -263,11 +298,14 @@ switch ( $blzmcp_perf_cmd ) {
 		echo 'DIAG=' . wp_json_encode( blzmcp_perf_diag( (string) ( $blzmcp_perf_args[1] ?? 'file' ), (int) ( $blzmcp_perf_args[2] ?? time() ) ) ) . "\n";
 		break;
 	case 'cleanup':
-		echo 'REMOVED=' . blzmcp_perf_cleanup() . "\n";
+		$removed = blzmcp_perf_cleanup();
+		echo 'REMOVED=' . $removed . "\n";
+		echo 'CLEANUP=' . wp_json_encode( blzmcp_perf_cleanup_result( 'orders', $removed ) ) . "\n";
 		break;
 	case 'diag-cleanup':
 		blzmcp_perf_cleanup( false );
 		echo "REMOVED=diagnostics\n";
+		echo 'CLEANUP=' . wp_json_encode( blzmcp_perf_cleanup_result( 'diagnostics', null ) ) . "\n";
 		break;
 	case 'distribution':
 		$per = array();

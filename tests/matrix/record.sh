@@ -24,7 +24,9 @@ set -uo pipefail
 # bound to this zip's SHA-256 and has 5 complete trials for each storage/window/logger partition,
 # each under the 1500 ms budget, every one of them valid (seeded workload observed, all 4 readers
 # at their expected counts), a detected forced orders/logs/jobs reader failure per storage, and
-# jobs timed on ActionScheduler_DBStore only. The run's ZIP_SHA256 and VERSION must match the zip (exit 3), and
+# jobs timed on ActionScheduler_DBStore only, and a clean volume-fixture cleanup record (each
+# storage's before, diag-file, diag-db and after cleanups and a final one, nothing left behind,
+# every seeded order removed, the original order storage restored). The run's ZIP_SHA256 and VERSION must match the zip (exit 3), and
 # the zip's header Version, BLZMCP_VERSION and readme Stable tag must agree (exit 3). The record is
 # titled and named after the candidate's version, never a fixed one.
 #
@@ -168,12 +170,25 @@ else
 	fmissing=$(jq -r '[("legacy", "hpos") as $s | ({l:"file", f:"logs"}, {l:"db", f:"logs"}, {l:"db", f:"orders"}, {l:"db", f:"jobs"}) as $p | . as $r
 		| (($r.forced_failures // []) | map(select(.storage == $s and .logger == $p.l and .force == $p.f))) as $f
 		| select(($f | length) != 1 or ($f | all(.ok == false and .detected == true)) != true) | "\($p.f) reader (\($s), \($p.l) logger)"] | join(", ")' "$perf_file")
+	# Wave 4 (REVIEW-pass4b gap 2): every fixture cleanup ran and left nothing, every seeded order
+	# was removed, and the original order storage was restored. Checked on the cleanup records.
+	cmissing=$(jq -r '. as $r | ($r.cleanup // []) as $c
+		| def good: .ok == true and (.mode != "orders" or .tagged_remaining == 0) and (if has("expected_removed") then .orders_removed == .expected_removed else true end);
+		[ (("legacy", "hpos") as $s | ("before", "diag-file", "diag-db", "after") as $ph
+			| ($c | map(select(.storage == $s and .phase == $ph))) as $e
+			| select(($e | length) < 1 or ($e | all(good)) != true or ($ph == "after" and ($e | all(has("expected_removed") and .expected_removed > 0)) != true))
+			| "\($ph) (\($s))"),
+		  (($c | map(select(.phase == "final"))) as $e | select(($e | length) < 1 or ($e | all(good)) != true) | "final"),
+		  (select(($c | all(good)) != true) | "a cleanup record that failed"),
+		  (select(($r.storage_restored.ok // false) != true) | "order storage restore") ] | unique | join(", ")' "$perf_file")
 	if [ -n "$pmissing" ]; then
 		incomplete+=("performance partitions incomplete: $pmissing")
 	elif [ -n "$tinvalid" ]; then
 		incomplete+=("performance trials without the seeded workload and valid readers: $tinvalid")
 	elif [ -n "$fmissing" ]; then
 		incomplete+=("forced reader failure not shown to fail the gate: $fmissing")
+	elif [ -n "$cmissing" ]; then
+		incomplete+=("volume fixture cleanup missing or incomplete: $cmissing")
 	elif [ "$(jq -c '[.exact_jobs_required, .jobs_store]' "$perf_file")" != '[true,["ActionScheduler_DBStore"]]' ]; then
 		incomplete+=("background jobs were not timed on the exact database-store path (jobs_store $(jq -c '.jobs_store' "$perf_file"))")
 	elif [ -n "$hmissing" ]; then
@@ -250,6 +265,9 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 		echo "- HTTP latency (abilities REST route, ms): $(jq -r '(.http // []) | map("\(.storage)/\(.window)h/\(.kind) \(.total_ms)") | join(", ") | if . == "" then "none" else . end' "$perf_file")"
 		echo "- Background jobs timed on: $(jq -r '.jobs_path // "not recorded"' "$perf_file")"
 		echo "- Trial validity: $(jq -r '.validity // "not recorded"' "$perf_file")"
+		echo "- Volume fixture cleanup: $(jq -r '((.cleanup // []) | map(select(.phase == "after")) | map("\(.storage) removed \(.orders_removed)/\(.expected_removed) orders, \(.tagged_remaining) tagged left") | join("; ") | if . == "" then "not recorded" else . end)
+			+ "; diagnostics cleanups \((.cleanup // []) | map(select(.mode == "diagnostics")) | length), all clean \((.cleanup // []) | map(select(.mode == "diagnostics")) | all(.ok == true))"
+			+ "; order storage restored to \(.storage_restored.storage // "?") sync=\(.storage_restored.sync // "?"): \(.storage_restored.ok // false)"' "$perf_file")"
 		echo "- Forced reader failures (each must fail the trial): $(jq -r '(.forced_failures // []) | map("\(.force)/\(.storage)/\(.logger) \(if .ok == false and .detected == true then "failed as required" else "NOT DETECTED" end)") | join(", ") | if . == "" then "none" else . end' "$perf_file")"
 	else
 		echo "- (no performance receipt)"

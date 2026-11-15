@@ -5,7 +5,10 @@
 #
 # FAKE_MODE: good | invalid-<orders|logs|jobs> (one timed hpos 24h db trial reports that reader
 # failed) | undetected-<orders|logs|jobs> (that forced probe comes back as a success) |
-# hybrid (the measuring process sees ActionScheduler_HybridStore).
+# hybrid (the measuring process sees ActionScheduler_HybridStore) | cleanup-leftover (the
+# post-storage cleanup leaves 3 tagged orders) | cleanup-short (it removes one order fewer than
+# were seeded) | cleanup-silent (no CLEANUP result) | diag-leftover (diagnostics cleanup leaves 2
+# fixture jobs) | restore-fail (the final switch back to the original storage fails).
 set -uo pipefail
 
 FAKE_DIR=${FAKE_DIR:?FAKE_DIR}
@@ -33,19 +36,46 @@ script=$(basename "$2")
 shift 2
 case "$script" in
 test-payment-orders.php)
+	# restore-fail: the only hpos -> legacy switch in "legacy hpos" order is the final restore.
+	if [ "$MODE" == restore-fail ] && [ "$storage" == hpos ] && [ "$set_storage" == legacy ]; then
+		echo "0 passed, 1 failed"
+		exit 1
+	fi
 	[ -n "$set_storage" ] && echo "$set_storage" >"$FAKE_DIR/storage"
 	echo "1 passed, 0 failed"
 	;;
 payment-fixture.php) echo "CLEARED=1" ;;
 seed-payment-volume.php)
 	case "$1" in
-	orders | old) echo "SEEDED=$3" ;;
+	orders | old)
+		echo "$3" >"$FAKE_DIR/seeded.$1.$2"
+		echo "SEEDED=$3"
+		;;
 	verify) echo "VERIFY={\"ok\":true,\"authority\":\"$storage\",\"orders\":$(($2 + $3)),\"untagged\":0}" ;;
 	diag)
 		echo "$2" >"$FAKE_DIR/logger"
 		echo "DIAG={\"handler\":\"$2\",\"failed_jobs\":40}"
 		;;
-	cleanup | diag-cleanup) echo "REMOVED=0" ;;
+	cleanup)
+		seeded=0
+		if compgen -G "$FAKE_DIR/seeded.*" >/dev/null; then
+			seeded=$(cat "$FAKE_DIR"/seeded.* | paste -sd+ - | bc)
+			rm -f "$FAKE_DIR"/seeded.*
+		fi
+		left=0
+		removed=$seeded
+		[ "$MODE" == cleanup-leftover ] && [ "$seeded" -gt 0 ] && left=3 && removed=$((seeded - 3))
+		[ "$MODE" == cleanup-short ] && [ "$seeded" -gt 0 ] && removed=$((seeded - 1))
+		echo "REMOVED=$removed"
+		[ "$MODE" == cleanup-silent ] && exit 0
+		echo "CLEANUP={\"mode\":\"orders\",\"orders_removed\":$removed,\"tagged_remaining\":$left,\"diag_log_rows_remaining\":0,\"diag_log_files_remaining\":0,\"diag_jobs_remaining\":0,\"settings_restored\":true,\"ok\":$([ "$left" == 0 ] && echo true || echo false)}"
+		;;
+	diag-cleanup)
+		jobs=0
+		[ "$MODE" == diag-leftover ] && jobs=2
+		echo "REMOVED=diagnostics"
+		echo "CLEANUP={\"mode\":\"diagnostics\",\"orders_removed\":null,\"tagged_remaining\":0,\"diag_log_rows_remaining\":0,\"diag_log_files_remaining\":0,\"diag_jobs_remaining\":$jobs,\"settings_restored\":true,\"ok\":$([ "$jobs" == 0 ] && echo true || echo false)}"
+		;;
 	distribution) echo 'DISTRIBUTION={"cycle":20}' ;;
 	esac
 	;;

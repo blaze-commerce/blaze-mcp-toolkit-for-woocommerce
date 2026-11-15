@@ -37,6 +37,20 @@ run 'faithful run with every reader valid passes' 0 good BLZMCP_PERF_REQUIRE_DBS
 assert 'receipt: 8 partitions, 8 forced probes detected, exact jobs path required and seen' "$(jq -r '(.partitions | length) == 8 and .all_pass and .forced_failures_detected and (.forced_failure_checks | length) == 8 and .exact_jobs_required and .jobs_store == ["ActionScheduler_DBStore"] and (.jobs_path | startswith("exact"))' "$WORK/perf.json")"
 assert 'receipt keeps every trial with its reader validation' "$(jq -r '(.trials | length) == 40 and (.trials | all(.validation.readers.orders == true))' "$WORK/perf.json")"
 assert 'the log ends PERF PASSED' "$(tail -1 "$WORK/log" | grep -qx 'PERF PASSED' && echo true)"
+assert 'receipt records every cleanup (4 per storage + final), all orders removed, storage restored' "$(jq -r '.cleanup_ok and (.cleanup | length) == 9 and (.cleanup_checks | all(.passed)) and ([.cleanup[] | select(.phase == "after") | .orders_removed == .expected_removed and .expected_removed == 60 and .tagged_remaining == 0] == [true, true]) and .storage_restored == {storage:"legacy", sync:"no", ok:true}' "$WORK/perf.json")"
+assert 'the perf log prints each cleanup and the cleanup summary' "$(grep -q '^  cleanup after (hpos): orders removed 60, tagged fixture orders remaining 0' "$WORK/log" && grep -q '^cleanup: complete: legacy removed 60/60, 0 tagged left; hpos removed 60/60, 0 tagged left; order storage restored to legacy sync=no: true' "$WORK/log" && echo true)"
+
+# Wave 4 (REVIEW-pass4b gap 2): cleanup is evidence, and an incomplete one fails closed.
+run 'a cleanup that leaves fixture orders behind fails the gate' 1 cleanup-leftover BLZMCP_PERF_REQUIRE_DBSTORE=1
+assert '  ... recorded: tagged orders remaining, cleanup_ok false, all_pass false' "$(jq -r '.cleanup_ok == false and .all_pass == false and ([.cleanup[] | select(.phase == "after") | .tagged_remaining] == [3, 3])' "$WORK/perf.json")"
+run 'a cleanup that removes fewer orders than were seeded fails the gate' 1 cleanup-short BLZMCP_PERF_REQUIRE_DBSTORE=1
+assert '  ... recorded with the expected count' "$(jq -r '.cleanup_ok == false and ([.cleanup[] | select(.phase == "after") | "\(.orders_removed)/\(.expected_removed)"] == ["59/60", "59/60"])' "$WORK/perf.json")"
+run 'a cleanup with no result fails the gate' 1 cleanup-silent BLZMCP_PERF_REQUIRE_DBSTORE=1
+assert '  ... recorded as no cleanup result' "$(jq -r '.cleanup_ok == false and (.cleanup | all(.error == "no cleanup result" or .mode == "diagnostics"))' "$WORK/perf.json")"
+run 'a diagnostics cleanup that leaves fixture jobs fails the gate' 1 diag-leftover BLZMCP_PERF_REQUIRE_DBSTORE=1
+assert '  ... recorded per logger' "$(jq -r '.cleanup_ok == false and ([.cleanup_checks[] | select(.passed == false) | .phase] | unique) == ["diag-db", "diag-file"]' "$WORK/perf.json")"
+run 'a failed order storage restore fails the gate' 1 restore-fail BLZMCP_PERF_REQUIRE_DBSTORE=1
+assert '  ... recorded as storage_restored ok false' "$(jq -r '.cleanup_ok == false and .storage_restored.ok == false and (.partitions | all(.pass))' "$WORK/perf.json")"
 
 for r in orders logs jobs; do
 	run "a timed trial whose $r reader failed fails the gate" 1 "invalid-$r" BLZMCP_PERF_REQUIRE_DBSTORE=1

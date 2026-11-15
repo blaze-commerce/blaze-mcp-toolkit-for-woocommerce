@@ -690,10 +690,12 @@ blzmcp_it_assert( str_starts_with( $context['store'], (string) $auth['authority'
 blzmcp_it_assert( ! str_contains( wp_json_encode( $context ), 'SYNTHETIC' ), 'context holds no secret values' );
 $k0 = $key_of();
 blzmcp_it_assert( str_starts_with( $k0, 'blzmcp_c_' ), 'key keeps the blzmcp_c_ prefix' );
-$sync = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', 'no' );
+// Restore the raw value: a store that never wrote the option (fresh install) must get it back absent,
+// not as 'no', or the context (which reads the stored value) would differ from $k0.
+$sync = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null );
 update_option( 'woocommerce_custom_orders_table_data_sync_enabled', 'yes' === $sync ? 'no' : 'yes' );
 $k_sync = $key_of();
-update_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync );
+null === $sync ? delete_option( 'woocommerce_custom_orders_table_data_sync_enabled' ) : update_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync );
 blzmcp_it_assert( $k_sync !== $k0, 'storage sync change gives a new key' );
 update_option( 'woocommerce_stripe_settings', array( 'enabled' => 'yes', 'testmode' => 'no', 'secret_key' => 'sk_test_SYNTHETIC_NEVER_OUTPUT' ) );
 $k_mode = $key_of();

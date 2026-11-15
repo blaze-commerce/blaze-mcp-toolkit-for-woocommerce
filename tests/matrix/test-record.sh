@@ -49,11 +49,18 @@ perf_receipt() {
 			   validation:{readers:{orders:true, inventory:true, logs:true, jobs:true}, failures:[]}}] as $tr
 		| [("legacy", "hpos") as $s | ({l:"file", f:"logs"}, {l:"db", f:"logs"}, {l:"db", f:"orders"}, {l:"db", f:"jobs"}) as $p
 			| {storage:$s, logger:$p.l, force:$p.f, ok:false, forced:$p.f, detected:true}] as $f
+		| ([("legacy", "hpos") as $s | ("before", "diag-file", "diag-db", "after") as $ph
+			| {phase:$ph, storage:$s, mode:(if ($ph | startswith("diag")) then "diagnostics" else "orders" end),
+			   orders_removed:(if $ph == "after" then 60000 elif ($ph | startswith("diag")) then null else 0 end),
+			   tagged_remaining:0, diag_log_rows_remaining:0, diag_log_files_remaining:0, diag_jobs_remaining:0, settings_restored:true, ok:true}
+			| if .phase == "after" then . + {expected_removed:60000} else . end | . + {passed:true}]
+		  + [{phase:"final", storage:"legacy", mode:"orders", orders_removed:0, tagged_remaining:0, diag_log_rows_remaining:0, diag_log_files_remaining:0, diag_jobs_remaining:0, settings_restored:true, ok:true, passed:true}]) as $c
 		| {schema:"blzmcp-payment-performance/1", candidate_sha256:$sha, budget_ms:1500, meaning:"application-cache cold",
 		   validity:"a trial counts only with the seeded workload observed and every reader at its expected counts",
 		   seed:{recent_orders:50000, horizon_days:28, older_orders:10000, methods:["stripe", "cod", "cheque"]},
 		   exact_jobs_required:true, jobs_store:["ActionScheduler_DBStore"], jobs_path:"exact database-store path (one grouped query)",
-		   all_pass:($p | all(.pass)), partitions:$p, http:$h, trials:$tr, forced_failures:$f}'
+		   all_pass:($p | all(.pass)), partitions:$p, http:$h, trials:$tr, forced_failures:$f,
+		   cleanup_ok:true, cleanup:$c, storage_restored:{storage:"legacy", sync:"no", ok:true}}'
 }
 
 # A trial that failed reader $1 (orders|logs|jobs|inventory) while its partition still claims complete.
@@ -113,6 +120,13 @@ check() {
 		perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | forced_passed "${mut#perf-forced-}" >"$WORK/perf.json" ;;
 	perf-hybrid-jobs) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.jobs_store = ["ActionScheduler_HybridStore"] | .jobs_path = "sampled path only"' >"$WORK/perf.json" ;;
 	perf-mixed-jobs) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.jobs_store = ["ActionScheduler_DBStore", "ActionScheduler_HybridStore"]' >"$WORK/perf.json" ;;
+	cleanup-missing) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq 'del(.cleanup)' >"$WORK/perf.json" ;;
+	cleanup-no-after) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.cleanup |= map(select(.storage != "hpos" or .phase != "after"))' >"$WORK/perf.json" ;;
+	cleanup-no-final) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.cleanup |= map(select(.phase != "final"))' >"$WORK/perf.json" ;;
+	cleanup-leftover) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.cleanup[] | select(.storage == "legacy" and .phase == "after")) |= (.tagged_remaining = 3 | .orders_removed = 59997)' >"$WORK/perf.json" ;;
+	cleanup-short) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.cleanup[] | select(.storage == "hpos" and .phase == "after")) |= (.orders_removed = 59999)' >"$WORK/perf.json" ;;
+	cleanup-diag) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.cleanup[] | select(.storage == "hpos" and .phase == "diag-db")) |= (.diag_jobs_remaining = 2 | .ok = false)' >"$WORK/perf.json" ;;
+	cleanup-restore) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.storage_restored.ok = false' >"$WORK/perf.json" ;;
 	perf-jobs-not-required) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.exact_jobs_required = false' >"$WORK/perf.json" ;;
 	*) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 >"$WORK/perf.json" ;;
 	esac
@@ -206,6 +220,17 @@ check 'a forced job-reader failure that passed is refused' 5 "$WORK/good" perf-f
 check 'jobs timed on HybridStore (the sampled path) are refused' 5 "$WORK/good" perf-hybrid-jobs
 check 'jobs timed partly on HybridStore are refused' 5 "$WORK/good" perf-mixed-jobs
 check 'a receipt that did not require the exact jobs store is refused' 5 "$WORK/good" perf-jobs-not-required
+
+# Wave 4 (REVIEW-pass4b gap 2): the volume fixture cleanup is part of the evidence.
+check 'faithful receipt with a clean cleanup record is accepted' 0 "$WORK/good"
+assert 'record shows the cleanup line' "$(grep -qxF -- '- Volume fixture cleanup: legacy removed 60000/60000 orders, 0 tagged left; hpos removed 60000/60000 orders, 0 tagged left; diagnostics cleanups 4, all clean true; order storage restored to legacy sync=no: true' "$LAST_OUT" && echo true)"
+check 'a receipt with no cleanup record is refused' 5 "$WORK/good" cleanup-missing
+check 'a receipt missing a storage'"'"'s post-run cleanup is refused' 5 "$WORK/good" cleanup-no-after
+check 'a receipt missing the final cleanup is refused' 5 "$WORK/good" cleanup-no-final
+check 'a cleanup that left fixture orders behind is refused' 5 "$WORK/good" cleanup-leftover
+check 'a cleanup that removed fewer orders than were seeded is refused' 5 "$WORK/good" cleanup-short
+check 'a diagnostics cleanup that left fixture jobs is refused' 5 "$WORK/good" cleanup-diag
+check 'a failed order storage restore is refused' 5 "$WORK/good" cleanup-restore
 check 'a state that did not run is refused' 5 "$WORK/good" state-not-run
 
 # Privacy.

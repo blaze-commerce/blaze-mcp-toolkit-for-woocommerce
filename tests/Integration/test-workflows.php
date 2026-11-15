@@ -667,17 +667,33 @@ if ( is_array( $refund ) ) {
 	blzmcp_it_assert( str_contains( $refund['instructions'], 'Run the first step alone. If it succeeds, run the remaining' ), 'refund: totals-first healthy path kept' );
 }
 
-// Payment step denied (core permission filter) or missing totals: instructions follow the surviving steps.
-$deny = static function ( $result, $ability_name ) use ( &$deny_target ) {
-	return $ability_name === $deny_target ? false : $result;
+// Payment step denied or totals denied: instructions follow the surviving steps.
+// The denial goes through the real capability check, not a core filter: `wp_ability_permission_result`
+// only exists from WordPress 7.1 (class-wp-ability.php, "@since 7.1.0"), so on 6.9 it never fired and
+// nothing was denied. `user_has_cap` exists on every supported version. It removes manage_woocommerce
+// only while core's WP_Ability::check_permissions() runs for the target ability, so that ability's own
+// permission_callback (current_user_can) returns false for this real user and nothing else changes.
+$deny = static function ( $allcaps, $caps ) use ( &$deny_target ) {
+	if ( '' === $deny_target || ! in_array( 'manage_woocommerce', (array) $caps, true ) ) {
+		return $allcaps;
+	}
+	foreach ( debug_backtrace() as $frame ) { // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_debug_backtrace, PHPCompatibility.FunctionUse.ArgumentFunctionsReportCurrentValue.NeedsInspection -- only frame objects are read.
+		if ( 'check_permissions' === ( $frame['function'] ?? '' ) && ( $frame['object'] ?? null ) instanceof WP_Ability && $frame['object']->get_name() === $deny_target ) {
+			$allcaps['manage_woocommerce'] = false;
+			break;
+		}
+	}
+	return $allcaps;
 };
-add_filter( 'wp_ability_permission_result', $deny, 10, 2 );
+add_filter( 'user_has_cap', $deny, 10, 2 );
 $deny_target = $payment;
+blzmcp_it_assert( true !== wp_get_ability( $payment )->check_permissions( array() ) && current_user_can( 'manage_woocommerce' ), 'denial mechanism: payment health is denied for this user while the workflow cap still holds' );
 $no_pay      = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute( array( 'period' => 'last_7_days' ) );
 $deny_target = 'wc-analytics/totals';
+blzmcp_it_assert( true !== wp_get_ability( 'wc-analytics/totals' )->check_permissions( array() ) && true === wp_get_ability( $payment )->check_permissions( array() ), 'denial mechanism: totals is denied, payment health is not' );
 $no_totals   = wp_get_ability( 'blaze-mcp-toolkit/revenue-drop-triage' )->execute( array( 'period' => 'last_7_days' ) );
 $deny_target = '';
-remove_filter( 'wp_ability_permission_result', $deny, 10 );
+remove_filter( 'user_has_cap', $deny, 10 );
 $np = is_array( $no_pay ) ? $no_pay['instructions'] : '';
 blzmcp_it_assert( null === $step_for( $no_pay, $payment ) && 'wc-analytics/totals' === ( $no_pay['steps'][0]['ability'] ?? null ), 'payment denied: totals becomes the first step' );
 blzmcp_it_assert( str_contains( $np, 'NOT AVAILABLE FOR YOUR ROLE' ) && str_contains( $np, $payment ), 'payment denied: listed under not available for your role' );
@@ -691,9 +707,10 @@ blzmcp_it_equals( array(), $contradictions( $np . "\n" . $nt ), 'denied steps: n
 
 // Payment step permission follows the user at plan time (cold and warm): never cached.
 $deny_target = $payment;
-add_filter( 'wp_ability_permission_result', $deny, 10, 2 );
+add_filter( 'user_has_cap', $deny, 10, 2 );
 $cold_deny = wp_get_ability( 'blaze-mcp-toolkit/failed-order-triage' )->execute();
-remove_filter( 'wp_ability_permission_result', $deny, 10 );
+remove_filter( 'user_has_cap', $deny, 10 );
+$deny_target = '';
 $warm_ok = wp_get_ability( 'blaze-mcp-toolkit/failed-order-triage' )->execute();
 blzmcp_it_assert( null === $step_for( $cold_deny, $payment ) && null !== $step_for( $warm_ok, $payment ), 'payment step appears or disappears with the current permission' );
 

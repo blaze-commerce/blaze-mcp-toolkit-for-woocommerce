@@ -31,7 +31,11 @@
 # Writes BLZMCP_PERF_OUT (JSON): every trial with its validation, the per-partition maximum as
 # payment_health_cold_ms, the 1500 ms budget verdict, the forced-failure probes, warm timings,
 # query counts, plans, memory, versions, the seed distribution and the container limits. The
-# original order storage is restored and every fixture row removed on every exit.
+# original order storage is restored and every fixture row removed on every exit. Each fixture
+# cleanup (before and after each storage, after each logger's diagnostics, and a final one) and
+# the storage restore are recorded in the receipt (cleanup, cleanup_checks, storage_restored,
+# cleanup_ok); a cleanup that leaves fixture orders, logs, jobs or settings behind, removes fewer
+# orders than were seeded, or a failed restore fails the suite.
 # Ends with "PERF PASSED" or "PERF FAILED".
 #
 # Env: BLZMCP_PERF_RECENT (50000) BLZMCP_PERF_OLD (10000) BLZMCP_PERF_TRIALS (5)
@@ -66,9 +70,13 @@ orig_sync=$(opt woocommerce_custom_orders_table_data_sync_enabled)
 switch_to() { # storage sync
 	"$WPE" run cli env BLZMCP_PF_SET="$1" BLZMCP_PF_SYNC="$2" wp eval-file "$SWITCH" 2>&1 | grep -qE '^[0-9]+ passed, 0 failed'
 }
+final_done=0
 on_exit() {
-	wpc eval-file "$SEED" cleanup >/dev/null
-	switch_to "$orig_set" "$orig_sync" || echo "CLEANUP ERROR  order storage not restored to $orig_set sync=$orig_sync"
+	# Safety net for an interrupted run; a completed run cleaned up and restored before its receipt.
+	if [ "$final_done" != 1 ]; then
+		wpc eval-file "$SEED" cleanup >/dev/null
+		switch_to "$orig_set" "$orig_sync" || echo "CLEANUP ERROR  order storage not restored to $orig_set sync=$orig_sync"
+	fi
 	rm -rf "$WORK"
 }
 trap on_exit EXIT
@@ -94,7 +102,27 @@ seed_range() { # cmd total now
 : >"$WORK/trials.jsonl"
 : >"$WORK/storage.jsonl"
 : >"$WORK/forced.jsonl"
+: >"$WORK/cleanup.jsonl"
 fail=0
+# cleanup_step <phase> <storage> <cleanup|diag-cleanup> [expected orders removed]: runs one fixture
+# cleanup, keeps its CLEANUP result for the receipt and fails the suite (fail closed) when it is
+# missing, leaves tagged fixture orders, diagnostics or logger settings behind, or removed a
+# different number of orders than were seeded.
+cleanup_step() {
+	local c
+	c=$(wpc eval-file "$SEED" "$3" | sed -n 's/^CLEANUP=//p' | tail -1)
+	[ -n "$c" ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$c" || c='{"ok":false,"error":"no cleanup result"}'
+	c=$(jq -c --arg p "$1" --arg s "$2" --arg e "${4:-}" '{phase:$p, storage:$s} + .
+		+ (if $e == "" then {} else {expected_removed: ($e | tonumber)} end)
+		| .passed = (.ok == true and (if has("expected_removed") then .orders_removed == .expected_removed else true end))' <<<"$c")
+	printf '%s\n' "$c" >>"$WORK/cleanup.jsonl"
+	if [ "$(jq -r '.passed' <<<"$c")" == true ]; then
+		echo "  cleanup $1 ($2): $(jq -r '"orders removed \(.orders_removed // "n/a"), tagged fixture orders remaining \(.tagged_remaining), diagnostics remaining \((.diag_log_rows_remaining // 0) + (.diag_log_files_remaining // 0) + (.diag_jobs_remaining // 0)), settings restored \(.settings_restored)"' <<<"$c")"
+	else
+		echo "FAIL  cleanup $1 ($2) incomplete: $(jq -c 'del(.phase, .storage, .passed)' <<<"$c")"
+		fail=1
+	fi
+}
 # measure <window> [force]: one measurement line (JSON), or a failed placeholder.
 measure() {
 	local m
@@ -103,7 +131,7 @@ measure() {
 	printf '%s\n' "$m"
 }
 for storage in $STORAGES; do
-	wpc eval-file "$SEED" cleanup >/dev/null
+	cleanup_step before "$storage" cleanup
 	if ! switch_to "$storage" no; then
 		echo "FAIL  could not switch order storage to $storage (sync off)"
 		fail=1
@@ -154,7 +182,7 @@ for storage in $STORAGES; do
 				fail=1
 			fi
 		done
-		wpc eval-file "$SEED" diag-cleanup >/dev/null
+		cleanup_step "diag-$logger" "$storage" diag-cleanup
 	done
 	if [ -n "${BLZMCP_PERF_PORT:-}" ] && [ -n "${BLZMCP_PERF_LOGIN:-}" ] && [ -n "${BLZMCP_PERF_APP_PASSWORD:-}" ]; then
 		for window in 24 168; do
@@ -182,8 +210,21 @@ for storage in $STORAGES; do
 			done
 		done
 	fi
-	wpc eval-file "$SEED" cleanup >/dev/null
+	cleanup_step after "$storage" cleanup "$((${got_recent:-0} + ${got_old:-0}))"
 done
+
+# Final cleanup and the original order storage restored, both before the receipt so it records them.
+cleanup_step final "$orig_set" cleanup
+if switch_to "$orig_set" "$orig_sync"; then
+	restored=true
+	echo "  order storage restored to $orig_set sync=$orig_sync"
+else
+	restored=false
+	echo "FAIL  order storage not restored to $orig_set sync=$orig_sync"
+	fail=1
+fi
+final_done=1
+restore_json=$(jq -cn --arg s "$orig_set" --arg y "$orig_sync" --argjson ok "$restored" '{storage:$s, sync:$y, ok:$ok}')
 
 limits=$(docker info --format '{"ncpu":{{.NCPU}},"mem_total_bytes":{{.MemTotal}},"server_version":"{{.ServerVersion}}"}' 2>/dev/null || echo null)
 dist=$(wpc eval-file "$SEED" distribution | sed -n 's/^DISTRIBUTION=//p')
@@ -192,6 +233,7 @@ cand_sha=null
 [ -f "$WORK/http.jsonl" ] || : >"$WORK/http.jsonl"
 jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage.jsonl" --slurpfile http "$WORK/http.jsonl" \
 	--slurpfile forced "$WORK/forced.jsonl" --argjson exact_jobs "$EXACT_JOBS" \
+	--slurpfile cleanup "$WORK/cleanup.jsonl" --argjson restore "$restore_json" \
 	--argjson limits "${limits:-null}" --argjson dist "${dist:-null}" --argjson cand "$cand_sha" \
 	--argjson budget "$BUDGET" --argjson trials_n "$TRIALS" --argjson recent "$RECENT" --argjson old "$OLD" --arg storages "$STORAGES" '
 	def key: "\(.storage)/\(.window)h/\(.logger)";
@@ -200,6 +242,10 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 	| [ $st[] as $s | ({logger:"file", force:"logs"}, {logger:"db", force:"logs"}, {logger:"db", force:"orders"}, {logger:"db", force:"jobs"}) | . + {storage:$s} ] as $want_forced
 	| ($want_forced | map(. as $p | ($forced | map(select(.storage == $p.storage and .logger == $p.logger and .force == $p.force))) as $f
 		| $p + {probes: ($f | length), detected: (($f | length) == 1 and ($f | all(.ok == false and .detected == true)))})) as $forced_check
+	| ([ $st[] as $s | ("before", "diag-file", "diag-db", "after") as $ph | {storage:$s, phase:$ph} ] + [{phase:"final"}]) as $want_cleanup
+	| ($want_cleanup | map(. as $p | ($cleanup | map(select(.phase == $p.phase and ($p.phase == "final" or .storage == $p.storage)))) as $c
+		| $p + {runs: ($c | length), passed: (($c | length) >= 1 and ($c | all(.passed == true)))})) as $cleanup_check
+	| (($cleanup_check | all(.passed)) and ($cleanup | all(.passed == true)) and $restore.ok == true) as $cleanup_ok
 	| ($want | map(. as $p | ($trials | map(select(.storage == $p.storage and .window == $p.window and .logger == $p.logger))) as $t
 		| $p + {
 			trials_ms: ($t | map(.elapsed_ms)),
@@ -221,7 +267,11 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 		exact_jobs_required: ($exact_jobs == 1),
 		payment_health_cold_ms: ($parts | map({key: "\(.storage)/\(.window)h/\(.logger)", value: .max_ms}) | from_entries),
 		forced_failures_detected: ($forced_check | all(.detected)),
-		all_pass: (($parts | length) == ($want | length) and ($parts | all(.pass)) and ($forced_check | all(.detected))),
+		all_pass: (($parts | length) == ($want | length) and ($parts | all(.pass)) and ($forced_check | all(.detected)) and $cleanup_ok),
+		cleanup_ok: $cleanup_ok,
+		cleanup_checks: $cleanup_check,
+		cleanup: $cleanup,
+		storage_restored: $restore,
 		partitions: $parts,
 		forced_failure_checks: $forced_check,
 		forced_failures: $forced,
@@ -240,6 +290,7 @@ verdict=$(jq -r '.all_pass' "$OUT" 2>/dev/null)
 jq -r '.partitions[] | "partition \(.storage) \(.window)h \(.logger): max \(.max_ms) ms over \(.trials_ms | length) trials (\(.trials_ms | map(tostring) | join(", "))), warm max \(.warm_ms_max) ms, invalid trials \(.failed_trials), pass \(.pass)"' "$OUT"
 jq -r '.forced_failure_checks[] | "forced \(.force)-reader failure \(.storage) \(.logger): probes \(.probes), detected \(.detected)"' "$OUT"
 echo "jobs store: $(jq -r '.jobs_path' "$OUT")"
+echo "cleanup: $(jq -r '"\(if .cleanup_ok then "complete" else "INCOMPLETE" end): \([.cleanup[] | select(.phase == "after") | "\(.storage) removed \(.orders_removed)/\(.expected_removed), \(.tagged_remaining) tagged left"] | join("; ")); order storage restored to \(.storage_restored.storage) sync=\(.storage_restored.sync): \(.storage_restored.ok)"' "$OUT")"
 echo "Receipt: $OUT"
 if [ "$fail" -eq 0 ] && [ "$verdict" == true ]; then echo "PERF PASSED"; exit 0; fi
 echo "PERF FAILED"
