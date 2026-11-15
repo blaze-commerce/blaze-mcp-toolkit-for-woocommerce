@@ -44,6 +44,9 @@ final class PaymentErrors {
 	public const WEBHOOK_CATEGORIES = array( 'delivery_ok', 'delivery_failed', 'order_unclear', 'record_malformed', 'record_missing', 'no_events_recorded', 'no_success_recorded', 'success_stale', 'webhook_stale_unverified', 'mode_unknown' );
 	public const SOURCE_LABELS      = array( 'woocommerce_log_file', 'woocommerce_log_db' );
 
+	/** A date-led line (numeric or month-name date, optionally bracketed): an entry head of some format. */
+	private const HEAD_LIKE = '/^\[?(?:\d{1,4}[-\/.]\d{1,2}[-\/.]\d{1,4}|\d{1,2}[-\/ ][A-Z][a-z]{2}[-\/ ]\d{4})[T ]/';
+
 	/** WooCommerce FileV2 line head (time, level, message). */
 	private const WC_LINE = '/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)) (EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFO|DEBUG) (.*)$/s';
 
@@ -220,31 +223,54 @@ final class PaymentErrors {
 	 * Classify observed log entries into fixed categories. Only ERROR and above count; text is
 	 * read for the one verified prefix and then discarded.
 	 *
-	 * @param string[] $lines    Raw lines (oldest first).
-	 * @param int      $since    Window start.
-	 * @param int      $now      Window end (exclusive).
-	 * @param string   $family   Family (only 'stripe' has a verified webhook prefix).
-	 * @return array{count:int,webhook_failures:int,malformed:int,groups:array<string,array{severity:string,category:string,count:int,first:int,last:int}>}
+	 * Parse coverage (pass 4 #5): a line that is not a recognised entry head counts as a
+	 * continuation only when it follows an entry head. A line before any head (an orphan) and a
+	 * date-led line in another format (an unsupported head) are unparsed, so a stream of only
+	 * unsupported entries can never pass as an empty, complete log. Blank lines are ignored.
+	 * When the read started mid-file (a tail or byte-capped read), the lines before the first
+	 * head are the cut-off entry's continuation, not orphans; the read is already partial.
+	 *
+	 * @param string[] $lines     Raw lines (oldest first).
+	 * @param int      $since     Window start.
+	 * @param int      $now       Window end (exclusive).
+	 * @param string   $family    Family (only 'stripe' has a verified webhook prefix).
+	 * @param bool     $cut_start The read began inside the file (partial tail read).
+	 * @return array{count:int,webhook_failures:int,malformed:int,heads:int,lines:int,groups:array<string,array{severity:string,category:string,count:int,first:int,last:int}>}
 	 */
-	public static function classify_lines( array $lines, int $since, int $now, string $family ): array {
-		$out = array(
+	public static function classify_lines( array $lines, int $since, int $now, string $family, bool $cut_start = false ): array {
+		$out      = array(
 			'count'            => 0,
 			'webhook_failures' => 0,
 			'malformed'        => 0,
+			'heads'            => 0,
+			'lines'            => 0,
 			'groups'           => array(),
 		);
+		$in_entry = $cut_start;
 		foreach ( $lines as $line ) {
-			if ( 1 !== preg_match( self::WC_LINE, $line, $m ) ) {
-				if ( 1 === preg_match( '/^\d{4}-\d{2}-\d{2}T/', $line ) ) {
-					++$out['malformed']; // Looks like an entry head but does not parse.
-				}
-				continue; // Continuation line of the previous entry: entries are counted, not lines.
+			$line = (string) $line;
+			if ( '' === trim( $line ) ) {
+				continue;
 			}
-			$ts = strtotime( $m[1] );
+			++$out['lines'];
+			if ( 1 !== preg_match( self::WC_LINE, $line, $m ) ) {
+				if ( 1 === preg_match( self::HEAD_LIKE, $line ) ) {
+					// Looks like an entry head but is not the supported format. Its own following
+					// lines belong to it, so they are not counted again.
+					++$out['malformed'];
+					$in_entry = true;
+				} elseif ( ! $in_entry ) {
+					++$out['malformed']; // Orphan: no entry head before it.
+				}
+				continue; // Continuation of the previous entry: entries are counted, not lines.
+			}
+			$in_entry = true;
+			$ts       = strtotime( $m[1] );
 			if ( false === $ts ) {
 				++$out['malformed'];
 				continue;
 			}
+			++$out['heads'];
 			if ( $ts < $since || $ts >= $now ) {
 				continue;
 			}
@@ -427,11 +453,15 @@ final class PaymentErrors {
 				$out[ $f ]['complete'] = false;
 				$out[ $f ]['reason']   = 'byte_cap';
 			}
-			$c = self::classify_lines( $read['lines'], $since, $now, $f );
+			// A partial read is a tail: its leading lines belong to an entry cut off by the cap.
+			$c = self::classify_lines( $read['lines'], $since, $now, $f, ! empty( $read['partial'] ) );
 			if ( $c['malformed'] > 0 ) {
 				$out[ $f ]['complete'] = false;
 				$out[ $f ]['reason']   = 'unparsed_entries';
 			}
+			$out[ $f ]['heads']    = ( $out[ $f ]['heads'] ?? 0 ) + $c['heads'];
+			$out[ $f ]['lines']    = ( $out[ $f ]['lines'] ?? 0 ) + $c['lines'];
+			$out[ $f ]['unparsed'] = ( $out[ $f ]['unparsed'] ?? 0 ) + $c['malformed'];
 			self::merge( $out[ $f ], $c );
 		}
 		foreach ( $out as $f => $r ) {
@@ -443,6 +473,17 @@ final class PaymentErrors {
 				);
 				continue;
 			}
+			if ( $r['ok'] && ( $r['unparsed'] ?? 0 ) > 0 && 0 === ( $r['heads'] ?? 0 ) ) {
+				// Non-empty sources with unparsed lines and no recognised entry at all: the format
+				// cannot be read, so nothing is known about its errors (not a zero). A tail made
+				// only of one cut-off entry's continuation is partial (byte_cap), not unparsed.
+				$out[ $f ] = array(
+					'ok'     => false,
+					'reason' => 'unparsed_entries',
+				);
+				continue;
+			}
+			unset( $out[ $f ]['heads'], $out[ $f ]['lines'], $out[ $f ]['unparsed'] );
 			$out[ $f ]['groups'] = self::sorted_groups( $r['groups'] );
 		}
 		return $out;
@@ -500,11 +541,26 @@ final class PaymentErrors {
 		}
 		$keys   = array_keys( $sources );
 		$sp     = implode( ', ', array_fill( 0, count( $keys ), '%s' ) );
-		$sql    = "SELECT log_id, timestamp AS ts, level, source, LEFT(message, %d) AS msg FROM %i WHERE level >= %d AND source IN ({$sp}) AND timestamp >= %s AND timestamp < %s ORDER BY log_id DESC LIMIT %d";
+		$where  = "level >= %d AND source IN ({$sp}) AND timestamp >= %s AND timestamp < %s";
+		$args   = array_merge( array( 500 ), $keys, array( gmdate( 'Y-m-d H:i:s', $since ), gmdate( 'Y-m-d H:i:s', $now ) ) );
 		$budget = self::MAX_BYTES;
+		// Pass 4 #5: the message prefix is cut in bytes by the database (a binary LEFT; a character
+		// LEFT lets 4-byte text through at 4x), so PHP never holds more than MAX_DB_ROWS x
+		// MAX_DB_MSG = 4,096,000 bytes of message data, inside the 5,242,880-byte budget. Context
+		// is never selected.
+		$sql = "SELECT log_id, timestamp AS ts, level, source, LEFT(CAST(message AS BINARY), %d) AS msg FROM %i WHERE {$where} ORDER BY log_id DESC LIMIT %d";
 		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- only %s placeholder lists are interpolated; $sql is prepared here.
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read; the ability caches its result.
-		$rows = $wpdb->get_results( $wpdb->prepare( $sql, array_merge( array( self::MAX_DB_MSG, $table, 500 ), $keys, array( gmdate( 'Y-m-d H:i:s', $since ), gmdate( 'Y-m-d H:i:s', $now ), self::MAX_DB_ROWS + 1 ) ) ), ARRAY_A );
+		$rows = $wpdb->get_results( $wpdb->prepare( $sql, array_merge( array( self::MAX_DB_MSG, $table ), $args, array( self::MAX_DB_ROWS ) ) ), ARRAY_A );
+		$truncated = false;
+		if ( '' === $wpdb->last_error && is_array( $rows ) && count( $rows ) >= self::MAX_DB_ROWS ) {
+			// Metadata-only sentinel: is there one more qualifying row older than the last one read?
+			$oldest = (int) min( array_map( static fn( array $r ): int => (int) $r['log_id'], $rows ) );
+			$probe  = "SELECT log_id FROM %i WHERE {$where} AND log_id < %d ORDER BY log_id DESC LIMIT 1";
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- one-row metadata read.
+			$more      = $wpdb->get_var( $wpdb->prepare( $probe, array_merge( array( $table ), $args, array( $oldest ) ) ) );
+			$truncated = null !== $more;
+		}
 		// phpcs:enable
 		if ( '' !== $wpdb->last_error || ! is_array( $rows ) ) {
 			return array_map(
@@ -515,8 +571,6 @@ final class PaymentErrors {
 				$out
 			);
 		}
-		$truncated = count( $rows ) > self::MAX_DB_ROWS;
-		$rows      = array_slice( $rows, 0, self::MAX_DB_ROWS );
 		$levels    = array(
 			800 => 'EMERGENCY',
 			700 => 'ALERT',

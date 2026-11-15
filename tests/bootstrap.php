@@ -79,6 +79,13 @@ if ( ! function_exists( 'current_user_can' ) ) {
 		return in_array( $capability, (array) ( $GLOBALS['blzmcp_test_caps'] ?? array() ), true );
 	}
 }
+if ( ! function_exists( 'apply_filters' ) ) {
+	// Pass-through unless a test sets $GLOBALS['blzmcp_test_filters'][ $hook ] to a callable.
+	function apply_filters( string $hook, $value, ...$args ) {
+		$cb = $GLOBALS['blzmcp_test_filters'][ $hook ] ?? null;
+		return is_callable( $cb ) ? $cb( $value, ...$args ) : $value;
+	}
+}
 if ( ! function_exists( 'wp_json_encode' ) ) {
 	function wp_json_encode( $value, int $flags = 0, int $depth = 512 ) {
 		return json_encode( $value, $flags, $depth );

@@ -167,6 +167,14 @@ final class PaymentOrders {
 					return $out;
 				}
 				foreach ( $chunk as $row ) {
+					if ( ! empty( $row['op_missing'] ) ) {
+						// HPOS writes an operational row for every order. Its absence is missing
+						// required data (paid date, origin), not an unknown origin: fail closed
+						// rather than drop the order from a complete-looking aggregate. Never
+						// recover it from the posts shadow.
+						$out['reason'] = 'operational_data_missing';
+						return $out;
+					}
 					$last_id = max( $last_id, $row['id'] );
 					++$rows;
 					self::fold( $row, $now, $windows, $store, $methods, $out['excluded'] );
@@ -354,8 +362,9 @@ final class PaymentOrders {
 				'created' => $created['ts'],
 				'paid'    => $paid['ts'],
 				'valid'   => $created['valid'] && $paid['valid'],
-				'via'     => null === $r['op'] || null === $r['v'] ? null : (string) $r['v'],
-				'txn'     => 1 === (int) $r['t'],
+				'via'        => null === $r['v'] ? null : (string) $r['v'],
+				'txn'        => 1 === (int) $r['t'],
+				'op_missing' => null === $r['op'],
 			);
 		}
 		return $out;

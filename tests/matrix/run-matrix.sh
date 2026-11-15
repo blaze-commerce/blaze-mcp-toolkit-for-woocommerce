@@ -295,8 +295,19 @@ run_state() {
 		perf_secret=$(sed -n 's/^SECRET=//p' <<<"$cred" | head -1)
 		unset cred
 		[ -n "$perf_id" ] && [ -n "$perf_secret" ] || echo "FAIL  [$state] perf: no application password for the HTTP latency figures"
-		echo "perf: Action Scheduler store before timing: $(wp eval 'echo get_class( ActionScheduler::store() );')"
-		if WPE="$WPE" BLZMCP_T="$T" BLZMCP_PERF_OUT="$PERF_FILE" BLZMCP_PERF_CANDIDATE="$ZIP" \
+		# The suites above deactivate plugins (test-lifecycle, test-uninstall, test-update-history),
+		# and every deactivation marks the Action Scheduler migration incomplete, so the store is
+		# HybridStore again here (seen at 61170fd). Finish the migration before timing; perf-suite
+		# repeats it before each logger and fails any trial not run on ActionScheduler_DBStore.
+		wp action-scheduler migrate >>"$LOG_DIR/$state-start.log"
+		local perf_store
+		perf_store=$(wp eval 'echo get_class( ActionScheduler::store() );')
+		echo "perf: Action Scheduler store before timing: $perf_store"
+		if [ "$perf_store" != ActionScheduler_DBStore ]; then
+			echo "FAIL  [$state] perf: Action Scheduler is on ${perf_store:-no store}, not ActionScheduler_DBStore, after the migration"
+			FAILS[$state]=$((FAILS[$state] + 1))
+		fi
+		if WPE="$WPE" BLZMCP_T="$T" BLZMCP_PERF_OUT="$PERF_FILE" BLZMCP_PERF_CANDIDATE="$ZIP" BLZMCP_PERF_REQUIRE_DBSTORE=1 \
 			BLZMCP_PERF_PORT="$port" BLZMCP_PERF_LOGIN=admin BLZMCP_PERF_APP_PASSWORD="$perf_secret" \
 			bash "$REPO/tests/matrix/perf-suite.sh" >"$LOG_DIR/$state-perf.log" 2>&1; then
 			echo "PASS  [$state] perf-suite.sh ($(grep -c '^partition' "$LOG_DIR/$state-perf.log") partitions under 1500 ms)"

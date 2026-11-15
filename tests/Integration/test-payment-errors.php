@@ -130,6 +130,36 @@ blzmcp_it_equals( array( 'unknown', 'unavailable', 'no_matching_log_source', nul
 file_put_contents( $file, gmdate( 'c', $now - 600 ) . " INFO Webhook received\n" );
 $clean = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz );
 blzmcp_it_equals( array( 'green', 'complete', 0 ), array( $clean['stripe']['logs']['status'], $clean['stripe']['logs']['coverage'], $clean['stripe']['logs']['count'] ), 'INFO mentioning webhook is not a failure; complete empty read is green' );
+
+// Pass 4 #5: parse coverage. A non-empty source with no recognised entry head is unavailable, not zero.
+$ts_a = gmdate( 'c', $now - 900 );
+$ts_b = gmdate( 'c', $now - 800 );
+file_put_contents( $file, '[' . gmdate( 'd-M-Y H:i:s', $now - 900 ) . " UTC] PHP Fatal error: gateway exploded\nStack trace:\n#0 {main}\n" . gmdate( 'Y-m-d H:i:s', $now - 800 ) . " ERROR space-separated format\n" );
+$unsup = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
+blzmcp_it_equals( array( 'unknown', 'unavailable', 'unparsed_entries', null ), array( $unsup['status'], $unsup['coverage'], $unsup['reason'], $unsup['count'] ), 'only unsupported entry heads: unavailable, never a complete zero' );
+// An orphan continuation before the first head, then valid multi-line entries: partial, entries still counted.
+file_put_contents( $file, "orphan line with no entry head\n{$ts_a} ERROR first entry\n    its continuation\n{$ts_b} ERROR second entry\n" );
+$orph = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
+blzmcp_it_equals( array( 'amber', 'partial', 'unparsed_entries', 2, true ), array( $orph['status'], $orph['coverage'], $orph['reason'], $orph['count'], $orph['count_is_lower_bound'] ), 'orphan continuation: partial lower bound, valid entries counted' );
+// Valid multi-line entries only: complete.
+file_put_contents( $file, "{$ts_a} ERROR first entry\n    its continuation\n{\"context\":\"more\"}\n{$ts_b} INFO second entry\n" );
+$multi = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
+blzmcp_it_equals( array( 'amber', 'complete', 1 ), array( $multi['status'], $multi['coverage'], $multi['count'] ), 'valid continuations are kept: complete, one entry' );
+// Fix round 3 (pre-review issue 3): a byte-capped tail that starts inside a multi-line entry
+// reports byte_cap, not unparsed_entries; its leading lines are the cut entry's continuation.
+$big = "{$ts_a} ERROR huge multi-line entry\n" . str_repeat( "    continuation line padding the entry past the byte cap\n", intdiv( PaymentErrors::MAX_BYTES, 50 ) + 2000 ) . "{$ts_b} ERROR last entry\n";
+file_put_contents( $file, $big );
+blzmcp_it_assert( strlen( $big ) > PaymentErrors::MAX_BYTES, 'fixture exceeds the per-file byte cap' );
+$tail = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
+blzmcp_it_equals( array( 'amber', 'partial', 'byte_cap', 1, true ), array( $tail['status'], $tail['coverage'], $tail['reason'], $tail['count'], $tail['count_is_lower_bound'] ), 'cut-off tail: byte_cap partial lower bound, not unparsed' );
+// The same tail made only of continuation lines (no head inside the read) stays partial byte_cap.
+file_put_contents( $file, "{$ts_a} ERROR huge entry\n" . str_repeat( "    continuation line padding the entry past the byte cap\n", intdiv( PaymentErrors::MAX_BYTES, 50 ) + 2000 ) );
+$only = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
+blzmcp_it_equals( array( 'unknown', 'partial', 'byte_cap', 0 ), array( $only['status'], $only['coverage'], $only['reason'], $only['count'] ), 'tail inside one entry: unknown partial byte_cap, never a complete zero' );
+// An empty file is an exact, complete zero.
+file_put_contents( $file, '' );
+$empty = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
+blzmcp_it_equals( array( 'green', 'complete', 0 ), array( $empty['status'], $empty['coverage'], $empty['count'] ), 'empty source file: exact zero' );
 unlink( $file );
 
 // ---------------------------------------------------------------- DB handler.
@@ -154,6 +184,48 @@ if ( $table === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->es
 	blzmcp_it_equals( array( 'amber', 3, 'complete' ), array( $db['status'], $db['count'], $db['coverage'] ), 'DB logger: three error-level entries for the source, amber' );
 	blzmcp_it_equals( 'woocommerce_log_db', $db['groups'][0]['source'] ?? null, 'DB source label' );
 	blzmcp_it_assert( ! str_contains( wp_json_encode( $db ), 'jane' ), 'DB message text never returned' );
+
+	// Pass 4 #5: 4-byte messages against the byte budget, row cap and a metadata-only sentinel.
+	blzmcp_it_cleanup( static fn() => $wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE source = %s AND message LIKE %s', $table, 'woocommerce-gateway-stripe', 'blzmcp-mb %' ) ) );
+	$mb_msg = 'blzmcp-mb ' . str_repeat( "\u{1F600}", 1000 ); // 4,010 bytes, 1,010 characters.
+	$mb_add = static function ( int $n, int $offset ) use ( $wpdb, $table, $now, $mb_msg ): void {
+		for ( $done = 0; $done < $n; $done += 100 ) {
+			$vals = array();
+			for ( $i = $done; $i < min( $n, $done + 100 ); $i++ ) {
+				$vals[] = $wpdb->prepare( '(%s, %d, %s, %s)', gmdate( 'Y-m-d H:i:s', $now - 400 - ( ( $offset + $i ) % 3600 ) ), 500, 'woocommerce-gateway-stripe', $mb_msg );
+			}
+			$wpdb->query( "INSERT INTO `{$table}` (timestamp, level, source, message) VALUES " . implode( ', ', $vals ) );
+		}
+	};
+	// 3 qualifying rows exist already; 1,997 more makes exactly the 2,000-row cap.
+	$mb_add( PaymentErrors::MAX_DB_ROWS - 3, 0 );
+	$seen = array();
+	$spy  = static function ( $q ) use ( &$seen ) {
+		if ( str_contains( (string) $q, 'woocommerce_log' ) ) {
+			$seen[] = (string) $q;
+		}
+		return $q;
+	};
+	add_filter( 'query', $spy );
+	$at_cap = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
+	remove_filter( 'query', $spy );
+	blzmcp_it_equals( array( 'red', 'complete', PaymentErrors::MAX_DB_ROWS, false ), array( $at_cap['status'], $at_cap['coverage'], $at_cap['count'], $at_cap['count_is_lower_bound'] ), 'exactly 2,000 rows: complete (the sentinel finds no more)' );
+	$main  = array_values( array_filter( $seen, static fn( $q ) => str_contains( $q, 'AS msg' ) ) );
+	$probe = array_values( array_filter( $seen, static fn( $q ) => str_contains( $q, 'log_id <' ) ) );
+	blzmcp_it_equals( array( 1, 1 ), array( count( $main ), count( $probe ) ), 'one bounded message query and one sentinel probe' );
+	blzmcp_it_assert( isset( $probe[0] ) && ! str_contains( $probe[0], 'message' ) && ! str_contains( $probe[0], 'context' ), 'sentinel is metadata-only' );
+	if ( isset( $main[0] ) ) {
+		$fetched = $wpdb->get_col( 'SELECT LENGTH(t.msg) FROM ( ' . $main[0] . ' ) t' ); // Re-run the exact captured query, measuring bytes in SQL.
+		$bytes   = array_sum( array_map( 'intval', $fetched ) );
+		blzmcp_it_assert( max( array_map( 'intval', $fetched ) ) <= PaymentErrors::MAX_DB_MSG, 'each 4-byte message is cut to 2,048 bytes by the database, not 2,048 characters' );
+		blzmcp_it_assert( $bytes <= PaymentErrors::MAX_BYTES, "message bytes handed to PHP ({$bytes}) stay within 5,242,880" );
+	}
+	$mb_add( 1, PaymentErrors::MAX_DB_ROWS );
+	$over = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
+	blzmcp_it_equals( array( 'red', 'partial', 'row_cap', PaymentErrors::MAX_DB_ROWS, true ), array( $over['status'], $over['coverage'], $over['reason'], $over['count'], $over['count_is_lower_bound'] ), '2,001 rows: row cap, partial lower bound from the sentinel' );
+	blzmcp_it_assert( ! str_contains( wp_json_encode( $over ), "\u{1F600}" ) && ! str_contains( wp_json_encode( $over ), 'blzmcp-mb' ), 'no message text returned' );
+	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE source = %s AND message LIKE %s', $table, 'woocommerce-gateway-stripe', 'blzmcp-mb %' ) );
+
 	update_option( 'woocommerce_logs_default_handler', $saved['woocommerce_logs_default_handler'] ?? 'Automattic\\WooCommerce\\Internal\\Admin\\Logging\\LogHandlerFileV2' );
 } else {
 	echo "NOTE  woocommerce_log table absent; DB handler case skipped\n";
@@ -214,6 +286,49 @@ blzmcp_it_equals( ! $db_store, $jobs['count_is_lower_bound'], 'sampled stores ar
 blzmcp_it_equals( $db_store ? 'complete' : 'partial', $jobs['coverage'], 'coverage follows the store' );
 blzmcp_it_equals( array( 'category', 'count', 'scope' ), array_keys( $jobs['hooks'][0] ?? array() ), 'hook rows carry a fixed category, never a hook name' );
 blzmcp_it_assert( ! str_contains( wp_json_encode( $jobs ), 'wc_stripe_deferred_webhook' ) && ! str_contains( wp_json_encode( $jobs ), 'blzmcp' ), 'no hook names or arguments returned' );
+
+// ---------------------------------------------------------------- Q8 interim: PayPal, WooPayments, Square (default token map).
+$q8_ids = array(
+	'ppcp-gateway'         => 'paypal',
+	'ppcp-ideal'           => 'paypal',
+	'woocommerce_payments' => 'woopayments',
+	'square_credit_card'   => 'square',
+);
+$q8_inv = array();
+foreach ( $q8_ids as $id => $family ) {
+	$q8_inv[ $id ] = array( 'id' => $id, 'family' => PaymentMethods::method_family( $id, $fam ), 'kind' => PaymentMethods::kind( $id ), 'webhook_adapter' => null, 'webhook_required' => null );
+	blzmcp_it_equals( $family, $q8_inv[ $id ]['family'], "{$id} belongs to {$family}" );
+}
+$wp_pay   = as_schedule_single_action( $now + 3600, 'wcpay_webhook_process_event', array( 'blzmcp' => 'q8' ), 'woocommerce_payments' );
+$wp_track = as_schedule_single_action( $now + 3600, 'wcpay_track_new_order', array( 'blzmcp' => 'q8' ), 'woocommerce_payments' );
+$sq_sync  = as_schedule_single_action( $now + 3600, 'wc_square_sync', array( 'blzmcp' => 'q8' ), 'square' );
+blzmcp_it_cleanup(
+	static function () use ( $wp_pay, $wp_track, $sq_sync ): void {
+		foreach ( array( $wp_pay, $wp_track, $sq_sync ) as $id ) {
+			try {
+				ActionScheduler::store()->delete_action( $id );
+			} catch ( \Throwable $e ) {
+				unset( $e );
+			}
+		}
+	}
+);
+foreach ( array( $wp_pay, $wp_track, $sq_sync ) as $id ) {
+	ActionScheduler::store()->mark_failure( $id );
+}
+$wpdb->query( $wpdb->prepare( 'UPDATE %i SET last_attempt_gmt = %s WHERE action_id IN (%d, %d, %d)', $wpdb->prefix . 'actionscheduler_actions', gmdate( 'Y-m-d H:i:s', $now - 600 ), $wp_pay, $wp_track, $sq_sync ) );
+$wp_exact = JobsHealth::payment_failures_db( $fam['woopayments']['hooks'], $fam['woopayments']['hook_groups'], $now - DAY_IN_SECONDS, $now );
+blzmcp_it_assert( is_array( $wp_exact ) && 1 === array_sum( array_column( $wp_exact, 'count' ) ), 'WooPayments: only the payment-related failed hook counts, not order tracking in the same group' );
+$q8 = PaymentErrors::for_methods( $q8_inv, $fam, array(), $now, 24, $tz );
+blzmcp_it_equals( array( true, 'amber', 1 ), array( $q8['woocommerce_payments']['jobs']['applicable'], $q8['woocommerce_payments']['jobs']['status'], $q8['woocommerce_payments']['jobs']['failed'] ), 'WooPayments jobs applicable: one payment job failure, amber' );
+foreach ( array( 'ppcp-gateway', 'ppcp-ideal', 'square_credit_card' ) as $id ) {
+	blzmcp_it_equals( array( false, 'not_applicable', 'no_verified_mapping' ), array( $q8[ $id ]['jobs']['applicable'], $q8[ $id ]['jobs']['coverage'], $q8[ $id ]['jobs']['reason'] ), "{$id}: jobs not applicable (a failed Square sync is not a payment job)" );
+}
+foreach ( $q8_ids as $id => $unused ) {
+	blzmcp_it_equals( array( false, 'no_verified_mapping', null ), array( $q8[ $id ]['logs']['applicable'], $q8[ $id ]['logs']['reason'], $q8[ $id ]['logs']['count'] ), "{$id}: logs not applicable (Q6)" );
+	blzmcp_it_equals( array( false, 'no_supported_webhook_record' ), array( $q8[ $id ]['webhook']['applicable'], $q8[ $id ]['webhook']['reason'] ), "{$id}: webhook not applicable" );
+}
+blzmcp_it_assert( ! str_contains( wp_json_encode( $q8 ), 'wcpay_' ) && ! str_contains( wp_json_encode( $q8 ), 'q8' ), 'no WooPayments hook names or arguments returned' );
 
 // ---------------------------------------------------------------- webhook mode separation.
 update_option( 'woocommerce_stripe_settings', array( 'enabled' => 'yes', 'testmode' => 'yes' ) );

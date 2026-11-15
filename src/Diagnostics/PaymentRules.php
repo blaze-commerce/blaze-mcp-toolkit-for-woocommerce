@@ -67,7 +67,6 @@ final class PaymentRules {
 		'insufficient_baseline',
 		'manual_method',
 		'kind_unknown',
-		'kind_unverified',
 		'unpaid_share_high',
 		'transaction_recorded_unpaid',
 		// Order reads (PaymentOrders, PaymentRules).
@@ -76,6 +75,7 @@ final class PaymentRules {
 		'unsupported_data_store',
 		'tables_missing',
 		'read_failed',
+		'operational_data_missing',
 		'row_cap',
 		// Inventory (PaymentMethods), a note only.
 		'registry_not_loaded',
@@ -583,9 +583,13 @@ final class PaymentRules {
 	 * @param string             $kind         instant|manual|unknown.
 	 * @param bool               $complete     Order reads complete.
 	 * @param bool               $cohort_empty True when the mature cohort interval is empty (since_hours=1).
+	 * @param bool               $reference_implies_charge PaymentMethods row fact: a transaction
+	 *                           reference on an unpaid order implies a charge. Only then does
+	 *                           transaction_recorded_unpaid raise amber; otherwise the count is
+	 *                           context only. Default false: no unverified severity.
 	 * @return array<string,mixed> Check + counts + reasons (codes).
 	 */
-	public static function stuck( array $current, array $baseline, string $kind, bool $complete = true, bool $cohort_empty = false ): array {
+	public static function stuck( array $current, array $baseline, string $kind, bool $complete = true, bool $cohort_empty = false, bool $reference_implies_charge = false ): array {
 		$int = static fn( $v ): ?int => is_int( $v ) ? $v : null;
 
 		$pending   = $int( $current['pending'] ?? null );
@@ -627,11 +631,15 @@ final class PaymentRules {
 			$out['reason']     = 'manual_method';
 			return $out;
 		}
-		// Q7: an unverified (unknown) kind still gets the share rule, which compares the method with
-		// its own baseline; the transaction-reference rule stays verified-instant only.
-		$verified = 'instant' === $kind;
-		if ( ! $verified ) {
-			$out['reasons'][] = 'kind_unverified';
+		if ( 'instant' !== $kind ) {
+			// Ruling Q7 (pass 4): an unknown kind is applicable but has no unpaid verdict until a
+			// verified adapter or the kind filter establishes instant settlement. A baseline cannot
+			// absorb normal settlement delay (a 48-hour settlement turns a healthy cohort red), so the
+			// counts stay as context only, with a fixed reason and no share or reference severity.
+			$out['reason']   = 'kind_unknown';
+			$out['reasons']  = array( 'kind_unknown' );
+			$out['coverage'] = 'unavailable';
+			return $out;
 		}
 		if ( $cohort_empty ) {
 			$out['reason'] = 'cohort_empty';
@@ -643,7 +651,7 @@ final class PaymentRules {
 
 		$severity = 'green';
 		$reason   = null;
-		if ( $verified && null !== $txn && $txn > 0 ) {
+		if ( $reference_implies_charge && null !== $txn && $txn > 0 ) {
 			$severity          = 'amber';
 			$out['reasons'][]  = 'transaction_recorded_unpaid';
 			$reason            = 'transaction_recorded_unpaid';
@@ -683,7 +691,7 @@ final class PaymentRules {
 			return $out;
 		}
 		$out['status'] = $severity;
-		$out['reason'] = $reason ?? ( $verified ? null : 'kind_unverified' );
+		$out['reason'] = $reason;
 		return $out;
 	}
 

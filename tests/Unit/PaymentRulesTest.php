@@ -415,10 +415,38 @@ final class PaymentRulesTest extends TestCase {
 	 * @dataProvider stuck_cases
 	 */
 	public function test_stuck_rules( array $current, array $baseline, string $want, ?string $reason ): void {
-		$out = PaymentRules::stuck( $current, $baseline, 'instant' );
+		$out = PaymentRules::stuck( $current, $baseline, 'instant', true, false, true );
 		$this->assertSame( $want, $out['status'] );
 		$this->assertSame( $reason, $out['reason'] );
 		$this->assertTrue( $out['applicable'] );
+	}
+
+	/** @return array<string,array{0:array,1:array,2:string,3:?string}> */
+	public function reference_not_charge_cases(): array {
+		return array(
+			'1 reference, no share issue'   => array( self::counts( 1, 0, 50, 1 ), self::counts( 0, 0, 50 ), 'green', null ),
+			'2 references, no share issue'  => array( self::counts( 2, 0, 50, 2 ), self::counts( 0, 0, 50 ), 'green', null ),
+			'reference, thin baseline'      => array( self::counts( 1, 0, 5, 1 ), self::counts( 0, 0, 3 ), 'unknown', 'insufficient_baseline' ),
+			'reference plus red share'      => array( self::counts( 30, 0, 70, 2 ), self::counts( 0, 0, 50 ), 'red', 'unpaid_share_high' ),
+		);
+	}
+
+	/**
+	 * Fix round 3 (pre-review issue 1): where a reference does not imply a charge (WooPayments
+	 * stores the intent ID before 3D Secure completes), the count is context with no severity.
+	 *
+	 * @dataProvider reference_not_charge_cases
+	 */
+	public function test_reference_that_does_not_imply_a_charge_is_context_only( array $current, array $baseline, string $want, ?string $reason ): void {
+		$out = PaymentRules::stuck( $current, $baseline, 'instant', true, false, false );
+		$this->assertSame( array( $want, $reason ), array( $out['status'], $out['reason'] ) );
+		$this->assertNotContains( 'transaction_recorded_unpaid', $out['reasons'] );
+		$this->assertSame( $current['transaction_recorded_unpaid'], $out['transaction_recorded_unpaid'], 'count kept as context' );
+	}
+
+	public function test_reference_rule_defaults_off(): void {
+		$out = PaymentRules::stuck( self::counts( 1, 0, 50, 1 ), self::counts( 0, 0, 50 ), 'instant' );
+		$this->assertSame( 'green', $out['status'], 'no reference severity unless the caller passes the verified fact' );
 	}
 
 	public function test_stuck_shares_and_counts(): void {
@@ -442,41 +470,76 @@ final class PaymentRulesTest extends TestCase {
 		$this->assertSame( 'not_applicable', $manual['coverage'] );
 		$this->assertSame( 30, $manual['pending'], 'context counts still shown' );
 
-		// Q7: unknown kind gets the share rule with a kind_unverified note.
+		// Ruling Q7 (pass 4): an unknown kind is applicable but gets no share severity.
 		$unknown = PaymentRules::stuck( self::counts( 30, 0, 1, 3 ), self::counts( 0, 0, 50 ), 'unknown' );
-		$this->assertSame( 'red', $unknown['status'] );
-		$this->assertSame( 'unpaid_share_high', $unknown['reason'] );
-		$this->assertContains( 'kind_unverified', $unknown['reasons'] );
+		$this->assertSame( 'unknown', $unknown['status'] );
+		$this->assertSame( 'kind_unknown', $unknown['reason'] );
+		$this->assertSame( array( 'kind_unknown' ), $unknown['reasons'] );
 		$this->assertTrue( $unknown['applicable'] );
-		$this->assertSame( 'complete', $unknown['coverage'] );
+		$this->assertTrue( $unknown['checked'] );
+		$this->assertSame( 'unavailable', $unknown['coverage'] );
+		$this->assertSame( array( 30, 0, 1, 3 ), array( $unknown['pending'], $unknown['cancelled_unpaid'], $unknown['taken'], $unknown['transaction_recorded_unpaid'] ), 'contextual counts kept' );
 	}
 
-	/** @return array<string,array{0:array,1:array,2:string,3:?string}> */
-	public function unverified_kind_cases(): array {
+	/** @return array<string,array{0:array,1:array,2:bool}> */
+	public function unknown_kind_cases(): array {
 		return array(
-			'normal share green with note'          => array( self::counts( 2, 0, 50 ), self::counts( 5, 0, 95 ), 'green', 'kind_unverified' ),
-			'amber share'                           => array( self::counts( 20, 0, 80 ), self::counts( 0, 0, 50 ), 'amber', 'unpaid_share_high' ),
-			'transaction refs ignored (not instant)' => array( self::counts( 2, 0, 50, 2 ), self::counts( 0, 0, 50 ), 'green', 'kind_unverified' ),
-			'thin baseline still unknown'           => array( self::counts( 9, 0, 1, 3 ), self::counts( 0, 0, 9 ), 'unknown', 'insufficient_baseline' ),
-			'redirect abandonment absorbed'         => array( self::counts( 20, 10, 70 ), self::counts( 25, 0, 75 ), 'green', 'kind_unverified' ),
+			'normal share'              => array( self::counts( 2, 0, 50 ), self::counts( 5, 0, 95 ), false ),
+			'share that would be amber' => array( self::counts( 20, 0, 80 ), self::counts( 0, 0, 50 ), false ),
+			'share that would be red'   => array( self::counts( 30, 0, 70 ), self::counts( 0, 0, 50 ), false ),
+			'transaction references'    => array( self::counts( 2, 0, 50, 2 ), self::counts( 0, 0, 50 ), false ),
+			'thin baseline'             => array( self::counts( 9, 0, 1, 3 ), self::counts( 0, 0, 9 ), false ),
+			'empty mature cohort'       => array( self::counts( 0, 0, 0 ), self::counts( 0, 0, 50 ), true ),
 		);
 	}
 
 	/**
-	 * @dataProvider unverified_kind_cases
+	 * @dataProvider unknown_kind_cases
 	 */
-	public function test_stuck_unverified_kind( array $current, array $baseline, string $want, ?string $reason ): void {
-		$out = PaymentRules::stuck( $current, $baseline, 'unknown' );
-		$this->assertSame( $want, $out['status'] );
-		$this->assertSame( $reason, $out['reason'] );
-		$this->assertContains( 'kind_unverified', $out['reasons'] );
-		$this->assertNotContains( 'transaction_recorded_unpaid', $out['reasons'], 'reference rule is verified-instant only' );
+	public function test_stuck_unknown_kind_has_no_share_verdict( array $current, array $baseline, bool $cohort_empty ): void {
+		$out = PaymentRules::stuck( $current, $baseline, 'unknown', true, $cohort_empty );
+		$this->assertSame( array( 'unknown', true, 'unavailable', 'kind_unknown' ), array( $out['status'], $out['applicable'], $out['coverage'], $out['reason'] ) );
+		$this->assertSame( array( 'kind_unknown' ), $out['reasons'], 'no unpaid_share_high or transaction_recorded_unpaid for an unknown kind' );
+		$this->assertSame( $current['pending'], $out['pending'] );
+		$this->assertSame( $current['transaction_recorded_unpaid'], $out['transaction_recorded_unpaid'] );
+		$this->assertSame( $baseline['taken'], $out['baseline_taken'] );
 	}
 
-	public function test_instant_kind_carries_no_unverified_note(): void {
+	/**
+	 * Lead's pass-4 counterexample: a healthy gateway accepts 1 checkout an hour and settles each
+	 * one 48 hours later. Cohort counts are built from that schedule at the default 24-hour window.
+	 */
+	public function test_delayed_settlement_unknown_kind_is_not_red(): void {
+		$now   = self::MONDAY;
+		$win   = PaymentRules::cohorts( $now, 24 );
+		$cur   = self::counts( 0, 0, 0 );
+		$base  = self::counts( 0, 0, 0 );
+		$start = PaymentRules::history_start( $now );
+		for ( $t = $start + 1800; $t < $now; $t += 3600 ) {
+			$state = ( $now - $t ) < 48 * 3600 ? 'pending' : 'taken';
+			if ( $t >= $win['window_start'] && $t < $win['mature_before'] ) {
+				++$cur[ $state ];
+			} elseif ( $t >= $win['baseline_start'] && $t < $win['baseline_end'] ) {
+				++$base[ $state ];
+			}
+		}
+		$this->assertSame( array( 23, 0 ), array( $cur['pending'], $cur['taken'] ), 'current mature cohort is all still settling' );
+		$this->assertSame( array( 24, 624 ), array( $base['pending'], $base['taken'] ), 'baseline mostly settled' );
+
+		$instant = PaymentRules::stuck( $cur, $base, 'instant' );
+		$this->assertSame( 'red', $instant['status'], 'the share rule cannot absorb settlement delay: why it needs a verified instant kind' );
+
+		$unknown = PaymentRules::stuck( $cur, $base, 'unknown' );
+		$this->assertSame( array( 'unknown', 'kind_unknown', 'unavailable' ), array( $unknown['status'], $unknown['reason'], $unknown['coverage'] ) );
+		$this->assertNotContains( 'unpaid_share_high', $unknown['reasons'] );
+		$this->assertSame( 1.0, $unknown['stuck_share'], 'share still shown as context' );
+		$this->assertSame( 'unknown', PaymentRules::rollup( array( $unknown ) ) );
+	}
+
+	public function test_instant_kind_carries_no_kind_note(): void {
 		$out = PaymentRules::stuck( self::counts( 2, 0, 50 ), self::counts( 5, 0, 95 ), 'instant' );
 		$this->assertSame( array( 'green', null ), array( $out['status'], $out['reason'] ) );
-		$this->assertNotContains( 'kind_unverified', $out['reasons'] );
+		$this->assertNotContains( 'kind_unknown', $out['reasons'] );
 	}
 
 	// ---------------------------------------------------------------- registry not built (pre-review miss 1).

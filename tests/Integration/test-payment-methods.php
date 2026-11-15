@@ -18,6 +18,7 @@
 
 require_once __DIR__ . '/payment-fixtures.php';
 
+use Blaze\McpToolkit\Diagnostics\PaymentErrors;
 use Blaze\McpToolkit\Diagnostics\PaymentMethods;
 use Blaze\McpToolkit\Diagnostics\PaymentOrders;
 use Blaze\McpToolkit\Diagnostics\PaymentRules;
@@ -165,6 +166,54 @@ $f = PaymentRules::inventory_findings( $m['stripe_sepa'], true, true, 'green', a
 blzmcp_it_equals( 'info', $f[0]['severity'] ?? null, 'disabled method with a healthy mapped sibling is info' );
 $f = PaymentRules::inventory_findings( $m['cod'], true, true, 'green' );
 blzmcp_it_equals( 'amber', $f[0]['severity'] ?? null, 'disabled method with history and no mapping is amber' );
+
+// Pass 4 #4: a deactivated gateway keeps its settings. A known absence (built registry without the
+// ID) reports enabled and test mode as unknown, and raises no active test-mode finding from them.
+$saved_ret = get_option( 'woocommerce_stripe_afterpay_settings', null );
+blzmcp_it_cleanup( static fn() => null === $saved_ret ? delete_option( 'woocommerce_stripe_afterpay_settings' ) : update_option( 'woocommerce_stripe_afterpay_settings', $saved_ret ) );
+update_option( 'woocommerce_oldgateway_settings', array( 'enabled' => 'yes', 'testmode' => 'yes' ) );
+update_option( 'woocommerce_stripe_afterpay_settings', array( 'enabled' => 'yes' ) );
+$ret = PaymentMethods::inventory( array( 'oldgateway', 'stripe_afterpay' ) )['methods'];
+blzmcp_it_equals( array( false, null, null ), array( $ret['oldgateway']['registered'], $ret['oldgateway']['enabled'], $ret['oldgateway']['test_mode'] ), 'known-absent gateway with retained enabled=yes: enabled null, not true' );
+blzmcp_it_equals( array( false, null, null, 'stripe' ), array( $ret['stripe_afterpay']['registered'], $ret['stripe_afterpay']['enabled'], $ret['stripe_afterpay']['test_mode'], $ret['stripe_afterpay']['family'] ), 'known-absent Stripe-family method with retained test mode: enabled and test mode null' );
+foreach ( array( 'oldgateway', 'stripe_afterpay' ) as $gone ) {
+	$codes = array_column( PaymentRules::inventory_findings( $ret[ $gone ], true, true, 'green' ), 'code' );
+	blzmcp_it_equals( array( 'method_not_registered' ), $codes, "{$gone}: only the not-registered warning, no test-mode or disabled claim from old settings" );
+}
+blzmcp_it_equals( array( true, true ), array( $ret['stripe']['enabled'], $ret['stripe']['test_mode'] ), 'registered gateway still reads its settings' );
+// Fix round 3 (pre-review issue 5): no webhook verdict from a removed plugin's retained records.
+blzmcp_it_equals( null, $ret['stripe_afterpay']['webhook_adapter'], 'known-absent Stripe-family method: no webhook adapter' );
+blzmcp_it_equals( 'stripe', $ret['stripe']['webhook_adapter'], 'registered Stripe keeps its webhook adapter' );
+$wh = PaymentErrors::for_methods( array( 'stripe_afterpay' => $ret['stripe_afterpay'] ), PaymentMethods::token_map(), array(), time(), 24, wp_timezone() )['stripe_afterpay']['webhook'];
+blzmcp_it_equals( array( false, 'not_applicable', 'no_supported_webhook_record' ), array( $wh['applicable'], $wh['coverage'], $wh['reason'] ), 'known-absent Stripe-family webhook check is not applicable' );
+
+// Q8 interim: receipt-backed PayPal, WooPayments and Square IDs (activity only; not registered here).
+$q8 = PaymentMethods::inventory( array( 'ppcp-gateway', 'ppcp-ideal', 'woocommerce_payments', 'woocommerce_payments_klarna', 'square_credit_card', 'gift_cards_pay' ) )['methods'];
+$want = array(
+	'ppcp-gateway'                => array( 'instant', 'paypal', 'woocommerce-paypal-payments' ),
+	'ppcp-ideal'                  => array( 'unknown', 'paypal', 'woocommerce-paypal-payments' ),
+	'woocommerce_payments'        => array( 'instant', 'woopayments', 'woocommerce-payments' ),
+	'woocommerce_payments_klarna' => array( 'unknown', 'woopayments', 'woocommerce-payments' ),
+	'square_credit_card'          => array( 'instant', 'square', 'woocommerce-square' ),
+	'gift_cards_pay'              => array( 'unknown', 'square', 'woocommerce-square' ),
+);
+foreach ( $want as $id => $facts ) {
+	blzmcp_it_equals( $facts, array( $q8[ $id ]['kind'] ?? null, $q8[ $id ]['family'] ?? null, $q8[ $id ]['plugin'] ?? null ), "{$id}: kind, family and plugin tag from the fixture" );
+	blzmcp_it_equals( array( null, null, null ), array( $q8[ $id ]['webhook_adapter'], $q8[ $id ]['webhook_required'], $q8[ $id ]['test_mode'] ), "{$id}: no webhook adapter or test-mode adapter" );
+}
+$cur  = array( 'pending' => 30, 'cancelled_unpaid' => 0, 'taken' => 70, 'transaction_recorded_unpaid' => 1, 'failed' => 0 );
+$base = array( 'pending' => 2, 'cancelled_unpaid' => 0, 'taken' => 100 );
+blzmcp_it_equals( 'red', PaymentRules::stuck( $cur, $base, $q8['ppcp-gateway']['kind'] )['status'], 'instant PayPal card gets the full unpaid verdict' );
+blzmcp_it_equals( array( 'unknown', 'kind_unknown' ), array_values( array_intersect_key( PaymentRules::stuck( $cur, $base, $q8['ppcp-ideal']['kind'] ), array_flip( array( 'status', 'reason' ) ) ) ), 'PayPal redirect ID stays unknown kind' );
+// Fix round 3: the reference rule follows the inventory row's reference_implies_charge fact.
+$one_ref = array( 'pending' => 1, 'cancelled_unpaid' => 0, 'taken' => 60, 'transaction_recorded_unpaid' => 1, 'failed' => 0 );
+blzmcp_it_equals( array( true, false, false, false ), array( $q8['ppcp-gateway']['reference_implies_charge'], $q8['woocommerce_payments']['reference_implies_charge'], $q8['square_credit_card']['reference_implies_charge'], $q8['ppcp-ideal']['reference_implies_charge'] ), 'reference fact per row from the fixed map' );
+$wp_ref = PaymentRules::stuck( $one_ref, $base, $q8['woocommerce_payments']['kind'], true, false, $q8['woocommerce_payments']['reference_implies_charge'] );
+blzmcp_it_equals( array( 'green', 1 ), array( $wp_ref['status'], $wp_ref['transaction_recorded_unpaid'] ), 'WooPayments pending 3D Secure order with an intent ID: no amber, count as context' );
+$pp_ref = PaymentRules::stuck( $one_ref, $base, $q8['ppcp-gateway']['kind'], true, false, $q8['ppcp-gateway']['reference_implies_charge'] );
+blzmcp_it_equals( 'amber', $pp_ref['status'], 'PayPal card with a recorded capture/authorisation ID: amber' );
+$st_row = PaymentMethods::inventory( array() )['methods']['stripe'];
+blzmcp_it_equals( true, $st_row['reference_implies_charge'], 'registered Stripe keeps the reference rule' );
 
 // Mode separation and unknown format.
 update_option( 'woocommerce_stripe_settings', array( 'enabled' => 'yes' ) );

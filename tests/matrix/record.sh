@@ -22,7 +22,9 @@ set -uo pipefail
 # (REQUIRED_STATES) has a STATE line that ran; every state except none has a STORAGE line for each
 # authority/sync combination and storage suite; the performance receipt (PERF_FILE) exists, is
 # bound to this zip's SHA-256 and has 5 complete trials for each storage/window/logger partition,
-# each under the 1500 ms budget. The run's ZIP_SHA256 and VERSION must match the zip (exit 3), and
+# each under the 1500 ms budget, every one of them valid (seeded workload observed, all 4 readers
+# at their expected counts), a detected forced orders/logs/jobs reader failure per storage, and
+# jobs timed on ActionScheduler_DBStore only. The run's ZIP_SHA256 and VERSION must match the zip (exit 3), and
 # the zip's header Version, BLZMCP_VERSION and readme Stable tag must agree (exit 3). The record is
 # titled and named after the candidate's version, never a fixed one.
 #
@@ -157,8 +159,23 @@ else
 	hmissing=$(jq -r '[("legacy", "hpos") as $s | (24, 168) as $w | ("cold", "warm") as $k | . as $r
 		| ((($r.http // []) | map(select(.storage == $s and .window == $w and .kind == $k and .http_code == "200" and .valid_body == true and ((.total_ms | type) == "number")))) | length) as $n
 		| select($n < 1) | "\($s)/\($w)h/\($k)"] | join(", ")' "$perf_file")
+	# REVIEW-pass4 #10: a timing counts only with the workload observed and every reader valid.
+	# Checked on the trials themselves, not on the partition's own complete flag.
+	tinvalid=$(jq -r '[("legacy", "hpos") as $s | (24, 168) as $w | ("file", "db") as $l | . as $r
+		| (($r.trials // []) | map(select(.storage == $s and .window == $w and .logger == $l))) as $t
+		| ($t | map(select(.ok == true and ((.validation.readers // {}) | (keys == ["inventory", "jobs", "logs", "orders"]) and all(.[]; . == true))))) as $v
+		| select(($t | length) != 5 or ($v | length) != 5) | "\($s)/\($w)h/\($l) (\($v | length) of \($t | length) trials valid)"] | join(", ")' "$perf_file")
+	fmissing=$(jq -r '[("legacy", "hpos") as $s | ({l:"file", f:"logs"}, {l:"db", f:"logs"}, {l:"db", f:"orders"}, {l:"db", f:"jobs"}) as $p | . as $r
+		| (($r.forced_failures // []) | map(select(.storage == $s and .logger == $p.l and .force == $p.f))) as $f
+		| select(($f | length) != 1 or ($f | all(.ok == false and .detected == true)) != true) | "\($p.f) reader (\($s), \($p.l) logger)"] | join(", ")' "$perf_file")
 	if [ -n "$pmissing" ]; then
 		incomplete+=("performance partitions incomplete: $pmissing")
+	elif [ -n "$tinvalid" ]; then
+		incomplete+=("performance trials without the seeded workload and valid readers: $tinvalid")
+	elif [ -n "$fmissing" ]; then
+		incomplete+=("forced reader failure not shown to fail the gate: $fmissing")
+	elif [ "$(jq -c '[.exact_jobs_required, .jobs_store]' "$perf_file")" != '[true,["ActionScheduler_DBStore"]]' ]; then
+		incomplete+=("background jobs were not timed on the exact database-store path (jobs_store $(jq -c '.jobs_store' "$perf_file"))")
 	elif [ -n "$hmissing" ]; then
 		incomplete+=("performance receipt has no HTTP latency figure for: $hmissing")
 	elif [ "$(jq -r '.all_pass and ([.partitions[].max_ms] | all(. < 1500))' "$perf_file")" != true ]; then
@@ -232,6 +249,8 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 		echo
 		echo "- HTTP latency (abilities REST route, ms): $(jq -r '(.http // []) | map("\(.storage)/\(.window)h/\(.kind) \(.total_ms)") | join(", ") | if . == "" then "none" else . end' "$perf_file")"
 		echo "- Background jobs timed on: $(jq -r '.jobs_path // "not recorded"' "$perf_file")"
+		echo "- Trial validity: $(jq -r '.validity // "not recorded"' "$perf_file")"
+		echo "- Forced reader failures (each must fail the trial): $(jq -r '(.forced_failures // []) | map("\(.force)/\(.storage)/\(.logger) \(if .ok == false and .detected == true then "failed as required" else "NOT DETECTED" end)") | join(", ") | if . == "" then "none" else . end' "$perf_file")"
 	else
 		echo "- (no performance receipt)"
 	fi

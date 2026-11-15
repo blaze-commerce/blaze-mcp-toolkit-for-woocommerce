@@ -32,7 +32,7 @@ final class PaymentHealth extends AbstractAbility {
 	public const SCHEMA_VERSION = 1;
 
 	/** Cache-context contract version: bump when the cached shape or its inputs change. */
-	public const CONTEXT_VERSION = 1;
+	public const CONTEXT_VERSION = 2;
 
 	/** Default and bounds for since_hours. */
 	public const DEFAULT_HOURS = 24;
@@ -351,16 +351,21 @@ final class PaymentHealth extends AbstractAbility {
 	}
 
 	/**
-	 * The safe configuration facts the result depends on: registered gateway IDs with their
-	 * enabled state and kind, the Stripe mode, the validated token and replacement maps, and the
-	 * hold-stock settings. No credentials, no whole options, no titles.
+	 * The safe configuration facts the result depends on: whether the gateway registry is built
+	 * (unbuilt, unreadable or built, so a built-empty registry never shares an unbuilt entry),
+	 * registered gateway IDs with their enabled state and kind, the Stripe mode, the validated
+	 * token and replacement maps, and the hold-stock settings. No credentials, no whole options,
+	 * no titles. Facts of methods known only from order history are checked against the cached
+	 * result itself in execute(), since their IDs come from orders.
 	 *
 	 * @return array<string, mixed>
 	 */
 	private static function config_subset(): array {
 		$gateways = array();
+		$registry = 'unbuilt';
 		if ( class_exists( '\WC_Payment_Gateways' ) && did_action( 'wc_payment_gateways_initialized' ) > 0 ) {
-			$list = \WC_Payment_Gateways::instance()->payment_gateways; // Already built; nothing is constructed.
+			$list     = \WC_Payment_Gateways::instance()->payment_gateways; // Already built; nothing is constructed.
+			$registry = is_array( $list ) ? 'built' : 'unreadable';
 			foreach ( is_array( $list ) ? $list : array() as $gateway ) {
 				if ( is_object( $gateway ) && isset( $gateway->id ) && is_string( $gateway->id ) && '' !== $gateway->id && PaymentRules::safe_method_id( $gateway->id ) === $gateway->id ) {
 					$gateways[ $gateway->id ] = array(
@@ -372,12 +377,86 @@ final class PaymentHealth extends AbstractAbility {
 			ksort( $gateways, SORT_STRING );
 		}
 		return array(
+			'registry'     => $registry,
 			'gateways'     => $gateways,
 			'stripe_mode'  => PaymentMethods::stripe_mode(),
 			'tokens'       => PaymentMethods::token_map(),
 			'replacements' => PaymentMethods::replacements(),
 			'hold'         => array( get_option( 'woocommerce_hold_stock_minutes', null ), get_option( 'woocommerce_manage_stock', null ) ),
 		);
+	}
+
+	/**
+	 * Execute through the base class (permission already checked by core, cache, audit), after
+	 * dropping a cached result whose method facts no longer hold (C2, item 6). The method IDs
+	 * come from order history, so they cannot be in the key; the cached result lists them with
+	 * the facts it used. Those facts are read again passively, as run() would read them, and a
+	 * mismatch removes the entry so the base class recomputes. Reads no orders, logs or jobs and
+	 * constructs no gateway. The only write is deleting this ability's own result transient.
+	 *
+	 * @param mixed $input Ability input.
+	 * @return array|\WP_Error
+	 */
+	public static function execute( $input = null ): array|\WP_Error {
+		self::drop_stale_cache( is_array( $input ) ? $input : ( is_object( $input ) ? (array) json_decode( (string) wp_json_encode( $input ), true ) : array() ) );
+		return parent::execute( $input );
+	}
+
+	/**
+	 * Delete the cached result for this input when its method facts have changed.
+	 *
+	 * @param array $input Ability input.
+	 */
+	private static function drop_stale_cache( array $input ): void {
+		try {
+			$key = self::cache_key( $input );
+		} catch ( \Throwable $e ) {
+			return; // The base class reports a broken cache context itself and never uses a shared key.
+		}
+		$cached = get_transient( $key );
+		if ( is_array( $cached ) && ! self::method_facts_hold( $cached ) ) {
+			delete_transient( $key );
+		}
+	}
+
+	/**
+	 * Whether the inventory facts a cached result used still hold: the same method IDs (enabled
+	 * registered methods plus the cached history IDs) with the same registered, enabled, test
+	 * mode, kind, plugin, label and reference_implies_charge. Any read failure counts as changed.
+	 * The public response carries no reference_implies_charge field, so the cached side is derived
+	 * the way run() received it: instant kind plus the fixed receipt map for that ID.
+	 *
+	 * @param array<string,mixed> $cached Cached response.
+	 */
+	private static function method_facts_hold( array $cached ): bool {
+		$facts = static fn( array $m, bool $refs ): array => array(
+			'refs'       => $refs,
+			'registered' => isset( $m['registered'] ) && is_bool( $m['registered'] ) ? $m['registered'] : null,
+			'enabled'    => isset( $m['enabled'] ) && is_bool( $m['enabled'] ) ? $m['enabled'] : null,
+			'test_mode'  => isset( $m['test_mode'] ) && is_bool( $m['test_mode'] ) ? $m['test_mode'] : null,
+			'kind'       => in_array( $m['kind'] ?? null, array( 'instant', 'manual', 'unknown' ), true ) ? $m['kind'] : 'unknown',
+			'plugin'     => isset( $m['plugin'] ) && is_string( $m['plugin'] ) ? $m['plugin'] : null,
+			'title'      => (string) ( $m['title'] ?? '' ),
+		);
+		$was = array();
+		foreach ( (array) ( $cached['methods'] ?? array() ) as $m ) {
+			if ( ! is_array( $m ) || ! isset( $m['id'] ) || ! is_string( $m['id'] ) ) {
+				return false;
+			}
+			$was[ $m['id'] ] = $facts( $m, PaymentMethods::reference_implies_charge( $m['id'] ) && 'instant' === ( $m['kind'] ?? null ) );
+		}
+		try {
+			$inventory = PaymentMethods::inventory( array_map( 'strval', array_keys( $was ) ) );
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+		$now = array();
+		foreach ( (array) ( $inventory['methods'] ?? array() ) as $id => $m ) {
+			$now[ (string) $id ] = $facts( (array) $m, ! empty( $m['reference_implies_charge'] ) );
+		}
+		ksort( $was, SORT_STRING );
+		ksort( $now, SORT_STRING );
+		return $was === $now;
 	}
 
 	/**
@@ -438,11 +517,22 @@ final class PaymentHealth extends AbstractAbility {
 			$methods  = self::fallback_inventory( array_keys( $scopes ) );
 			$families = array();
 		}
+		// Without the registry, enabled methods with no order activity cannot be listed (C3), so the
+		// method list itself is incomplete: an applicable unknown check in the overall rollup (C7).
+		// Red or amber evidence still leads; nothing omitted is reported as healthy.
+		$inventory_check = null;
 		if ( ! $registry_known ) {
 			// Registration is unknown here (null), never reported as "not installed".
-			$notes[] = 'registry_not_loaded' === $registry_reason
+			$notes[]         = 'registry_not_loaded' === $registry_reason
 				? (string) self::reason_text( 'registry_not_loaded' )
-				: __( 'The list of active payment plugins could not be read, so whether each method\'s plugin is active was not confirmed. Each method was checked from its own settings.', 'blaze-mcp-toolkit-for-woocommerce' );
+				: __( 'The list of active payment plugins could not be read, so whether each method\'s plugin is active, and which methods are switched on, was not confirmed. Methods that are switched on but took no checkout orders in the last 28 days may be missing from this result.', 'blaze-mcp-toolkit-for-woocommerce' );
+			$inventory_check = array(
+				'status'     => 'unknown',
+				'checked'    => $orders_ok,
+				'applicable' => true,
+				'coverage'   => $orders_ok ? 'partial' : 'unavailable',
+				'reason'     => 'registry_not_loaded',
+			);
 		}
 
 		// Store-wide quiet check and the shared weekly shape.
@@ -519,7 +609,8 @@ final class PaymentHealth extends AbstractAbility {
 				null === $scope ? array() : (array) $scope['baseline'],
 				(string) ( $m['kind'] ?? 'unknown' ),
 				$complete,
-				$cohort_empty
+				$cohort_empty,
+				! empty( $m['reference_implies_charge'] ) // Receipt-mapped instant IDs only (C6).
 			);
 			$rows[ $id ] = array(
 				'm'     => $m,
@@ -591,6 +682,10 @@ final class PaymentHealth extends AbstractAbility {
 		// Overall (C7): the same precedence over store-wide and method results.
 		$overall_checks = array( $store_quiet );
 		$cover_checks   = array( $store_quiet );
+		if ( null !== $inventory_check ) {
+			$overall_checks[] = $inventory_check;
+			$cover_checks[]   = $inventory_check;
+		}
 		foreach ( $out_methods as $om ) {
 			$overall_checks[] = array(
 				'status'     => $om['status'],
@@ -616,7 +711,16 @@ final class PaymentHealth extends AbstractAbility {
 			$notes[] = sprintf( __( 'These payment methods could not be fully checked, so do not describe them as healthy: %s.', 'blaze-mcp-toolkit-for-woocommerce' ), implode( ', ', $unknown ) );
 		}
 		if ( array() === $out_methods ) {
-			$notes[] = __( 'No payment method is switched on and none took checkout orders in the last 28 days, so there are no methods to check.', 'blaze-mcp-toolkit-for-woocommerce' );
+			// Only the facts actually read support this sentence; nothing is claimed about the rest.
+			if ( $registry_known && $orders_ok ) {
+				$notes[] = __( 'No payment method is recorded as switched on and none took checkout orders in the last 28 days, so there are no methods to check.', 'blaze-mcp-toolkit-for-woocommerce' );
+			} elseif ( $registry_known ) {
+				$notes[] = __( 'No payment method is recorded as switched on, and recent orders could not be read, so methods that took orders recently may be missing. There are no methods to check.', 'blaze-mcp-toolkit-for-woocommerce' );
+			} elseif ( $orders_ok ) {
+				$notes[] = __( 'No payment method took checkout orders in the last 28 days, and the list of payment methods could not be read, so whether any method is switched on is unknown. There are no methods to check.', 'blaze-mcp-toolkit-for-woocommerce' );
+			} else {
+				$notes[] = __( 'Neither the list of payment methods nor recent orders could be read, so whether any method is switched on is unknown. There are no methods to check, and nothing here is known to be healthy.', 'blaze-mcp-toolkit-for-woocommerce' );
+			}
 		}
 
 		$capped = PaymentRules::cap_findings( $findings, self::MAX_FINDINGS );
@@ -731,10 +835,10 @@ final class PaymentHealth extends AbstractAbility {
 			return null;
 		}
 		switch ( $code ) {
-			case 'kind_unverified':
-				return __( 'Unpaid orders are compared with this method\'s own history; how it takes payment is not verified.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'registry_not_loaded':
-				return __( 'The list of active payment plugins was not loaded for this check, so whether each method\'s plugin is active was not confirmed. Each method was checked from its own settings.', 'blaze-mcp-toolkit-for-woocommerce' );
+				return __( 'The list of active payment plugins was not loaded for this check, so whether each method\'s plugin is active was not confirmed. Each method was checked from its own settings. Methods that are switched on but took no checkout orders in the last 28 days may be missing from this result.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'operational_data_missing':
+				return __( 'Some orders are missing WooCommerce\'s order details record, so order activity could not be checked.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'log_directory_unavailable':
 				return __( 'The WooCommerce log folder could not be read, so payment errors could not be checked.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'webhook_stale_unverified':
@@ -782,7 +886,7 @@ final class PaymentHealth extends AbstractAbility {
 			case 'manual_method':
 				return __( 'A manual payment method (paid outside checkout), so this check does not apply.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'kind_unknown':
-				return __( 'Whether this method takes payment at checkout is not known, so unpaid orders are shown as counts only.', 'blaze-mcp-toolkit-for-woocommerce' );
+				return __( 'How this payment method settles payments is not verified, so unpaid orders are shown as counts only, without a verdict.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'unpaid_share_high':
 				return __( 'More recent checkouts were left unpaid than this method\'s earlier orders would suggest.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'transaction_recorded_unpaid':

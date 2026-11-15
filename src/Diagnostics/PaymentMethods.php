@@ -35,7 +35,93 @@ final class PaymentMethods {
 			'hooks'           => array( 'wc_stripe_deferred_webhook', 'wc_stripe_process_payment_intent_metadata', 'wc_stripe_process_checkout_session_metadata' ),
 			'hook_groups'     => array( 'woocommerce_stripe' ),
 		),
+		// Wave 2, Q8 interim: tagged PayPal Payments 4.2.2, WooPayments 11.3.0 and Square 5.5.3
+		// (tests/fixtures/payment-gateway-contracts.json). Method IDs and plugin slugs only. No log
+		// sources (Q6: these plugins log errors only with debug logging on, or never at error level,
+		// and no webhook-failure pattern is verified) and no webhook record.
+		'paypal'      => array(
+			'plugin'          => 'woocommerce-paypal-payments',
+			'method_ids'      => array( 'ppcp-gateway', 'ppcp-credit-card-gateway', 'ppcp-card-button-gateway', 'ppcp-googlepay', 'ppcp-applepay', 'ppcp-axo-gateway', 'ppcp-bancontact', 'ppcp-blik', 'ppcp-eps', 'ppcp-ideal', 'ppcp-mybank', 'ppcp-p24', 'ppcp-trustly', 'ppcp-pwc', 'ppcp-multibanco', 'ppcp-oxxo-gateway', 'ppcp-pay-upon-invoice-gateway' ),
+			'method_prefixes' => array(),
+			'log_sources'     => array(),
+			'hooks'           => array(), // Q8 interim: no payment-job mapping for PayPal.
+			'hook_groups'     => array(),
+		),
+		'woopayments' => array(
+			'plugin'          => 'woocommerce-payments',
+			'method_ids'      => array( 'woocommerce_payments' ),
+			'method_prefixes' => array( 'woocommerce_payments_' ),
+			'log_sources'     => array(),
+			// Only the hooks the fixture marks payment_related. The shared `woocommerce_payments`
+			// group is not mapped: it also holds order-tracking and store-sync jobs.
+			'hooks'           => array( 'wcpay_webhook_fetch_events', 'wcpay_webhook_process_event', 'wcpay_add_fee_breakdown_to_order_notes', 'wcpay_update_saved_payment_method' ),
+			'hook_groups'     => array(),
+		),
+		'square'      => array(
+			'plugin'          => 'woocommerce-square',
+			'method_ids'      => array( 'square_credit_card', 'square_cash_app_pay', 'gift_cards_pay' ),
+			'method_prefixes' => array(),
+			'log_sources'     => array(),
+			'hooks'           => array(), // No Square job is a payment job.
+			'hook_groups'     => array(),
+		),
 	);
+
+	/**
+	 * Source-verified instant IDs (item 1 and wave 2 receipts): each charges in the checkout
+	 * request and marks the order paid, or on-hold for authorise-only. Every other ID of these
+	 * families stays unknown.
+	 */
+	public const INSTANT_IDS = array(
+		'stripe',
+		'ppcp-gateway',
+		'ppcp-credit-card-gateway',
+		'ppcp-card-button-gateway',
+		'ppcp-googlepay',
+		'ppcp-applepay',
+		'ppcp-axo-gateway',
+		'woocommerce_payments',
+		'square_credit_card',
+		'square_cash_app_pay',
+	);
+
+	/**
+	 * Per instant ID: does a transaction reference on an unpaid order imply a completed or
+	 * authorised charge? Only true where the receipt shows the reference is written after the
+	 * charge or authorisation succeeds; otherwise false (no guess), so the reference count is
+	 * context only (C6 transaction_recorded_unpaid).
+	 * - stripe: charge ID set only for an authorised, pending-captured or succeeded charge
+	 *   (receipt, abstract-wc-stripe-payment-gateway.php:714-786).
+	 * - PayPal processor path: capture or authorisation ID stored after capture/authorise
+	 *   (OrderProcessor.php:129-140); 3D Secure and redirect fallbacks return before it.
+	 * - woocommerce_payments: intent ID stored even while the intent still needs action
+	 *   (class-wc-payments-order-service.php:1875, before :2499), so a pending 3D Secure
+	 *   order already has one.
+	 * - Square card and Cash App Pay: the receipt shows the ID stored before payment_complete,
+	 *   but not whether a declined or unfinished charge leaves one, so not established.
+	 */
+	public const REFERENCE_IMPLIES_CHARGE = array(
+		'stripe'                   => true,
+		'ppcp-gateway'             => true,
+		'ppcp-credit-card-gateway' => true,
+		'ppcp-card-button-gateway' => true,
+		'ppcp-googlepay'           => true,
+		'ppcp-applepay'            => true,
+		'ppcp-axo-gateway'         => true,
+		'woocommerce_payments'     => false,
+		'square_credit_card'       => false,
+		'square_cash_app_pay'      => false,
+	);
+
+	/**
+	 * Whether a recorded transaction reference implies a charge for this method (fixed map;
+	 * false for every unlisted ID).
+	 *
+	 * @param string $id Method ID.
+	 */
+	public static function reference_implies_charge( string $id ): bool {
+		return true === ( self::REFERENCE_IMPLIES_CHARGE[ $id ] ?? false );
+	}
 
 	/** Source-verified replacements (item 1). */
 	private const REPLACEMENTS = array( 'stripe_sepa' => array( 'stripe_sepa_debit' ) );
@@ -87,19 +173,29 @@ final class PaymentMethods {
 			} elseif ( isset( $registry['gateways'][ $id ] ) ) {
 				$slug = $registry['gateways'][ $id ]['plugin'];
 			}
+			// Unknown (null), never false, when the registry has not been built in this request.
+			$registered = $registry['known'] ? isset( $registry['gateways'][ $id ] ) : null;
+			// A known-absent gateway (built registry without the ID) keeps its old settings after
+			// deactivation; they describe a plugin that is not running, so enabled and test mode
+			// are unknown rather than read from the retained option. Q5: an unknown registry still
+			// uses the safe allowlisted settings.
+			$absent         = false === $registered;
+			$kind           = self::kind( $id );
 			$methods[ $id ] = array(
-				'id'               => $id,
-				'title'            => self::title( $id ),
-				'plugin'           => $slug,
-				'family'           => $family,
-				// Unknown (null), never false, when the registry has not been built in this request.
-				'registered'       => $registry['known'] ? isset( $registry['gateways'][ $id ] ) : null,
-				'enabled'          => self::enabled( $id ),
-				'test_mode'        => self::test_mode( $id, $family ),
-				'kind'             => self::kind( $id ),
-				'replacements'     => $replacements[ $id ] ?? array(),
-				'webhook_adapter'  => 'stripe' === $family ? 'stripe' : null,
-				'webhook_required' => 'stripe' === $id ? false : null,
+				'id'                       => $id,
+				'title'                    => self::title( $id ),
+				'plugin'                   => $slug,
+				'family'                   => $family,
+				'registered'               => $registered,
+				'enabled'                  => $absent ? null : self::enabled( $id ),
+				'test_mode'                => $absent ? null : self::test_mode( $id, $family ),
+				'kind'                     => $kind,
+				'reference_implies_charge' => 'instant' === $kind && self::reference_implies_charge( $id ),
+				'replacements'             => $replacements[ $id ] ?? array(),
+				// A known-absent plugin's retained webhook records describe a plugin that is not
+				// running, so no webhook verdict is drawn from them (same rule as enabled/test mode).
+				'webhook_adapter'          => 'stripe' === $family && ! $absent ? 'stripe' : null,
+				'webhook_required'         => 'stripe' === $id ? false : null,
 			);
 		}
 		return array(
@@ -213,7 +309,7 @@ final class PaymentMethods {
 	 * @param string $id Method ID.
 	 */
 	public static function kind( string $id ): string {
-		$kind = in_array( $id, self::MANUAL_IDS, true ) ? 'manual' : ( 'stripe' === $id ? 'instant' : 'unknown' );
+		$kind = in_array( $id, self::MANUAL_IDS, true ) ? 'manual' : ( in_array( $id, self::INSTANT_IDS, true ) ? 'instant' : 'unknown' );
 		/**
 		 * Filters a payment method's settlement kind for payment health.
 		 *

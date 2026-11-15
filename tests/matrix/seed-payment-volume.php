@@ -23,37 +23,8 @@
 
 defined( 'ABSPATH' ) || exit;
 
-const BLZMCP_PERF_META   = '_blzmcp_perf';
-const BLZMCP_PERF_PREFIX = 'BLZMCP-PERF ';
-const BLZMCP_PERF_SAVED  = 'blzmcp_perf_saved_settings';
-
-/*
- * Cycle of 20: [method, status, paid?, transaction reference?]. Per 20 orders: stripe 12 (9 paid,
- * 1 pending, 1 pending with a reference, 1 cancelled unpaid), cod 5 (3 processing paid, 1 on-hold,
- * 1 failed), cheque 3 (2 on-hold, 1 completed paid).
- */
-const BLZMCP_PERF_CYCLE = array(
-	array( 'stripe', 'processing', true, true ),
-	array( 'stripe', 'completed', true, true ),
-	array( 'cod', 'processing', true, false ),
-	array( 'stripe', 'processing', true, true ),
-	array( 'cheque', 'on-hold', false, false ),
-	array( 'stripe', 'pending', false, false ),
-	array( 'stripe', 'completed', true, true ),
-	array( 'cod', 'on-hold', false, false ),
-	array( 'stripe', 'processing', true, true ),
-	array( 'stripe', 'cancelled', false, false ),
-	array( 'cod', 'processing', true, false ),
-	array( 'stripe', 'processing', true, true ),
-	array( 'cheque', 'completed', true, false ),
-	array( 'stripe', 'pending', false, true ),
-	array( 'cod', 'failed', false, false ),
-	array( 'stripe', 'completed', true, true ),
-	array( 'cheque', 'on-hold', false, false ),
-	array( 'stripe', 'processing', true, true ),
-	array( 'cod', 'processing', true, false ),
-	array( 'stripe', 'processing', true, true ),
-);
+// The cycle, the timeline and the expected counts are shared with measure-payment-health.php.
+require_once __DIR__ . '/payment-volume-cycle.php';
 
 $blzmcp_perf_args = array_values( (array) ( $args ?? array() ) );
 $blzmcp_perf_cmd  = (string) ( $blzmcp_perf_args[0] ?? '' );
@@ -86,7 +57,7 @@ function blzmcp_perf_order( int $i, int $created ): void {
 	$order->set_billing_email( 'blzmcp-perf-' . ( $i % 50 ) . '@example.invalid' );
 	$order->set_date_created( $created );
 	$order->set_status( $status );
-	$order->set_date_paid( $paid ? $created + 30 : null );
+	$order->set_date_paid( $paid ? $created + BLZMCP_PERF_PAID_AFTER : null );
 	if ( $txn ) {
 		$order->set_transaction_id( 'pi_synthetic_' . $i );
 	}
@@ -251,10 +222,7 @@ switch ( $blzmcp_perf_cmd ) {
 		$now    = (int) ( $blzmcp_perf_args[3] ?? time() );
 		$total  = (int) ( $blzmcp_perf_args[4] ?? 50000 );
 		for ( $i = $offset; $i < $offset + $count; $i++ ) {
-			$created = 'orders' === $blzmcp_perf_cmd
-				? $now - 60 - (int) floor( $i * ( 28 * DAY_IN_SECONDS - 120 ) / max( 1, $total ) )
-				: $now - 30 * DAY_IN_SECONDS - (int) floor( $i * ( 370 * DAY_IN_SECONDS ) / max( 1, $total ) );
-			blzmcp_perf_order( $i, $created );
+			blzmcp_perf_order( $i, blzmcp_perf_created( $blzmcp_perf_cmd, $i, $now, $total ) );
 		}
 		echo 'SEEDED=' . $count . "\n";
 		break;
@@ -266,6 +234,10 @@ switch ( $blzmcp_perf_cmd ) {
 		$ids         = $hpos
 			? $wpdb->get_col( $wpdb->prepare( 'SELECT o.id FROM %i o JOIN %i m ON m.order_id = o.id AND m.meta_key = %s WHERE o.type = %s', $wpdb->prefix . 'wc_orders', $wpdb->prefix . 'wc_orders_meta', BLZMCP_PERF_META, 'shop_order' ) )
 			: $wpdb->get_col( $wpdb->prepare( 'SELECT p.ID FROM %i p JOIN %i m ON m.post_id = p.ID AND m.meta_key = %s WHERE p.post_type = %s', $wpdb->posts, $wpdb->postmeta, BLZMCP_PERF_META, 'shop_order' ) );
+		// Other orders would change the counts the measurement must see exactly (FEATURE-PLAN item 10).
+		$untagged    = (int) ( $hpos
+			? $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i o WHERE o.type = %s AND o.status NOT IN ('trash', 'auto-draft', 'wc-checkout-draft', 'checkout-draft') AND NOT EXISTS (SELECT 1 FROM %i m WHERE m.order_id = o.id AND m.meta_key = %s)", $wpdb->prefix . 'wc_orders', 'shop_order', $wpdb->prefix . 'wc_orders_meta', BLZMCP_PERF_META ) )
+			: $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i p WHERE p.post_type = %s AND p.post_status NOT IN ('trash', 'auto-draft', 'wc-checkout-draft', 'checkout-draft') AND NOT EXISTS (SELECT 1 FROM %i m WHERE m.post_id = p.ID AND m.meta_key = %s)", $wpdb->posts, 'shop_order', $wpdb->postmeta, BLZMCP_PERF_META ) ) );
 		$sample      = array_slice( $ids, 0, 25 );
 		$crud_ok     = 0;
 		foreach ( $sample as $id ) {
@@ -282,7 +254,8 @@ switch ( $blzmcp_perf_cmd ) {
 				'expected'    => $want_recent + $want_old,
 				'crud_sample' => count( $sample ),
 				'crud_ok'     => $crud_ok,
-				'ok'          => count( $ids ) === $want_recent + $want_old && count( $sample ) === $crud_ok,
+				'untagged'    => $untagged,
+				'ok'          => count( $ids ) === $want_recent + $want_old && count( $sample ) === $crud_ok && 0 === $untagged,
 			)
 		) . "\n";
 		break;

@@ -44,10 +44,26 @@ perf_receipt() {
 			| {storage:$s, window:$w, logger:$l, trials_ms:[$ms, $ms, $ms, $ms, $ms], max_ms:$ms, warm_ms_max:1, complete:true, pass:($ms < 1500)}] as $p
 		| [("legacy", "hpos") as $s | (24, 168) as $w | ("cold", "warm") as $k
 			| {storage:$s, window:$w, kind:$k, method:"GET", http_code:"200", valid_body:true, total_ms:(if $k == "cold" then $ms + 40 else 30 end)}] as $h
+		| [("legacy", "hpos") as $s | (24, 168) as $w | ("file", "db") as $l | (1, 2, 3, 4, 5) as $t
+			| {storage:$s, window:$w, logger:$l, trial:$t, ok:true, elapsed_ms:$ms, action_store:"ActionScheduler_DBStore",
+			   validation:{readers:{orders:true, inventory:true, logs:true, jobs:true}, failures:[]}}] as $tr
+		| [("legacy", "hpos") as $s | ({l:"file", f:"logs"}, {l:"db", f:"logs"}, {l:"db", f:"orders"}, {l:"db", f:"jobs"}) as $p
+			| {storage:$s, logger:$p.l, force:$p.f, ok:false, forced:$p.f, detected:true}] as $f
 		| {schema:"blzmcp-payment-performance/1", candidate_sha256:$sha, budget_ms:1500, meaning:"application-cache cold",
+		   validity:"a trial counts only with the seeded workload observed and every reader at its expected counts",
 		   seed:{recent_orders:50000, horizon_days:28, older_orders:10000, methods:["stripe", "cod", "cheque"]},
-		   jobs_store:["ActionScheduler_DBStore"], jobs_path:"exact database-store path (one grouped query)",
-		   all_pass:($p | all(.pass)), partitions:$p, http:$h}'
+		   exact_jobs_required:true, jobs_store:["ActionScheduler_DBStore"], jobs_path:"exact database-store path (one grouped query)",
+		   all_pass:($p | all(.pass)), partitions:$p, http:$h, trials:$tr, forced_failures:$f}'
+}
+
+# A trial that failed reader $1 (orders|logs|jobs|inventory) while its partition still claims complete.
+reader_failed() {
+	jq --arg r "$1" '(.trials[] | select(.storage == "hpos" and .window == 24 and .logger == "db" and .trial == 3))
+		|= (.ok = false | .validation.readers[$r] = false | .validation.failures = ["\($r): forced"])'
+}
+# A forced probe of reader $1 that came back as a success (not detected).
+forced_passed() {
+	jq --arg r "$1" '(.forced_failures[] | select(.storage == "legacy" and .force == $r and .logger == "db")) |= (.ok = true | .detected = false)'
 }
 
 # check <label> <expected exit> <stage dir> [mutation]
@@ -88,6 +104,16 @@ check() {
 	perf-short) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.partitions[0].trials_ms = [900, 900]' >"$WORK/perf.json" ;;
 	perf-no-http) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq 'del(.http)' >"$WORK/perf.json" ;;
 	perf-http-error) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.http[] | select(.storage == "hpos" and .window == 168 and .kind == "cold")) |= (.http_code = "403" | .valid_body = false)' >"$WORK/perf.json" ;;
+	perf-reader-orders | perf-reader-logs | perf-reader-jobs | perf-reader-inventory)
+		perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | reader_failed "${mut#perf-reader-}" >"$WORK/perf.json" ;;
+	perf-no-validation) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.trials[] | select(.storage == "legacy" and .window == 168 and .logger == "file" and .trial == 1)) |= del(.validation)' >"$WORK/perf.json" ;;
+	perf-no-trials) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq 'del(.trials)' >"$WORK/perf.json" ;;
+	perf-forced-missing) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq 'del(.forced_failures)' >"$WORK/perf.json" ;;
+	perf-forced-orders | perf-forced-logs | perf-forced-jobs)
+		perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | forced_passed "${mut#perf-forced-}" >"$WORK/perf.json" ;;
+	perf-hybrid-jobs) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.jobs_store = ["ActionScheduler_HybridStore"] | .jobs_path = "sampled path only"' >"$WORK/perf.json" ;;
+	perf-mixed-jobs) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.jobs_store = ["ActionScheduler_DBStore", "ActionScheduler_HybridStore"]' >"$WORK/perf.json" ;;
+	perf-jobs-not-required) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.exact_jobs_required = false' >"$WORK/perf.json" ;;
 	*) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 >"$WORK/perf.json" ;;
 	esac
 	[ "$mut" == log-leak ] && echo 'FAIL  [both] a check that echoed jane.citizen@realmail.com' >"$WORK/both-http.log"
@@ -164,6 +190,22 @@ check 'a performance receipt with no HTTP latency figure is refused' 5 "$WORK/go
 check 'a performance receipt whose HTTP call failed is refused' 5 "$WORK/good" perf-http-error
 check 'faithful package with HTTP latency is accepted' 0 "$WORK/good"
 assert 'record shows the HTTP latency and the jobs path' "$(grep -q '^- HTTP latency (abilities REST route, ms): legacy/24h/cold 940' "$LAST_OUT" && grep -q '^- Background jobs timed on: exact database-store path' "$LAST_OUT" && echo true)"
+assert 'record shows the trial validity rule and the forced reader failures' "$(grep -q '^- Trial validity: a trial counts only' "$LAST_OUT" && grep -q '^- Forced reader failures (each must fail the trial): logs/legacy/file failed as required' "$LAST_OUT" && echo true)"
+
+# REVIEW-pass4 #10: performance success requires successful work (trials checked, not the flag).
+check 'a timed trial whose order reader failed is refused' 5 "$WORK/good" perf-reader-orders
+check 'a timed trial whose log reader failed is refused' 5 "$WORK/good" perf-reader-logs
+check 'a timed trial whose job reader failed is refused' 5 "$WORK/good" perf-reader-jobs
+check 'a timed trial with a missing inventory row is refused' 5 "$WORK/good" perf-reader-inventory
+check 'a timed trial with no reader validation is refused' 5 "$WORK/good" perf-no-validation
+check 'a receipt with no per-trial records is refused' 5 "$WORK/good" perf-no-trials
+check 'a receipt without the forced reader failures is refused' 5 "$WORK/good" perf-forced-missing
+check 'a forced order-reader failure that passed is refused' 5 "$WORK/good" perf-forced-orders
+check 'a forced log-reader failure that passed is refused' 5 "$WORK/good" perf-forced-logs
+check 'a forced job-reader failure that passed is refused' 5 "$WORK/good" perf-forced-jobs
+check 'jobs timed on HybridStore (the sampled path) are refused' 5 "$WORK/good" perf-hybrid-jobs
+check 'jobs timed partly on HybridStore are refused' 5 "$WORK/good" perf-mixed-jobs
+check 'a receipt that did not require the exact jobs store is refused' 5 "$WORK/good" perf-jobs-not-required
 check 'a state that did not run is refused' 5 "$WORK/good" state-not-run
 
 # Privacy.

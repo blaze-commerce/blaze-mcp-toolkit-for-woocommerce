@@ -262,6 +262,16 @@ else
 	printf '%s\n' "$rec_out" | awk '/^FAIL/ && n++ < 20'
 	fail=1
 fi
+# The performance gate's own self-tests and the release-zip exclusion canaries (host-side, no wp-env).
+for t in "php tests/matrix/test-perf-validate.php" "bash tests/matrix/test-perf-suite.sh" "bash tests/matrix/test-distignore.sh"; do
+	if t_out=$($t 2>&1); then
+		echo "PASS  $t ($(printf '%s\n' "$t_out" | tail -1))"
+	else
+		echo "FAIL  $t"
+		printf '%s\n' "$t_out" | awk '/^FAIL/ && n++ < 20'
+		fail=1
+	fi
+done
 [ "$fail" -eq 0 ] && echo "ALL INTEGRATION CHECKS PASSED" || echo "INTEGRATION CHECKS FAILED"
 echo "FAST CHECKS ONLY — NOT THE RELEASE GATE"
 exit $fail

@@ -26,6 +26,40 @@
       "version": "6.9.0",
       "url": "https://github.com/WordPress/wordpress-develop/tree/6.9.0/src",
       "commit": "3a87241015aff96c7a38c1304949908b9588b218"
+    },
+    "woocommerce_current": {
+      "version": "11.2.2",
+      "url": "https://github.com/woocommerce/woocommerce/tree/11.2.2/plugins/woocommerce",
+      "commit": "8ab82808f207c420703863c8ecec62e2fdc834a4",
+      "note": "Added in wave 2 (lane kinds). Every WooCommerce fact pinned for 10.9.0 below was re-read at this tag; see woocommerce.current_version_check. WordPress.org listed 11.3.0 as the newest release on 2026-11-15; it was not pinned in this pass."
+    },
+    "paypal_payments": {
+      "plugin_slug": "woocommerce-paypal-payments",
+      "version": "4.2.2",
+      "url": "https://plugins.svn.wordpress.org/woocommerce-paypal-payments/tags/4.2.2/",
+      "wc_requires_at_least": "9.6",
+      "note": "Current stable tag; installable on the toolkit's WooCommerce 10.9 floor, so no separate cross-check tag."
+    },
+    "woopayments": {
+      "plugin_slug": "woocommerce-payments",
+      "version": "11.3.0",
+      "url": "https://plugins.svn.wordpress.org/woocommerce-payments/tags/11.3.0/",
+      "wc_requires_at_least": "7.6",
+      "note": "Current stable tag; installable on the toolkit's WooCommerce 10.9 floor, so no separate cross-check tag."
+    },
+    "square": {
+      "plugin_slug": "woocommerce-square",
+      "primary": {
+        "version": "5.5.3",
+        "url": "https://plugins.svn.wordpress.org/woocommerce-square/tags/5.5.3/",
+        "wc_requires_at_least": "11.1"
+      },
+      "cross_check": {
+        "version": "5.5.1",
+        "url": "https://plugins.svn.wordpress.org/woocommerce-square/tags/5.5.1/",
+        "wc_requires_at_least": "10.9",
+        "note": "Newest tag installable on the toolkit's WooCommerce 10.9 floor. Gateway IDs, settlement code, logger and Action Scheduler hook names and groups are identical to 5.5.3."
+      }
     }
   },
   "stripe": {
@@ -116,6 +150,174 @@
     },
     "replacement_note": "Legacy method order 'stripe_sepa' maps to UPE 'sepa_debit' (gateway ID 'stripe_sepa_debit'). Legacy 'stripe' maps to UPE 'card', which keeps gateway ID 'stripe', so it is not a replacement.",
     "registry_risk": "Constructing Stripe UPE method objects reads payment method configuration; when its 20-minute cache is cold and the PMC API is enabled, Stripe fetches it from api.stripe.com and writes a cooldown option. Payment-health must not force gateway construction to read enabled state."
+  },
+  "paypal_payments": {
+    "family": "paypal",
+    "plugin": "woocommerce-paypal-payments",
+    "verified_in": "wave 2, lane kinds; tag 4.2.2",
+    "method_ids": {
+      "processor_path": ["ppcp-gateway", "ppcp-credit-card-gateway", "ppcp-card-button-gateway", "ppcp-googlepay", "ppcp-applepay", "ppcp-axo-gateway"],
+      "redirect_local_apms": ["ppcp-bancontact", "ppcp-blik", "ppcp-eps", "ppcp-ideal", "ppcp-mybank", "ppcp-p24", "ppcp-trustly", "ppcp-pwc"],
+      "voucher_or_invoice": ["ppcp-multibanco", "ppcp-oxxo-gateway", "ppcp-pay-upon-invoice-gateway"],
+      "note": "processor_path IDs settle through OrderProcessor and PaymentsStatusHandlingTrait in the checkout request. The local APMs, Multibanco and OXXO set the order to pending and redirect to a PayPal payer-action URL; a PAYMENT.CAPTURE.COMPLETED webhook later calls payment_complete for pending or on-hold orders. Pay upon Invoice sets on-hold. 'ppcp-recaptcha' is a WooCommerce integration ID, not a gateway."
+    },
+    "kind": {
+      "ppcp-gateway": "instant",
+      "ppcp-credit-card-gateway": "instant",
+      "ppcp-card-button-gateway": "instant",
+      "ppcp-googlepay": "instant",
+      "ppcp-applepay": "instant",
+      "ppcp-axo-gateway": "instant",
+      "ppcp-bancontact": "unknown",
+      "ppcp-blik": "unknown",
+      "ppcp-eps": "unknown",
+      "ppcp-ideal": "unknown",
+      "ppcp-mybank": "unknown",
+      "ppcp-p24": "unknown",
+      "ppcp-trustly": "unknown",
+      "ppcp-multibanco": "unknown",
+      "ppcp-pwc": "unknown",
+      "ppcp-oxxo-gateway": "unknown",
+      "ppcp-pay-upon-invoice-gateway": "unknown",
+      "instant_meaning": "a successful payment marks the order paid (capture COMPLETED -> payment_complete) or on-hold (capture PENDING, or authorize intent) in the checkout request; no source path leaves a successfully paid order pending for hours",
+      "delayed_authorisation": {
+        "setting": "authorize_only in option woocommerce-ppcp-data-settings (new settings model, default false); the legacy intent value 'authorize' migrates to it",
+        "toolkit_reads_setting": false,
+        "effect": "authorize intent: transaction ID set, order on-hold 'Awaiting payment', no paid timestamp, until the merchant captures; verified authorisation behaviour, not a broken checkout"
+      },
+      "capture_pending_effect": "capture status PENDING or FAILED sets on-hold 'Awaiting payment' after the transaction ID is stored",
+      "capture_declined_effect": "order set to failed and the checkout throws",
+      "exceptions": "a vaulted card or Fastlane payment needing a 3D Secure challenge, and the redirect fallback for Google Pay, return a payer-action redirect and leave the order pending until the buyer returns; abandoned redirects stay pending like any redirect checkout",
+      "unknown_reason": "local APMs, OXXO and Pay upon Invoice complete only after a redirect, voucher or invoice payment confirmed by webhook, so normal settlement can leave orders pending or on-hold for hours or days"
+    },
+    "logs": {
+      "sources": {
+        "main": "woocommerce-paypal-payments",
+        "recaptcha": "woocommerce-paypal-payments-recaptcha",
+        "agentic": "woocommerce-paypal-agentic",
+        "ingestion": "woocommerce-paypal-ingestion"
+      },
+      "main_logger_enabled_when": "settings enable_logging is true (default false) or the plugin is onboarding, then filter woocommerce_paypal_payments_is_logging_enabled; otherwise a NullLogger drops every entry, including errors",
+      "message_prefix": "each message is prefixed '#<4-digit random id> - ' or with a request-kind label; treat the prefix as untrusted text",
+      "verified_error_message_prefix": "Payment failed: ",
+      "verified_error_level": "error",
+      "verified_error_note": "written by ProcessPaymentTrait::handle_payment_failure when the order is set to failed; not a webhook-delivery failure pattern",
+      "webhook_failure_pattern": null,
+      "webhook_failure_note": "no webhook-delivery or signature-validation log pattern was verified, so a red log rule cannot use this family"
+    },
+    "action_scheduler": {
+      "hooks": [
+        { "hook": "woocommerce_paypal_payments_check_pui_payment_captured", "group": "", "payment_related": true, "note": "scheduled 5 minutes after a Pay upon Invoice order; fails the order if PAYMENT.CAPTURE.COMPLETED was not received" },
+        { "hook": "woocommerce_paypal_payments_resolve_merchant_data", "group": "", "payment_related": false, "note": "merchant data retry, 15-minute steps" },
+        { "hook": "ppcp_agentic_sync_batch", "group": "ppcp_agentic_sync", "payment_related": false, "note": "recurring store sync" }
+      ],
+      "group_note": "an empty group means no group argument was passed to as_schedule_single_action",
+      "card_checkout_jobs": "none: card and PayPal checkout capture runs in the request, not in Action Scheduler"
+    },
+    "webhook_state": null,
+    "webhook_note": "no local webhook-health record was reviewed for this family; the toolkit has no supported adapter, so the webhook check is not applicable",
+    "replacements": {}
+  },
+  "woopayments": {
+    "family": "woopayments",
+    "plugin": "woocommerce-payments",
+    "verified_in": "wave 2, lane kinds; tag 11.3.0",
+    "method_ids": {
+      "main": "woocommerce_payments",
+      "main_carries": ["card", "link", "apple_pay", "google_pay"],
+      "split_pattern": "woocommerce_payments_<payment method id>",
+      "split_ids": ["woocommerce_payments_affirm", "woocommerce_payments_afterpay_clearpay", "woocommerce_payments_alipay", "woocommerce_payments_amazon_pay", "woocommerce_payments_bancontact", "woocommerce_payments_au_becs_debit", "woocommerce_payments_eps", "woocommerce_payments_grabpay", "woocommerce_payments_ideal", "woocommerce_payments_klarna", "woocommerce_payments_multibanco", "woocommerce_payments_p24", "woocommerce_payments_sepa_debit", "woocommerce_payments_wechat_pay"],
+      "registered_without_orders": ["woocommerce_payments_link", "woocommerce_payments_apple_pay", "woocommerce_payments_google_pay"],
+      "note": "Card, Link, Google Pay and Apple Pay orders are recorded under 'woocommerce_payments'; Amazon Pay and every other method under its split ID. A split gateway object is registered for each of the 18 payment method definitions except card, so the three IDs in registered_without_orders exist in the registry (with their own settings options) but orders are not recorded under them."
+    },
+    "kind": {
+      "woocommerce_payments": "instant",
+      "woocommerce_payments_*": "unknown",
+      "instant_meaning": "the checkout request creates and confirms the payment intent; status succeeded calls payment_complete with the intent ID as transaction ID",
+      "delayed_authorisation": {
+        "setting": "manual_capture in option woocommerce_woocommerce_payments_settings (default 'no'); the card gateway's value applies to every method",
+        "toolkit_reads_setting": false,
+        "effect": "intent requires_capture: order on-hold with the intent ID as transaction ID and no paid timestamp until captured; verified authorisation behaviour"
+      },
+      "processing_effect": "intent processing (an asynchronous method still settling) sets on-hold, not pending",
+      "requires_action_effect": "intent requires_action leaves the order pending (3D Secure or bank redirect) until the browser confirms or the redirect handler or webhook updates it; Multibanco (offline) sets on-hold",
+      "unknown_reason": "the plugin-side status mapping is verified, but which intent status each split method returns at checkout is decided by the payment server, not by plugin source"
+    },
+    "logs": {
+      "sources": {
+        "main": "woopayments",
+        "multi_currency": "woopayments-multi-currency",
+        "abilities": "woopayments-abilities",
+        "fee_remediation": "wcpay-fee-remediation",
+        "subscription_migration": "woopayments-subscription-migration"
+      },
+      "main_logger_enabled_when": "dev mode, or enable_logging === 'yes' in woocommerce_woocommerce_payments_settings (default 'no'); otherwise entries at every level, including errors, are dropped",
+      "ungated_entries": "WC_Payments_Utils::log_to_wc() writes to source 'woopayments' without the setting check; its callers are onboarding, gateway ordering, promotions and token-service failures, not payment failures",
+      "source_note": "the source is 'woopayments', not the plugin slug 'woocommerce-payments'",
+      "webhook_failure_pattern": null,
+      "webhook_failure_note": "webhook-reliability processing logs 'Failed processing event ' at error level through the gated main logger, but no webhook-delivery or signature-validation pattern equivalent to Stripe's was verified, so no red log rule is supplied"
+    },
+    "action_scheduler": {
+      "default_group": "woocommerce_payments",
+      "hooks": [
+        { "hook": "wcpay_webhook_fetch_events", "group": "woocommerce_payments", "payment_related": true, "note": "webhook reliability: fetch events the server could not deliver" },
+        { "hook": "wcpay_webhook_process_event", "group": "woocommerce_payments", "payment_related": true, "note": "webhook reliability: process one fetched event" },
+        { "hook": "wcpay_add_fee_breakdown_to_order_notes", "group": "woocommerce_payments", "payment_related": true, "note": "queued when a payment is marked complete" },
+        { "hook": "wcpay_update_saved_payment_method", "group": "woocommerce_payments", "payment_related": true, "note": "saved payment method update after a token payment" },
+        { "hook": "wcpay_track_new_order", "group": "woocommerce_payments", "payment_related": false, "note": "order tracking sent to the payment server" },
+        { "hook": "wcpay_track_update_order", "group": "woocommerce_payments", "payment_related": false, "note": "order tracking sent to the payment server" },
+        { "hook": "wcpay_store_setup_sync", "group": "woocommerce_payments", "payment_related": false, "note": "recurring, every 6 hours" }
+      ],
+      "note": "Hooks verified at their schedule_job call sites; schedule_job defaults the group to woocommerce_payments. Not claimed to be the plugin's complete hook list (migration and remediation hooks were not reviewed)."
+    },
+    "webhook_state": null,
+    "webhook_note": "no local webhook-health record was reviewed for this family; the toolkit has no supported adapter, so the webhook check is not applicable",
+    "replacements": {}
+  },
+  "square": {
+    "family": "square",
+    "plugin": "woocommerce-square",
+    "verified_in": "wave 2, lane kinds; tag 5.5.3, cross-checked at 5.5.1",
+    "method_ids": {
+      "card": "square_credit_card",
+      "cash_app_pay": "square_cash_app_pay",
+      "gift_cards": "gift_cards_pay"
+    },
+    "kind": {
+      "square_credit_card": "instant",
+      "square_cash_app_pay": "instant",
+      "gift_cards_pay": "unknown",
+      "instant_meaning": "process_payment creates the Square payment in the checkout request; approved and not held calls payment_complete after the transaction ID is stored",
+      "delayed_authorisation": {
+        "setting": "transaction_type in the gateway's WC_Settings_API settings (default 'charge'); 'authorization' authorises only",
+        "toolkit_reads_setting": false,
+        "effect": "authorisation-only or a card or wallet status AUTHORIZED: order on-hold ('Transaction Held for Review') with a transaction ID and no paid timestamp; verified authorisation behaviour"
+      },
+      "unknown_reason": "gift_cards_pay defines no process_payment of its own; its settlement path was not verified"
+    },
+    "logs": {
+      "sources": ["square", "square_credit_card", "square_cash_app_pay", "gift_cards_pay", "sync", "square-coupons", "error"],
+      "level": "notice",
+      "level_note": "every Square plugin entry goes through WC_Logger::add(), whose default level is notice (WooCommerce includes/class-wc-logger.php:136 in 10.9.0 and 11.2.2), so the plugin writes no error-level entries; 'error' here is a source name, not a level",
+      "enabled_when": "the plugin's debug setting logs, checked by Plugin::log() and Payment_Gateway::debug_log()",
+      "toolkit_consequence": "an error/fatal log check cannot observe this family; treat Square log diagnostics as unavailable, not as an empty healthy log",
+      "webhook_failure_pattern": null
+    },
+    "action_scheduler": {
+      "hooks": [
+        { "hook": "wc_square_sync", "group": "square", "payment_related": false, "note": "recurring product sync" },
+        { "hook": "wc_square_sync_orders", "group": "square", "payment_related": false, "note": "recurring order polling" },
+        { "hook": "wc_square_background_sync_cron", "group": "square", "payment_related": false, "note": "sync health check, every 5 minutes" },
+        { "hook": "wc_square_refresh_connection", "group": "square", "payment_related": false, "note": "weekly OAuth connection refresh; a failure can affect later payments but is not a payment job" },
+        { "hook": "wc_square_index_customers", "group": "square", "payment_related": false, "note": "customer index" },
+        { "hook": "wc_square_job_runner", "group": "", "payment_related": false, "note": "background job runner" },
+        { "hook": "wc_square_init_payment_token_migration_v2", "group": "", "payment_related": false, "note": "payment token migration" }
+      ],
+      "card_checkout_jobs": "none: card and Cash App Pay charges run in the checkout request"
+    },
+    "webhook_state": null,
+    "webhook_note": "no local webhook-health record was reviewed for this family; the toolkit has no supported adapter, so the webhook check is not applicable",
+    "replacements": {}
   },
   "core_manual_gateways": {
     "bacs": { "kind": "manual", "default_status": "on-hold", "filter": "woocommerce_bacs_process_payment_order_status" },
@@ -209,7 +411,21 @@
       "file_name": "<source>-YYYY-MM-DD-<hash>.log; source is everything before the last 4 dash segments; rotated files add .<n> to the source",
       "file_line": "<ISO-8601 UTC 'c' time> <LEVEL upper case> <message>[ CONTEXT: <json>]; filterable by woocommerce_format_log_entry",
       "db_table": "{prefix}woocommerce_log (log_id, timestamp datetime UTC, level smallint, source varchar(200), message longtext, context longtext NULL); index on level only",
-      "level_severity": { "emergency": 800, "alert": 700, "critical": 600, "error": 500, "warning": 400, "notice": 300, "info": 200, "debug": 100 }
+      "level_severity": { "emergency": 800, "alert": 700, "critical": 600, "error": 500, "warning": 400, "notice": 300, "info": 200, "debug": 100 },
+      "legacy_add_default_level": "WC_Logger::add( $handle, $message ) logs at notice unless a level is passed (includes/class-wc-logger.php:136, unchanged in 11.2.2)"
+    },
+    "current_version_check": {
+      "version": "11.2.2",
+      "commit": "8ab82808f207c420703863c8ecec62e2fdc834a4",
+      "method": "each 10.9.0 line range cited in the receipt was matched as an exact whitespace-normalised block in the 11.2.2 file; 52 of 54 matched unchanged (some at new line numbers), the other 2 are listed under changed",
+      "unchanged": ["authority and sync options", "HPOS table names, column maps and both CREATE TABLE schemas (no paid-date index)", "HPOS UTC date write format", "legacy meta keys, _date_paid / _paid_date precedence, write formats and first-row reads", "set_date_prop parsing", "created_via 'checkout' and 'store-api', draft status 'checkout-draft'", "status enums and is_paid statuses", "maybe_set_date_paid", "refund type", "core manual gateways and their statuses", "PageController edit URL shapes and the HPOS hydration and log side effect", "hold-stock option, default, conditions, interval filter, Action Scheduler hook and group, checkout/store-api-only cancellation filter", "logging settings getters and defaults, log directory creation default, file naming and hash", "DB log table schema and DB handler (file byte-identical)", "LoggingUtil (file byte-identical)", "log levels (file byte-identical)", "wc_payment_gateways_initialized action and the public payment_gateways property"],
+      "changed": [
+        { "what": "file log context encoding", "where": "src/Internal/Admin/Logging/LogHandlerFileV2.php:91-95", "detail": "context JSON now uses JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES and is no longer passed through stripslashes; the entry shape '<time> <LEVEL> <message>[ CONTEXT: <json>]' and gmdate('c') time are unchanged" },
+        { "what": "gateway registry init", "where": "includes/class-wc-payment-gateways.php:95-103", "detail": "init() now primes option caches for the core gateways' settings before constructing gateways (10.9.0 had a comment saying none was needed); the construction loop and the action at line 146 are otherwise unchanged" }
+      ],
+      "added": [
+        { "what": "OrderUtil::custom_orders_table_data_sync_is_enabled()", "where": "src/Utilities/OrderUtil.php:81", "since": "11.0.0", "detail": "cheap read of the sync setting; not present at the 10.9 floor, so the toolkit cannot rely on it" }
+      ]
     }
   },
   "synthetic_cases": {
