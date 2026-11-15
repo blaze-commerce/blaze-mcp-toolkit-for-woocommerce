@@ -502,4 +502,13 @@ final class PaymentErrorsTest extends TestCase {
 	public function test_kind_unverified_is_retired(): void {
 		$this->assertNotContains( 'kind_unverified', PaymentRules::REASONS );
 	}
+
+	/** Wave 3 fix4: the DB log row cap has its own code; orders keep row_cap. */
+	public function test_log_row_cap_is_its_own_reason(): void {
+		$this->assertContains( 'log_row_cap', PaymentRules::REASONS );
+		$this->assertContains( 'row_cap', PaymentRules::REASONS );
+		$src = (string) file_get_contents( dirname( __DIR__, 2 ) . '/src/Diagnostics/PaymentErrors.php' ); // phpcs:ignore WordPress.WP.AlternativeFunctions -- local source file.
+		$this->assertStringNotContainsString( "'row_cap'", $src, 'the log reader never reports the orders reader code' );
+		$this->assertStringContainsString( "'log_row_cap'", $src );
+	}
 }

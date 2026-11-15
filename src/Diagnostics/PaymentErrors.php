@@ -608,7 +608,7 @@ final class PaymentErrors {
 			}
 			if ( $truncated ) {
 				$out[ $family ]['complete'] = false;
-				$out[ $family ]['reason']   = 'row_cap';
+				$out[ $family ]['reason']   = 'log_row_cap'; // Not the orders reader's row_cap.
 			}
 			$out[ $family ]['groups'] = self::sorted_groups( $out[ $family ]['groups'] );
 		}

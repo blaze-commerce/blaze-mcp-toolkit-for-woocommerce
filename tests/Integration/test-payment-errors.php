@@ -222,7 +222,10 @@ if ( $table === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->es
 	}
 	$mb_add( 1, PaymentErrors::MAX_DB_ROWS );
 	$over = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['logs'];
-	blzmcp_it_equals( array( 'red', 'partial', 'row_cap', PaymentErrors::MAX_DB_ROWS, true ), array( $over['status'], $over['coverage'], $over['reason'], $over['count'], $over['count_is_lower_bound'] ), '2,001 rows: row cap, partial lower bound from the sentinel' );
+	// Wave 3 fix4: the log row cap has its own code; the orders reader's row_cap text says "Orders".
+	blzmcp_it_equals( array( 'red', 'partial', 'log_row_cap', PaymentErrors::MAX_DB_ROWS, true ), array( $over['status'], $over['coverage'], $over['reason'], $over['count'], $over['count_is_lower_bound'] ), '2,001 rows: log row cap (not the orders row_cap), partial lower bound from the sentinel' );
+	$cap_text = \Blaze\McpToolkit\Abilities\PaymentHealth::reason_text( (string) $over['reason'] );
+	blzmcp_it_assert( is_string( $cap_text ) && \Blaze\McpToolkit\Abilities\PaymentHealth::reason_text( 'row_cap' ) !== $cap_text && ! str_contains( $cap_text, 'Orders' ) && str_contains( $cap_text, 'log' ), 'capped DB log read: the owner sees the log text, not the orders text' );
 	blzmcp_it_assert( ! str_contains( wp_json_encode( $over ), "\u{1F600}" ) && ! str_contains( wp_json_encode( $over ), 'blzmcp-mb' ), 'no message text returned' );
 	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE source = %s AND message LIKE %s', $table, 'woocommerce-gateway-stripe', 'blzmcp-mb %' ) );
 

@@ -243,6 +243,14 @@ foreach ( array_diff( \Blaze\McpToolkit\Diagnostics\PaymentRules::REASONS, $reti
 }
 blzmcp_it_assert( array() !== \Blaze\McpToolkit\Diagnostics\PaymentRules::REASONS, 'REASONS lists ' . count( \Blaze\McpToolkit\Diagnostics\PaymentRules::REASONS ) . ' codes' );
 blzmcp_it_equals( array(), $no_text, 'every REASONS code has its own plain-words text (no generic fallback)' );
+// Wave 3 fix4: log bounds read as log text, never the orders reader's "Orders could only be read in part".
+$orders_cap = PaymentHealth::reason_text( 'row_cap' );
+blzmcp_it_assert( str_contains( (string) $orders_cap, 'Orders' ), 'orders row_cap keeps its orders text' );
+foreach ( array( 'log_row_cap', 'file_cap', 'byte_cap' ) as $code ) {
+	$text = (string) PaymentHealth::reason_text( $code );
+	blzmcp_it_assert( in_array( $code, \Blaze\McpToolkit\Diagnostics\PaymentRules::REASONS, true ) && $text !== $orders_cap && ! str_contains( $text, 'Orders' ) && str_contains( $text, 'log' ) && str_contains( $text, 'lower bound' ), "$code: its own log text with a lower-bound count" );
+}
+blzmcp_it_assert( PaymentHealth::reason_text( 'log_row_cap' ) !== PaymentHealth::reason_text( 'file_cap' ), 'log row cap and file cap say different things' );
 
 // ---------------------------------------------------------------- registration and input.
 $ability = wp_get_ability( PaymentHealth::NAME );

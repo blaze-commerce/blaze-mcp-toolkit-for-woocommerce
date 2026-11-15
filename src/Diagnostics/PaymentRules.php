@@ -96,6 +96,7 @@ final class PaymentRules {
 		'file_unreadable',
 		'file_cap',
 		'byte_cap',
+		'log_row_cap',
 		'unparsed_entries',
 		// Log and job categories (PaymentErrors::LOG_CATEGORIES, ::JOB_CATEGORIES).
 		'gateway_error',

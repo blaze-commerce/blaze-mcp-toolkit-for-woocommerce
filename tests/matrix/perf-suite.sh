@@ -217,7 +217,7 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 		candidate_sha256: $cand,
 		budget_ms: $budget,
 		meaning: "application-cache cold (toolkit result cache cleared per trial, fresh PHP request); not a claim about cold OS or database buffers",
-		validity: "a trial counts only with the seeded workload observed and every reader (orders, inventory, logs, jobs) at its expected success and counts; partial only for documented bounds (log row_cap/byte_cap/file_cap; sampled jobs only where the exact store is not required)",
+		validity: "a trial counts only with the seeded workload observed and every reader (orders, inventory, logs, jobs) at its expected success and counts; partial only for documented bounds (log log_row_cap/byte_cap/file_cap, matched by their public reason text; sampled jobs only where the exact store is not required)",
 		exact_jobs_required: ($exact_jobs == 1),
 		payment_health_cold_ms: ($parts | map({key: "\(.storage)/\(.window)h/\(.logger)", value: .max_ms}) | from_entries),
 		forced_failures_detected: ($forced_check | all(.detected)),

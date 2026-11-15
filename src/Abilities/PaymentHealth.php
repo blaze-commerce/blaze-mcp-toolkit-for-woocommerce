@@ -907,8 +907,11 @@ final class PaymentHealth extends AbstractAbility {
 			case 'stale_retention':
 				return __( 'WooCommerce keeps logs for less time than this window, so older errors may be missing.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'file_cap':
+				return __( 'There were more log files than this check reads at once, so the error count is a lower bound.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'byte_cap':
-				return __( 'Only part of the logs was read (size limit reached), so the count is a lower bound.', 'blaze-mcp-toolkit-for-woocommerce' );
+				return __( 'Only part of the logs was read (size limit reached), so the error count is a lower bound.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'log_row_cap':
+				return __( 'The payment plugin\'s log had more recent entries than this check reads at once, so the error count is a lower bound.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'file_unreadable':
 			case 'source_read_failed':
 				return __( 'A log or job record could not be read.', 'blaze-mcp-toolkit-for-woocommerce' );

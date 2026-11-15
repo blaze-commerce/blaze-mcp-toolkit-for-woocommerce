@@ -10,12 +10,18 @@
  *   counts exactly equal to the fixture's (payment-volume-cycle.php at the ability's own now);
  * - inventory: every seeded method has a row with an enum kind (cod and cheque manual);
  * - logs: the seeded gateway's log check read; complete with the exact observed count, or partial
- *   only for a documented bound (row_cap, byte_cap, file_cap) with a lower-bound count in range;
+ *   only for a documented bound (log_row_cap, byte_cap, file_cap) with a lower-bound count in range;
  * - jobs: the seeded gateway's job check read; complete with the exact failed count, or the
  *   sampled lower bound (sampled_store) only when the exact database store is not required.
  *
+ * The public `reason` is fixed translated text (PaymentHealth::reason_text()), not the code, so a
+ * bound is matched by its exact text, read from the plugin in the same process (same locale, can't
+ * drift). A text shared with a code that is not a bound, or the generic fallback, is never accepted;
+ * without the plugin loaded no bound is accepted (fail closed).
+ *
  * A seeded source the fixture expected nothing from (zero expected) is itself a failure: the
- * workload was not observed. Pure PHP, no WordPress call: tests/matrix/test-perf-validate.php.
+ * workload was not observed. No WordPress call besides the plugin's __() text:
+ * tests/matrix/test-perf-validate.php.
  *
  * @package Blaze\McpToolkit
  */
@@ -24,7 +30,43 @@
 
 if ( ! function_exists( 'blzmcp_perf_validate' ) ) {
 	/** Documented bounded truncation of a log read (C8): the only partial log coverage allowed. */
-	define( 'BLZMCP_PERF_LOG_BOUNDS', array( 'row_cap', 'byte_cap', 'file_cap' ) );
+	define( 'BLZMCP_PERF_LOG_BOUNDS', array( 'log_row_cap', 'byte_cap', 'file_cap' ) );
+	/** Documented sampled lower bound of a job read: the only partial job coverage allowed. */
+	define( 'BLZMCP_PERF_JOB_BOUNDS', array( 'sampled_store' ) );
+
+	/**
+	 * The public texts of the documented bounds, from the plugin.
+	 *
+	 * @return array{logs:array<string,string>,jobs:array<string,string>} Text => code, per reader.
+	 */
+	function blzmcp_perf_bound_texts(): array {
+		$cls = '\\Blaze\\McpToolkit\\Abilities\\PaymentHealth';
+		$out = array(
+			'logs' => array(),
+			'jobs' => array(),
+		);
+		if ( ! class_exists( $cls ) || ! method_exists( $cls, 'reason_text' ) ) {
+			return $out;
+		}
+		$all    = class_exists( '\\Blaze\\McpToolkit\\Diagnostics\\PaymentRules' ) ? \Blaze\McpToolkit\Diagnostics\PaymentRules::REASONS : array();
+		$bounds = array_merge( BLZMCP_PERF_LOG_BOUNDS, BLZMCP_PERF_JOB_BOUNDS );
+		$taken  = array( (string) $cls::reason_text( 'blzmcp_perf_unlisted_code' ) => true ); // The generic fallback.
+		foreach ( array_diff( $all, $bounds ) as $code ) {
+			$taken[ (string) $cls::reason_text( $code ) ] = true; // Ambiguous with a non-bound code.
+		}
+		foreach ( array(
+			'logs' => BLZMCP_PERF_LOG_BOUNDS,
+			'jobs' => BLZMCP_PERF_JOB_BOUNDS,
+		) as $reader => $codes ) {
+			foreach ( $codes as $code ) {
+				$text = $cls::reason_text( $code );
+				if ( is_string( $text ) && '' !== $text && ! isset( $taken[ $text ] ) ) {
+					$out[ $reader ][ $text ] = $code;
+				}
+			}
+		}
+		return $out;
+	}
 
 	/**
 	 * Validate one uncached result against the fixture's expected counts.
@@ -32,10 +74,13 @@ if ( ! function_exists( 'blzmcp_perf_validate' ) ) {
 	 * @param mixed               $result The ability's result (array, or anything else on error).
 	 * @param array<string,mixed> $expect {orders: blzmcp_perf_expect_orders(), logs: {method: n},
 	 *                                    jobs: {method: n}}.
-	 * @param array<string,mixed> $opts   {require_exact_jobs: bool}.
+	 * @param array<string,mixed> $opts   {require_exact_jobs: bool, bound_texts?: blzmcp_perf_bound_texts()
+	 *                                    shape, default read from the plugin}.
 	 * @return array{ok:bool,readers:array<string,bool>,failures:string[]}
 	 */
 	function blzmcp_perf_validate( $result, array $expect, array $opts = array() ): array {
+		$texts    = isset( $opts['bound_texts'] ) && is_array( $opts['bound_texts'] ) ? $opts['bound_texts'] : blzmcp_perf_bound_texts();
+		$is_bound = static fn( string $reader, $reason ): bool => is_string( $reason ) && isset( $texts[ $reader ][ $reason ] );
 		$readers  = array(
 			'orders'    => true,
 			'inventory' => true,
@@ -116,7 +161,7 @@ if ( ! function_exists( 'blzmcp_perf_validate' ) ) {
 				if ( $c !== $n || false !== ( $l['count_is_lower_bound'] ?? null ) ) {
 					$fail( 'logs', "method $id complete log count " . $show( $c ) . ", expected $n" );
 				}
-			} elseif ( 'partial' === ( $l['coverage'] ?? null ) && in_array( $l['reason'] ?? null, BLZMCP_PERF_LOG_BOUNDS, true ) ) {
+			} elseif ( 'partial' === ( $l['coverage'] ?? null ) && $is_bound( 'logs', $l['reason'] ?? null ) ) {
 				if ( ! is_int( $c ) || $c < 1 || $c > $n || true !== ( $l['count_is_lower_bound'] ?? null ) ) {
 					$fail( 'logs', "method $id bounded log count " . $show( $c ) . " outside 1..$n or not a lower bound" );
 				}
@@ -138,7 +183,7 @@ if ( ! function_exists( 'blzmcp_perf_validate' ) ) {
 				if ( $c !== $n || false !== ( $j['count_is_lower_bound'] ?? null ) ) {
 					$fail( 'jobs', "method $id exact failed count " . $show( $c ) . ", expected $n" );
 				}
-			} elseif ( 'partial' === ( $j['coverage'] ?? null ) && 'sampled_store' === ( $j['reason'] ?? null ) ) {
+			} elseif ( 'partial' === ( $j['coverage'] ?? null ) && $is_bound( 'jobs', $j['reason'] ?? null ) ) {
 				if ( $exact_required ) {
 					$fail( 'jobs', "method $id read on the sampled store; the exact database-store path is required" );
 				} elseif ( ! is_int( $c ) || $c < 0 || $c > $n || true !== ( $j['count_is_lower_bound'] ?? null ) ) {

@@ -14,6 +14,20 @@
 
 // phpcs:disable WordPress.Security.EscapeOutput, WordPress.NamingConventions.PrefixAllGlobals
 
+// The public `reason` is the plugin's own text (PaymentHealth::reason_text()), so the validator
+// reads its accepted bound texts from the plugin. Load the plugin classes without WordPress: the
+// only WordPress call reason_text() makes is __(), stubbed here to return the English source.
+if ( ! defined( 'ABSPATH' ) ) {
+	define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once __DIR__ . '/../../vendor/autoload.php';
+if ( ! function_exists( '__' ) ) {
+	function __( string $text, string $domain = 'default' ): string { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter -- WordPress signature.
+		return $text;
+	}
+}
+use Blaze\McpToolkit\Abilities\PaymentHealth;
+
 require __DIR__ . '/payment-volume-cycle.php';
 require __DIR__ . '/perf-validate.php';
 
@@ -212,28 +226,62 @@ foreach ( $r['methods'] as &$row ) {
 unset( $row );
 $is( 'cod reported as instant fails the inventory', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['inventory'] );
 
-// Documented bounded truncation is allowed; anything else is not.
+// Documented bounded truncation is allowed; anything else is not. The public `reason` is the
+// translated text, never the code (candidate matrix 26df1fc: all 20 DB-logger trials were
+// rejected because the validator compared this text with the code list).
+$txt    = static fn( string $code ): string => (string) PaymentHealth::reason_text( $code );
+$bounds = blzmcp_perf_bound_texts();
+$log_codes = array_values( $bounds['logs'] );
+sort( $log_codes );
+$is( 'bound texts come from the plugin: the log row, byte and file caps, each its own text', array( 'byte_cap', 'file_cap', 'log_row_cap' ) === $log_codes && $txt( 'log_row_cap' ) === array_search( 'log_row_cap', $bounds['logs'], true ) );
+$is( 'the orders row_cap text is not a log bound', ! isset( $bounds['logs'][ $txt( 'row_cap' ) ] ) );
+$is( 'sampled_store text is the only job bound', array( $txt( 'sampled_store' ) ) === array_keys( $bounds['jobs'] ) );
+
 $db = array( 'logs' => array( 'stripe' => 2001 ) ) + $expect;
 $r  = $good;
-$r['methods'][ $stripe( $r ) ]['errors']['logs'] = array( 'checked' => true, 'applicable' => true, 'coverage' => 'partial', 'reason' => 'row_cap', 'count' => 2000, 'count_is_lower_bound' => true );
-$is( 'DB logger row cap (2,000 of 2,001 observed, lower bound) is a valid bound', true === blzmcp_perf_validate( $r, $db, $exact )['ok'] );
-$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = 'byte_cap';
-$is( 'byte cap is a valid bound', true === blzmcp_perf_validate( $r, $db, $exact )['ok'] );
+$r['methods'][ $stripe( $r ) ]['errors']['logs'] = array( 'checked' => true, 'applicable' => true, 'coverage' => 'partial', 'reason' => $txt( 'log_row_cap' ), 'count' => 2000, 'count_is_lower_bound' => true );
+$v = blzmcp_perf_validate( $r, $db, $exact );
+$is( 'DB logger row cap with the real public text (2,000 of 2,001 observed, lower bound) is a valid bound', true === $v['ok'] && array() === $v['failures'] );
+$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = $txt( 'row_cap' );
+$is( 'a log partial carrying the orders reader text ("Orders could only be read in part") fails', false === blzmcp_perf_validate( $r, $db, $exact )['readers']['logs'] );
+$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = 'log_row_cap';
+$is( 'a bare reason code (not the public text) is not accepted', false === blzmcp_perf_validate( $r, $db, $exact )['readers']['logs'] );
+$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = $txt( 'log_row_cap' );
+$is( 'with no bound texts loaded (plugin absent) a bounded partial fails closed', false === blzmcp_perf_validate( $r, $db, $exact + array( 'bound_texts' => array( 'logs' => array(), 'jobs' => array() ) ) )['readers']['logs'] );
+$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = $txt( 'file_cap' );
+$is( 'file cap (public text) is a valid bound', true === blzmcp_perf_validate( $r, $db, $exact )['ok'] );
+$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = $txt( 'byte_cap' );
+$is( 'byte cap (public text) is a valid bound', true === blzmcp_perf_validate( $r, $db, $exact )['ok'] );
 $r['methods'][ $stripe( $r ) ]['errors']['logs']['count_is_lower_bound'] = false;
 $is( 'a capped count not marked as a lower bound fails', false === blzmcp_perf_validate( $r, $db, $exact )['ok'] );
 $r['methods'][ $stripe( $r ) ]['errors']['logs']['count_is_lower_bound'] = true;
 $r['methods'][ $stripe( $r ) ]['errors']['logs']['count']                = 2002;
 $is( 'a capped count above the seeded errors fails', false === blzmcp_perf_validate( $r, $db, $exact )['ok'] );
 $r['methods'][ $stripe( $r ) ]['errors']['logs']['count']  = 2000;
-$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = 'unparsed_entries';
+$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = $txt( 'unparsed_entries' );
 $is( 'partial logs for an undocumented reason (unparsed entries) fail', false === blzmcp_perf_validate( $r, $db, $exact )['readers']['logs'] );
-$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = 'stale_retention';
+$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = $txt( 'stale_retention' );
 $is( 'partial logs for stale retention fail', false === blzmcp_perf_validate( $r, $db, $exact )['readers']['logs'] );
+$r['methods'][ $stripe( $r ) ]['errors']['logs']['reason'] = $txt( 'blzmcp_unlisted_code' );
+$is( 'partial logs with the generic fallback text fail', false === blzmcp_perf_validate( $r, $db, $exact )['readers']['logs'] );
+
+// An orders-reader failure is still rejected while the log read is a valid bound.
+$r = $good;
+$r['methods'][ $stripe( $r ) ]['errors']['logs'] = array( 'checked' => true, 'applicable' => true, 'coverage' => 'partial', 'reason' => $txt( 'log_row_cap' ), 'count' => 2000, 'count_is_lower_bound' => true );
+$r['store_wide']['coverage']                     = 'partial';
+$r['store_wide']['reason']                       = $txt( 'row_cap' );
+$v = blzmcp_perf_validate( $r, $db, $exact );
+$is( 'orders row cap (public text) fails the order reader; the bounded log read still passes', false === $v['ok'] && false === $v['readers']['orders'] && true === $v['readers']['logs'] );
 
 $r = $good;
-$r['methods'][ $stripe( $r ) ]['errors']['jobs'] = array( 'checked' => true, 'applicable' => true, 'coverage' => 'partial', 'reason' => 'sampled_store', 'failed' => 40, 'count_is_lower_bound' => true );
+$r['methods'][ $stripe( $r ) ]['errors']['jobs'] = array( 'checked' => true, 'applicable' => true, 'coverage' => 'partial', 'reason' => $txt( 'sampled_store' ), 'failed' => 40, 'count_is_lower_bound' => true );
 $is( 'sampled jobs fail where the exact database store is required (matrix)', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['jobs'] );
-$is( 'sampled jobs are a valid lower bound where the exact store is not required (local)', true === blzmcp_perf_validate( $r, $expect, array( 'require_exact_jobs' => false ) )['ok'] );
+$is( 'sampled jobs (public text) are a valid lower bound where the exact store is not required (local)', true === blzmcp_perf_validate( $r, $expect, array( 'require_exact_jobs' => false ) )['ok'] );
+$r['methods'][ $stripe( $r ) ]['errors']['jobs']['reason'] = 'sampled_store';
+$is( 'sampled jobs with a bare code (not the public text) fail', false === blzmcp_perf_validate( $r, $expect, array( 'require_exact_jobs' => false ) )['readers']['jobs'] );
+$r['methods'][ $stripe( $r ) ]['errors']['jobs']['reason'] = $txt( 'jobs_unavailable' );
+$is( 'partial jobs for another reason fail', false === blzmcp_perf_validate( $r, $expect, array( 'require_exact_jobs' => false ) )['readers']['jobs'] );
+$r['methods'][ $stripe( $r ) ]['errors']['jobs']['reason'] = $txt( 'sampled_store' );
 $r['methods'][ $stripe( $r ) ]['errors']['jobs']['failed'] = 41;
 $is( 'a sampled count above the seeded failures fails', false === blzmcp_perf_validate( $r, $expect, array() )['ok'] );
 
