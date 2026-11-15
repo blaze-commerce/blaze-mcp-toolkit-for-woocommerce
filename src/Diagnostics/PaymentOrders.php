@@ -154,6 +154,18 @@ final class PaymentOrders {
 			return $out;
 		}
 
+		if ( 'hpos' === $auth['authority'] ) {
+			$probe = self::hpos_missing_operational_row( $windows['baseline_start'] );
+			if ( null === $probe ) {
+				$out['reason'] = 'read_failed';
+				return $out;
+			}
+			if ( $probe ) {
+				$out['reason'] = 'operational_data_missing';
+				return $out;
+			}
+		}
+
 		$store   = self::scope();
 		$methods = array();
 		$last_id = 0;
@@ -318,6 +330,40 @@ final class PaymentOrders {
 			}
 		}
 		unset( $s );
+	}
+
+	/**
+	 * Wave 3 (REVIEW-pass4a #3): is any shop_order that could belong to the history missing its
+	 * operational-data row? The main scan selects on creation OR the joined paid date, so an order
+	 * created before the history start and paid inside it is invisible when that row (which holds
+	 * the paid date) is missing. This probe does not use the paid date.
+	 *
+	 * Bound: `date_updated_gmt >= history start`, on its own `date_updated` index (WC 10.9.0 and
+	 * 11.2.2 `OrdersTableDataStore` schema, byte-identical between the tags). Every CRUD save of an
+	 * existing order sets date_modified when the caller did not (`persist_updates()`), and create
+	 * sets it when empty, so recording a payment inside the history moves `date_updated_gmt` inside
+	 * it too. One LIMIT 1 anti-join on the unique `order_id`; refunds are excluded by type.
+	 *
+	 * @param int $start History start (UTC).
+	 * @return bool|null True when a missing row is found, null on a read failure.
+	 */
+	private static function hpos_missing_operational_row( int $start ): ?bool {
+		global $wpdb;
+		$wpdb->last_error = '';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded one-row read-only probe (R6).
+		$hit = $wpdb->get_var(
+			$wpdb->prepare(
+				'SELECT o.id FROM %i o LEFT JOIN %i d ON d.order_id = o.id WHERE o.type = %s AND o.date_updated_gmt >= %s AND d.order_id IS NULL LIMIT 1',
+				$wpdb->prefix . 'wc_orders',
+				$wpdb->prefix . 'wc_order_operational_data',
+				'shop_order',
+				gmdate( 'Y-m-d H:i:s', $start )
+			)
+		);
+		if ( '' !== $wpdb->last_error ) {
+			return null;
+		}
+		return null !== $hit;
 	}
 
 	/**

@@ -155,36 +155,79 @@ blzmcp_it_equals( 'tables_missing', $m['reason'], 'missing required table is una
 // Pass 4 #3: a missing HPOS operational row fails closed; it is not an excluded unknown origin
 // (that case, a present row with an empty origin, is the seeded `unknown_origin` order above).
 $op_table = $wpdb->prefix . 'wc_order_operational_data';
+// Wave 3 (REVIEW-pass4a #3, gap 1): the lead's counterexample, an order created 40 days ago
+// (before the history start) and paid 2 days ago, whose operational row is missing. The main scan
+// cannot select it (its paid date lives in the missing row), so an independent probe must.
+$gap_cases = array(
+	'created 3 hours ago'                  => array( 'created' => $now - 3 * HOUR_IN_SECONDS, 'paid' => $now - 3 * HOUR_IN_SECONDS + 60 ),
+	'created 40 days ago, paid 2 days ago' => array( 'created' => $now - 40 * DAY_IN_SECONDS, 'paid' => $now - 2 * DAY_IN_SECONDS ),
+);
 if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $op_table ) ) ) ) {
-	$gap_id = blzmcp_pf_order( array( 'method' => 'stripe', 'via' => 'checkout', 'status' => 'processing', 'created' => $now - 3 * HOUR_IN_SECONDS, 'paid' => $now - 3 * HOUR_IN_SECONDS + 60 ) );
-	$saved  = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM %i WHERE order_id = %d', $op_table, $gap_id ), ARRAY_A );
-	if ( $hpos ) {
-		blzmcp_it_assert( is_array( $saved ), 'HPOS wrote an operational row for the new order' );
-	}
-	if ( is_array( $saved ) ) {
-		$wpdb->delete( $op_table, array( 'order_id' => $gap_id ) );
-		wp_cache_flush();
+	foreach ( $gap_cases as $label => $when ) {
+		$gap_id = blzmcp_pf_order( array( 'method' => 'stripe', 'via' => 'checkout', 'status' => 'processing', 'created' => $when['created'], 'paid' => $when['paid'] ) );
+		$saved  = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM %i WHERE order_id = %d', $op_table, $gap_id ), ARRAY_A );
+		if ( $hpos ) {
+			blzmcp_it_assert( is_array( $saved ), "{$label}: HPOS wrote an operational row for the new order" );
+		}
+		if ( ! is_array( $saved ) ) {
+			echo "NOTE  {$label}: legacy with sync off, no HPOS shadow row to remove\n";
+			continue;
+		}
+		$restore = static function () use ( $wpdb, $op_table, $saved, $gap_id ): void {
+			if ( ! $wpdb->get_var( $wpdb->prepare( 'SELECT order_id FROM %i WHERE order_id = %d', $op_table, $gap_id ) ) ) {
+				$wpdb->insert( $op_table, $saved );
+			}
+			wp_cache_flush();
+		};
+		blzmcp_it_cleanup( $restore ); // Also restores if this process dies before the inline restore.
 		$seen = array();
 		$spy  = static function ( $q ) use ( &$seen ) {
 			$seen[] = (string) $q;
 			return $q;
 		};
-		add_filter( 'query', $spy );
-		$gap = PaymentOrders::read( $now, 24, $tz );
-		remove_filter( 'query', $spy );
-		$wpdb->insert( $op_table, $saved );
-		wp_cache_flush();
+		try {
+			$wpdb->delete( $op_table, array( 'order_id' => $gap_id ) );
+			wp_cache_flush();
+			add_filter( 'query', $spy );
+			$gap = PaymentOrders::read( $now, 24, $tz );
+		} finally {
+			remove_filter( 'query', $spy );
+			$restore();
+		}
 		$shadow_reads = array_filter( $seen, static fn( $q ) => str_contains( $q, '`' . $wpdb->posts . '`' ) || str_contains( $q, '`' . $wpdb->postmeta . '`' ) );
 		if ( $hpos ) {
-			blzmcp_it_equals( array( false, 'unavailable', 'operational_data_missing' ), array( $gap['ok'], $gap['coverage'], $gap['reason'] ), 'HPOS order without its operational row: unavailable, not complete with the order omitted' );
-			blzmcp_it_assert( null === $gap['store'] && array() === $gap['methods'], 'no partial counts from a store missing required data' );
-			blzmcp_it_equals( 0, count( $shadow_reads ), 'missing HPOS data is never recovered from posts/postmeta' );
+			blzmcp_it_equals( array( false, 'unavailable', 'operational_data_missing' ), array( $gap['ok'], $gap['coverage'], $gap['reason'] ), "{$label}: HPOS order without its operational row is unavailable, not complete with the order omitted" );
+			blzmcp_it_assert( null === $gap['store'] && array() === $gap['methods'], "{$label}: no partial counts from a store missing required data" );
+			blzmcp_it_equals( 0, count( $shadow_reads ), "{$label}: missing HPOS data is never recovered from posts/postmeta" );
 		} else {
-			blzmcp_it_assert( true === $gap['ok'] && 'legacy' === $gap['authority'], 'legacy authority ignores a missing row in the HPOS shadow' );
+			blzmcp_it_assert( true === $gap['ok'] && 'legacy' === $gap['authority'], "{$label}: legacy authority ignores a missing row in the HPOS shadow" );
 		}
-		blzmcp_it_assert( true === PaymentOrders::read( $now, 24, $tz )['ok'], 'restored operational row reads again' );
-	} else {
-		echo "NOTE  legacy with sync off: no HPOS shadow row to remove\n";
+		blzmcp_it_assert( true === PaymentOrders::read( $now, 24, $tz )['ok'], "{$label}: restored operational row reads again" );
+	}
+	if ( $hpos ) {
+		// A refund object without an operational row is not an eligible order and must not trip the probe.
+		$r_parent = blzmcp_pf_order( array( 'method' => 'stripe', 'via' => 'checkout', 'status' => 'completed', 'created' => $now - 40 * DAY_IN_SECONDS, 'paid' => $now - 39 * DAY_IN_SECONDS ) );
+		$refund   = wc_create_refund( array( 'order_id' => $r_parent, 'amount' => 0 ) );
+		$r_id     = is_wp_error( $refund ) ? 0 : (int) $refund->get_id();
+		blzmcp_it_cleanup( static fn() => $r_id && blzmcp_it_delete_order( $r_id ) );
+		$r_saved = $r_id ? $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM %i WHERE order_id = %d', $op_table, $r_id ), ARRAY_A ) : null;
+		if ( is_array( $r_saved ) ) {
+			blzmcp_it_cleanup(
+				static function () use ( $wpdb, $op_table, $r_saved, $r_id ): void {
+					if ( ! $wpdb->get_var( $wpdb->prepare( 'SELECT order_id FROM %i WHERE order_id = %d', $op_table, $r_id ) ) ) {
+						$wpdb->insert( $op_table, $r_saved );
+					}
+				}
+			);
+			$wpdb->delete( $op_table, array( 'order_id' => $r_id ) );
+			wp_cache_flush();
+			$r_read = PaymentOrders::read( $now, 24, $tz );
+			$wpdb->insert( $op_table, $r_saved );
+			wp_cache_flush();
+			blzmcp_it_assert( true === $r_read['ok'], 'a refund object missing its operational row does not trip the shop_order probe' );
+		} else {
+			echo "NOTE  refund has no operational row to remove; refund case skipped\n";
+		}
 	}
 }
 
