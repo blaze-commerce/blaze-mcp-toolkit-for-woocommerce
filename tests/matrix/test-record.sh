@@ -4,6 +4,9 @@
 # and refuses each broken one with exit 3. Writes only to a temporary directory.
 #
 #   bash tests/matrix/test-record.sh
+#
+# record.sh runs under the same bash as this script ($BASH), so `/bin/bash tests/matrix/test-record.sh`
+# on macOS checks it under bash 3.2, the shell swamp's `bash -lc` gate gets.
 set -uo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -133,7 +136,7 @@ check() {
 	[ "$mut" == log-leak ] && echo 'FAIL  [both] a check that echoed jane.citizen@realmail.com' >"$WORK/both-http.log"
 	[ "$mut" == log-path ] && echo "FAIL  [both] wp-env start (log: $HOME/private/blzmcp-matrix-logs.XYZ/both-start.log)" >"$WORK/both-http.log"
 	LAST_OUT=$out
-	BLZMCP_MATRIX_OUT=$out BLZMCP_REPORTS_DIR=$WORK bash "$REPO/tests/matrix/record.sh" "$WORK/summary.txt" PASSED >"$WORK/log" 2>&1
+	BLZMCP_MATRIX_OUT=$out BLZMCP_REPORTS_DIR=$WORK "$BASH" "$REPO/tests/matrix/record.sh" "$WORK/summary.txt" PASSED >"$WORK/log" 2>&1
 	local got=$?
 	if [ "$got" -eq "$want" ]; then
 		echo "PASS  $label (exit $got)"
@@ -189,7 +192,7 @@ assert() { if [ "$2" == true ]; then echo "PASS  $1"; pass=$((pass + 1)); else e
 assert "record is titled with the candidate's version ($HEAD_VERSION), not a fixed one" "$(grep -qxF "# Blaze MCP Toolkit $HEAD_VERSION - real-plugin matrix" "$LAST_OUT" && echo true)"
 assert 'record has the storage table and the performance table' "$(grep -q '^## Payment health order storage' "$LAST_OUT" && grep -q '^| legacy | 168h | db | 900 |' "$LAST_OUT" && echo true)"
 rm -f "$WORK"/v*-matrix-*.md
-BLZMCP_REPORTS_DIR=$WORK bash "$REPO/tests/matrix/record.sh" "$WORK/summary.txt" PASSED >"$WORK/log" 2>&1
+BLZMCP_REPORTS_DIR=$WORK "$BASH" "$REPO/tests/matrix/record.sh" "$WORK/summary.txt" PASSED >"$WORK/log" 2>&1
 assert "default record name carries the candidate version (v$HEAD_VERSION-matrix-<date>.md)" "$(ls "$WORK"/v"$HEAD_VERSION"-matrix-*.md >/dev/null 2>&1 && echo true)"
 
 # Evidence completeness.

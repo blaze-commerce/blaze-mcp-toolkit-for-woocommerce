@@ -5,11 +5,17 @@
 # reader failure that is not detected, or (in the matrix mode) jobs on HybridStore each fail it.
 #
 #   bash tests/matrix/test-perf-suite.sh
+#
+# perf-suite.sh and the stand-in run under the same bash as this script ($BASH), so
+# `/bin/bash tests/matrix/test-perf-suite.sh` on macOS checks them under bash 3.2.
 set -uo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-test-perf.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
+# The stand-in starts through `#!/usr/bin/env bash`: put this script's bash first on PATH for it.
+mkdir -p "$WORK/bin" && ln -s "$BASH" "$WORK/bin/bash"
+export PATH="$WORK/bin:$PATH"
 pass=0
 fail=0
 
@@ -20,7 +26,7 @@ run() {
 	rm -rf "$WORK/state" && mkdir -p "$WORK/state"
 	env FAKE_DIR="$WORK/state" FAKE_MODE="$mode" WPE="$REPO/tests/matrix/fake-wp-env.sh" BLZMCP_PERF_OUT="$WORK/perf.json" \
 		BLZMCP_PERF_RECENT=40 BLZMCP_PERF_OLD=20 BLZMCP_PERF_CHUNK=20 BLZMCP_PERF_JOBS=2 "$@" \
-		bash "$REPO/tests/matrix/perf-suite.sh" >"$WORK/log" 2>&1
+		"$BASH" "$REPO/tests/matrix/perf-suite.sh" >"$WORK/log" 2>&1
 	got=$?
 	if [ "$got" -eq "$want" ]; then
 		echo "PASS  $label (exit $got)"

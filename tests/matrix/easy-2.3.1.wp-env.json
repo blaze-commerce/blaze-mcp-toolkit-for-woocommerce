@@ -4,7 +4,7 @@
 	"port": 8892,
 	"testsPort": 8893,
 	"plugins": [
-		"https://downloads.wordpress.org/plugin/woocommerce.11.2.2.zip",
+		"https://downloads.wordpress.org/plugin/woocommerce.11.3.0.zip",
 		"https://downloads.wordpress.org/plugin/easy-mcp-ai.2.3.1.zip",
 		"./blaze-mcp-toolkit-for-woocommerce"
 	],

@@ -122,7 +122,8 @@ while IFS= read -r m; do missing+=("$m"); done < <(sort -u "$check_dir/present" 
 rm -rf "$check_dir"
 [ "$same" -gt 0 ] || differ+=("(no tracked files matched)")
 [ "$vendored" -gt 0 ] || differ+=("(no vendored commerce files matched)")
-for m in "${missing[@]}"; do differ+=("$m (missing from zip)"); done
+# ${arr[@]+...}: an empty array is "unbound" under set -u before bash 4.4 (macOS /bin/bash is 3.2).
+for m in ${missing[@]+"${missing[@]}"}; do differ+=("$m (missing from zip)"); done
 # Candidate identity: the run's hash and version label must be this zip's.
 [ -n "$run_sha" ] && [ "$run_sha" == "$zip_sha" ] || differ+=("(candidate SHA-256 differs from the run's: run ${run_sha:-none}, zip ${zip_sha:-unreadable})")
 [ -n "$run_version" ] && [ "$run_version" == "$zip_version" ] || differ+=("(run labelled version ${run_version:-none}, candidate header is ${zip_version:-none})")

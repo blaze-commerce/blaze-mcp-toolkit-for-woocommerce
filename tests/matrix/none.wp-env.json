@@ -4,7 +4,7 @@
 	"port": 8898,
 	"testsPort": 8899,
 	"plugins": [
-		"https://downloads.wordpress.org/plugin/woocommerce.11.2.2.zip",
+		"https://downloads.wordpress.org/plugin/woocommerce.11.3.0.zip",
 		"./blaze-mcp-toolkit-for-woocommerce"
 	],
 	"mappings": {

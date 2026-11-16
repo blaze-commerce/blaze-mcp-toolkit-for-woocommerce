@@ -63,7 +63,15 @@ required_for() {
 }
 port_for() { jq -r '.port' "$REPO/tests/matrix/$1.wp-env.json"; }
 
-declare -A RESULT PASSES FAILS VERSIONS PHPV WPV
+# Per-state values (RESULT, PASSES, FAILS, VERSIONS, PHPV, WPV). macOS /bin/bash is 3.2, which has
+# no associative arrays, so each value is its own variable: M_<name>_<state with [^A-Za-z0-9] as _>.
+sset() { local k=$2; printf -v "M_$1_${k//[^A-Za-z0-9]/_}" '%s' "$3"; }
+sget() { # name state [default when unset]
+	local k=$2 v
+	v="M_$1_${k//[^A-Za-z0-9]/_}"
+	if [ -n "${!v+x}" ]; then printf '%s' "${!v}"; else printf '%s' "${3-}"; fi
+}
+sadd() { sset "$1" "$2" $(($(sget "$1" "$2" 0) + $3)); }
 STORAGE_LINES=()
 PERF_FILE=''
 ZIP_SHA256=$(shasum -a 256 "$ZIP" | awk '{print $1}')
@@ -75,11 +83,11 @@ fail=0
 FIRST_DATE=''
 
 run_state() {
-	local state=$1 w="$MATRIX_DIR/$1" port suites f out status summary p q
+	local state=$1 w="$MATRIX_DIR/$1" port suites f out status summary p q versions phpv wpv
 	port=$(port_for "$state")
-	PASSES[$state]=0
-	FAILS[$state]=0
-	RESULT[$state]=FAILED
+	sset PASSES "$state" 0
+	sset FAILS "$state" 0
+	sset RESULT "$state" FAILED
 	echo
 	echo "=== $state (port $port) ==="
 	mkdir -p "$w/$SLUG" "$w/tests"
@@ -124,20 +132,23 @@ run_state() {
 		wp action-scheduler migrate >>"$LOG_DIR/$state-start.log"
 		echo "action scheduler store: $(wp eval 'echo get_class( ActionScheduler::store() );')"
 	fi
-	VERSIONS[$state]=$(wp plugin list --format=json | jq -c 'map({name, status, version})')
-	PHPV[$state]=$(wp eval 'echo PHP_VERSION;')
-	WPV[$state]=$(wp core version)
-	echo "versions: WP ${WPV[$state]}, PHP ${PHPV[$state]}, plugins $(jq -r 'map(select(.status == "active") | "\(.name) \(.version)") | join(", ")' <<<"${VERSIONS[$state]}")"
-	if [ "$(jq -r --arg s "$SLUG" 'map(select(.name == $s))[0].status' <<<"${VERSIONS[$state]}")" != active ]; then
+	versions=$(wp plugin list --format=json | jq -c 'map({name, status, version})')
+	phpv=$(wp eval 'echo PHP_VERSION;')
+	wpv=$(wp core version)
+	sset VERSIONS "$state" "$versions"
+	sset PHPV "$state" "$phpv"
+	sset WPV "$state" "$wpv"
+	echo "versions: WP $wpv, PHP $phpv, plugins $(jq -r 'map(select(.status == "active") | "\(.name) \(.version)") | join(", ")' <<<"$versions")"
+	if [ "$(jq -r --arg s "$SLUG" 'map(select(.name == $s))[0].status' <<<"$versions")" != active ]; then
 		echo "FAIL  [$state] the candidate plugin is not active"
 		return 1
 	fi
 	# The plugin under test must be the candidate: same version header as the zip.
 	cand_version=$(unzip -p "$ZIP" "$SLUG/$SLUG.php" | sed -n 's/^ \* Version:[[:space:]]*//p' | head -1)
-	[ "$(jq -r --arg s "$SLUG" 'map(select(.name == $s))[0].version' <<<"${VERSIONS[$state]}")" == "$cand_version" ] || { echo "FAIL  [$state] plugin version is not the candidate's ($cand_version)"; return 1; }
+	[ "$(jq -r --arg s "$SLUG" 'map(select(.name == $s))[0].version' <<<"$versions")" == "$cand_version" ] || { echo "FAIL  [$state] plugin version is not the candidate's ($cand_version)"; return 1; }
 
 	if [ "$state" != none ]; then
-		if ! WPE="$WPE" BLZMCP_PRODUCT_ID=0 BLZMCP_PREFLIGHT=1 bash "$REPO/tests/matrix/http-suite.sh" "$state" "$port" >"$LOG_DIR/$state-preflight.log" 2>&1; then
+		if ! WPE="$WPE" BLZMCP_PRODUCT_ID=0 BLZMCP_PREFLIGHT=1 "$BASH" "$REPO/tests/matrix/http-suite.sh" "$state" "$port" >"$LOG_DIR/$state-preflight.log" 2>&1; then
 			grep -E 'TRANSPORT UNREACHABLE|FAIL' "$LOG_DIR/$state-preflight.log" | head -5
 			echo "FAIL  [$state] preflight"
 			return 1
@@ -169,7 +180,7 @@ run_state() {
 	for f in $(required_for "$state"); do
 		if [[ " $suites " != *" $f "* ]] || [ ! -f "$REPO/tests/Integration/$f" ]; then
 			echo "INCOMPLETE COVERAGE: [$state] required suite $f is not in the list or does not exist"
-			FAILS[$state]=$((FAILS[$state] + 1))
+			sadd FAILS "$state" 1
 		fi
 	done
 	local extra_env=''
@@ -182,11 +193,11 @@ run_state() {
 		printf '%s\n' "$out" >"$LOG_DIR/$state-$f.log"
 		p=$(sed -E 's/^([0-9]+) passed.*/\1/' <<<"${summary:-0 passed}")
 		q=$(sed -E 's/.* ([0-9]+) failed.*/\1/' <<<"${summary:-x 1 failed}")
-		PASSES[$state]=$((PASSES[$state] + p))
+		sadd PASSES "$state" "$p"
 		if [ "$status" -ne 0 ] || [ -z "$summary" ] || [ "$q" != 0 ] || grep -q 'Fatal error' <<<"$out"; then
 			echo "FAIL  [$state] $f (${summary:-no summary})"
 			printf '%s\n' "$out" | awk '/^FAIL|Fatal error/ && n++ < 20'
-			FAILS[$state]=$((FAILS[$state] + (q == 0 ? 1 : q)))
+			sadd FAILS "$state" $((q == 0 ? 1 : q))
 		else
 			echo "PASS  [$state] $f ($summary)"
 		fi
@@ -205,7 +216,7 @@ run_state() {
 			sy=${combo##*:}
 			if ! "$WPE" run cli env BLZMCP_PF_SET="$st" BLZMCP_PF_SYNC="$sy" wp eval-file "$T/Integration/test-payment-orders.php" 2>&1 | grep -qE '^[0-9]+ passed, 0 failed'; then
 				echo "INCOMPLETE COVERAGE: [$state] could not switch order storage to storage=$st sync=$sy"
-				FAILS[$state]=$((FAILS[$state] + 1))
+				sadd FAILS "$state" 1
 				for f in $STORAGE_SUITES; do STORAGE_LINES+=("$state|$combo|$f|NOT RUN|0|1"); done
 				continue
 			fi
@@ -217,11 +228,11 @@ run_state() {
 				printf '%s\n' "$out" >"$LOG_DIR/$state-$f-$st-$sy.log"
 				p=$(sed -E 's/^([0-9]+) passed.*/\1/' <<<"${summary:-0 passed}")
 				q=$(sed -E 's/.* ([0-9]+) failed.*/\1/' <<<"${summary:-x 1 failed}")
-				PASSES[$state]=$((PASSES[$state] + p))
+				sadd PASSES "$state" "$p"
 				if [ "$status" -ne 0 ] || [ -z "$summary" ] || [ "$q" != 0 ] || ! grep -q "authority=$st sync=$sy" <<<"$seen" || grep -q 'Fatal error' <<<"$out"; then
 					echo "FAIL  [$state] $f [storage=$st sync=$sy] (${summary:-no summary}; ${seen:-no STORAGE line})"
 					printf '%s\n' "$out" | awk '/^FAIL|Fatal error/ && n++ < 20'
-					FAILS[$state]=$((FAILS[$state] + (q == 0 ? 1 : q)))
+					sadd FAILS "$state" $((q == 0 ? 1 : q))
 					STORAGE_LINES+=("$state|$combo|$f|FAILED|$p|$((q == 0 ? 1 : q))")
 				else
 					echo "PASS  [$state] $f [storage=$st sync=$sy] ($summary)"
@@ -231,7 +242,7 @@ run_state() {
 		done
 		if ! "$WPE" run cli env BLZMCP_PF_SET="$orig_set" BLZMCP_PF_SYNC="$orig_sync" wp eval-file "$T/Integration/test-payment-orders.php" 2>&1 | grep -qE '^[0-9]+ passed, 0 failed'; then
 			echo "FAIL  [$state] order storage not restored to storage=$orig_set sync=$orig_sync"
-			FAILS[$state]=$((FAILS[$state] + 1))
+			sadd FAILS "$state" 1
 		fi
 	fi
 	# test-no-frontend.php runs with BLZMCP_SKIP_HTTP=1; its HTTP half is frontend-curl.sh from the
@@ -239,24 +250,24 @@ run_state() {
 	if [[ " $suites " == *" test-no-frontend.php "* ]]; then
 		if [ "$state" == none ]; then
 			echo "INCOMPLETE COVERAGE: [$state] test-no-frontend.php is listed but its HTTP half is not run in none"
-			FAILS[$state]=$((FAILS[$state] + 1))
-		elif WPE="$WPE" bash "$REPO/tests/Integration/frontend-curl.sh" >"$LOG_DIR/$state-frontend.log" 2>&1; then
+			sadd FAILS "$state" 1
+		elif WPE="$WPE" "$BASH" "$REPO/tests/Integration/frontend-curl.sh" >"$LOG_DIR/$state-frontend.log" 2>&1; then
 			echo "PASS  [$state] frontend-curl.sh ($(grep -c '^PASS' "$LOG_DIR/$state-frontend.log") URLs)"
-			PASSES[$state]=$((PASSES[$state] + 1))
+			sadd PASSES "$state" 1
 		else
 			echo "FAIL  [$state] frontend-curl.sh"
 			grep '^FAIL' "$LOG_DIR/$state-frontend.log" | head -5
-			FAILS[$state]=$((FAILS[$state] + 1))
+			sadd FAILS "$state" 1
 		fi
 	fi
 	# The exact (database store) per-hook grace must have been asserted where the store was migrated.
 	if { [ "$state" == recommended ] || [ "$state" == both ]; } && ! grep -q '^PASS  database store: pending job 2 hours late' "$LOG_DIR/$state-test-health-summary.php.log" 2>/dev/null; then
 		echo "INCOMPLETE COVERAGE: [$state] test-health-summary did not take the database-store path"
-		FAILS[$state]=$((FAILS[$state] + 1))
+		sadd FAILS "$state" 1
 	fi
 	if [ "$state" != none ] && [ ! -s "$LOG_DIR/$state-frontend.log" ]; then
 		echo "INCOMPLETE COVERAGE: [$state] the front-end HTTP check (frontend-curl.sh) did not run"
-		FAILS[$state]=$((FAILS[$state] + 1))
+		sadd FAILS "$state" 1
 	fi
 	# Reseed for the HTTP suite, on this same reporting date.
 	out=$(wp eval-file "$T/matrix/fixture.php" seed)
@@ -265,22 +276,22 @@ run_state() {
 		echo "WINDOW CHANGED: $state reseeded on another date"
 		return 2
 	fi
-	WPE="$WPE" BLZMCP_PRODUCT_ID="$product_id" bash "$REPO/tests/matrix/http-suite.sh" "$state" "$port" >"$LOG_DIR/$state-http.log" 2>&1
+	WPE="$WPE" BLZMCP_PRODUCT_ID="$product_id" "$BASH" "$REPO/tests/matrix/http-suite.sh" "$state" "$port" >"$LOG_DIR/$state-http.log" 2>&1
 	status=$?
 	summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "$LOG_DIR/$state-http.log" | tail -1)
 	grep -E '^(FAIL|NOTE|TRANSPORT|CLEANUP)' "$LOG_DIR/$state-http.log"
 	p=$(sed -E 's/^([0-9]+) passed.*/\1/' <<<"${summary:-0 passed}")
 	q=$(sed -E 's/.* ([0-9]+) failed.*/\1/' <<<"${summary:-x 1 failed}")
-	PASSES[$state]=$((PASSES[$state] + p))
+	sadd PASSES "$state" "$p"
 	if [ "$status" -ne 0 ] || [ -z "$summary" ]; then
 		[ -z "$summary" ] && echo "INCOMPLETE COVERAGE: [$state] http-suite did not finish"
-		FAILS[$state]=$((FAILS[$state] + (q == 0 ? 1 : q)))
+		sadd FAILS "$state" $((q == 0 ? 1 : q))
 		echo "FAIL  [$state] http-suite.sh (${summary:-no summary})"
 	else
 		echo "PASS  [$state] http-suite.sh ($summary)"
 	fi
 	if grep -q '^CLEANUP ERROR' "$LOG_DIR/$state-http.log"; then
-		FAILS[$state]=$((FAILS[$state] + 1))
+		sadd FAILS "$state" 1
 	fi
 	out=$(wp eval-file "$T/matrix/fixture.php" cleanup)
 	echo "fixture cleanup: $out"
@@ -305,25 +316,25 @@ run_state() {
 		echo "perf: Action Scheduler store before timing: $perf_store"
 		if [ "$perf_store" != ActionScheduler_DBStore ]; then
 			echo "FAIL  [$state] perf: Action Scheduler is on ${perf_store:-no store}, not ActionScheduler_DBStore, after the migration"
-			FAILS[$state]=$((FAILS[$state] + 1))
+			sadd FAILS "$state" 1
 		fi
 		if WPE="$WPE" BLZMCP_T="$T" BLZMCP_PERF_OUT="$PERF_FILE" BLZMCP_PERF_CANDIDATE="$ZIP" BLZMCP_PERF_REQUIRE_DBSTORE=1 \
 			BLZMCP_PERF_PORT="$port" BLZMCP_PERF_LOGIN=admin BLZMCP_PERF_APP_PASSWORD="$perf_secret" \
-			bash "$REPO/tests/matrix/perf-suite.sh" >"$LOG_DIR/$state-perf.log" 2>&1; then
+			"$BASH" "$REPO/tests/matrix/perf-suite.sh" >"$LOG_DIR/$state-perf.log" 2>&1; then
 			echo "PASS  [$state] perf-suite.sh ($(grep -c '^partition' "$LOG_DIR/$state-perf.log") partitions under 1500 ms)"
-			PASSES[$state]=$((PASSES[$state] + 1))
+			sadd PASSES "$state" 1
 		else
 			echo "FAIL  [$state] perf-suite.sh (payment health cold budget; see payment-performance.json)"
 			grep -E '^(partition|FAIL|CLEANUP)' "$LOG_DIR/$state-perf.log" | head -10
-			FAILS[$state]=$((FAILS[$state] + 1))
+			sadd FAILS "$state" 1
 		fi
 		unset perf_secret
 		if [ -n "$perf_id" ] && ! wp eval-file "$T/matrix/credentials.php" app-password revoke admin "$perf_id" >/dev/null; then
 			echo "CLEANUP ERROR  [$state] perf application password not revoked"
-			FAILS[$state]=$((FAILS[$state] + 1))
+			sadd FAILS "$state" 1
 		fi
 	fi
-	[ "${FAILS[$state]}" -eq 0 ] && RESULT[$state]=PASSED
+	[ "$(sget FAILS "$state" 1)" -eq 0 ] && sset RESULT "$state" PASSED
 	return 0
 }
 
@@ -339,7 +350,7 @@ while :; do
 	PERF_FILE=''
 	FIRST_DATE=''
 	for state in $STATES; do
-		[ -f "$REPO/tests/matrix/$state.wp-env.json" ] || { echo "INCOMPLETE COVERAGE: no config for $state"; RESULT[$state]=FAILED; FAILS[$state]=1; continue; }
+		[ -f "$REPO/tests/matrix/$state.wp-env.json" ] || { echo "INCOMPLETE COVERAGE: no config for $state"; sset RESULT "$state" FAILED; sset FAILS "$state" 1; continue; }
 		run_state "$state"
 		rc=$?
 		cd "$REPO" || exit 1
@@ -357,8 +368,8 @@ done
 echo
 echo "=== Matrix summary ==="
 for state in $STATES; do
-	[ "${RESULT[$state]:-FAILED}" == PASSED ] || fail=1
-	echo "$state: ${RESULT[$state]:-NOT RUN} (${PASSES[$state]:-0} passed, ${FAILS[$state]:-1} failed)"
+	[ "$(sget RESULT "$state" FAILED)" == PASSED ] || fail=1
+	echo "$state: $(sget RESULT "$state" 'NOT RUN') ($(sget PASSES "$state" 0) passed, $(sget FAILS "$state" 1) failed)"
 done
 {
 	echo "ZIP=$ZIP"
@@ -368,13 +379,13 @@ done
 	echo "WINDOW_FILE=$(ls "$LOG_DIR"/*.window 2>/dev/null | head -1)"
 	echo "PERF_FILE=$PERF_FILE"
 	for state in $STATES; do
-		echo "STATE=$state|${RESULT[$state]:-NOT RUN}|${PASSES[$state]:-0}|${FAILS[$state]:-1}|${WPV[$state]:-}|${PHPV[$state]:-}|${VERSIONS[$state]:-[]}"
+		echo "STATE=$state|$(sget RESULT "$state" 'NOT RUN')|$(sget PASSES "$state" 0)|$(sget FAILS "$state" 1)|$(sget WPV "$state")|$(sget PHPV "$state")|$(sget VERSIONS "$state" '[]')"
 	done
-	for line in "${STORAGE_LINES[@]}"; do
+	for line in ${STORAGE_LINES[@]+"${STORAGE_LINES[@]}"}; do
 		echo "STORAGE=$line"
 	done
 } >"$LOG_DIR/summary.txt"
-bash "$REPO/tests/matrix/record.sh" "$LOG_DIR/summary.txt" "$([ "$fail" -eq 0 ] && echo PASSED || echo FAILED)" || fail=1
+"$BASH" "$REPO/tests/matrix/record.sh" "$LOG_DIR/summary.txt" "$([ "$fail" -eq 0 ] && echo PASSED || echo FAILED)" || fail=1
 echo "Logs: $LOG_DIR"
 if [ "$fail" -eq 0 ]; then echo "MATRIX PASSED"; else echo "MATRIX FAILED"; fi
 exit $fail

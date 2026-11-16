@@ -7,7 +7,7 @@
  * Requires PHP:      8.1
  * Requires Plugins:  woocommerce
  * WC requires at least: 10.9
- * WC tested up to:   11.2
+ * WC tested up to:   11.3
  * Author:            Blaze Commerce
  * Author URI:        https://blazecommerce.io
  * License:           GPL-3.0-or-later

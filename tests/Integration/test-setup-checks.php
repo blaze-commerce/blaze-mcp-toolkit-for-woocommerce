@@ -145,6 +145,15 @@ if ( 'recommended' === $state && ! $denylist ) {
 		// exactly the 1.0 inventory plus these names, so any other drift still fails as before.
 		$added_since_1_0 = array( 'blaze-mcp-toolkit/payment-health' );
 		$bound_inputs    = (array) ( $fixture['_inputs'] ?? array() );
+		// The pinned current environment moved from WooCommerce 11.2.2 (the capture) to 11.3.0 (wave 6),
+		// which also registers woocommerce/order-notes-query. Only that exact move is allowed; the
+		// rows are still compared with the 1.0 fixture (checked identical on 11.3.0).
+		$wc_pinned_now    = '11.3.0';
+		$wc_added_in_11_3 = array( 'woocommerce/order-notes-query' );
+		if ( '11.2.2' === ( $bound_inputs['plugins']['woocommerce/woocommerce.php'] ?? null ) ) {
+			$bound_inputs['plugins']['woocommerce/woocommerce.php'] = $wc_pinned_now;
+			$added_since_1_0 = array_merge( $added_since_1_0, $wc_added_in_11_3 );
+		}
 		if ( isset( $bound_inputs['abilities'] ) && is_array( $bound_inputs['abilities'] ) ) {
 			$bound_abilities = array_values( array_unique( array_merge( $bound_inputs['abilities'], $added_since_1_0 ) ) );
 			sort( $bound_abilities );

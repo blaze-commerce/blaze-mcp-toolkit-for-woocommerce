@@ -15,7 +15,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 if [ "${1:-}" == --matrix ]; then
 	[ -n "${2:-}" ] || { echo "usage: bash scripts/run-integration.sh --matrix CANDIDATE.zip"; exit 2; }
-	exec bash tests/matrix/run-matrix.sh "$2"
+	exec "$BASH" tests/matrix/run-matrix.sh "$2"
 fi
 echo "FAST CHECKS ONLY — NOT THE RELEASE GATE (the gate is: bash scripts/run-integration.sh --matrix CANDIDATE.zip)"
 fail=0
@@ -253,17 +253,22 @@ if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed' || pri
 else
 	echo "PASS  $f [none] ($summary)"
 fi
-if bash tests/Integration/frontend-curl.sh; then :; else fail=1; fi
+# Host-side scripts run under /bin/bash when it exists: on macOS that is bash 3.2, the shell swamp's
+# `bash -lc` gate resolves to, so a bash-4-only construct fails here first. The self-tests run their
+# scripts under the same bash ($BASH).
+host_bash=/bin/bash
+[ -x "$host_bash" ] || host_bash=$BASH
+if "$host_bash" tests/Integration/frontend-curl.sh; then :; else fail=1; fi
 # The matrix recorder's zip inventory and byte-identity check (host-side, no wp-env).
-if rec_out=$(bash tests/matrix/test-record.sh 2>&1); then
-	echo "PASS  tests/matrix/test-record.sh ($(printf '%s\n' "$rec_out" | tail -1))"
+if rec_out=$("$host_bash" tests/matrix/test-record.sh 2>&1); then
+	echo "PASS  $host_bash tests/matrix/test-record.sh ($(printf '%s\n' "$rec_out" | tail -1))"
 else
-	echo "FAIL  tests/matrix/test-record.sh"
-	printf '%s\n' "$rec_out" | awk '/^FAIL/ && n++ < 20'
+	echo "FAIL  $host_bash tests/matrix/test-record.sh"
+	printf '%s\n' "$rec_out" | awk '/^FAIL|unbound variable|invalid option|syntax error/ && n++ < 20'
 	fail=1
 fi
 # The performance gate's own self-tests and the release-zip exclusion canaries (host-side, no wp-env).
-for t in "php tests/matrix/test-perf-validate.php" "bash tests/matrix/test-perf-suite.sh" "bash tests/matrix/test-distignore.sh"; do
+for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh"; do
 	if t_out=$($t 2>&1); then
 		echo "PASS  $t ($(printf '%s\n' "$t_out" | tail -1))"
 	else

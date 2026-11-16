@@ -83,15 +83,21 @@ trap on_exit EXIT
 trap 'exit 130' INT TERM
 
 seed_range() { # cmd total now
-	local cmd=$1 total=$2 now=$3 off=0 running=0
+	local cmd=$1 total=$2 now=$3 off=0 running=0 pids=''
 	while [ "$off" -lt "$total" ]; do
 		local n=$CHUNK
 		[ $((off + n)) -gt "$total" ] && n=$((total - off))
 		"$WPE" run cli wp eval-file "$SEED" "$cmd" "$off" "$n" "$now" "$total" >"$WORK/seed-$cmd-$off.log" 2>&1 &
+		pids="$pids $!"
 		running=$((running + 1))
 		off=$((off + n))
 		if [ "$running" -ge "$JOBS" ]; then
-			wait -n
+			# Wait for the oldest job (bash 3.2 has no `wait -n`).
+			# shellcheck disable=SC2086 # $pids is a list of job ids.
+			set -- $pids
+			wait "$1"
+			shift
+			pids="$*"
 			running=$((running - 1))
 		fi
 	done

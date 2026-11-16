@@ -20,6 +20,18 @@
 # Ends with "<n> passed, <m> failed"; exit status 0 only when nothing failed.
 set -uo pipefail
 
+# This suite needs bash 4 or later (associative arrays). macOS /bin/bash is 3.2: re-run under a
+# newer bash when there is one, otherwise fail with a clear reason.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+	for b in "$(command -v bash 2>/dev/null)" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+		[ -n "$b" ] && [ -x "$b" ] || continue
+		[ "$("$b" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 4 ] 2>/dev/null && exec "$b" "$0" "$@"
+	done
+	echo "FAIL  http-suite.sh needs bash 4 or later (this is bash $BASH_VERSION; on macOS: brew install bash)"
+	echo "0 passed, 1 failed"
+	exit 1
+fi
+
 STATE=${1:?state}
 PORT=${2:?port}
 WPE=${WPE:-wp-env}

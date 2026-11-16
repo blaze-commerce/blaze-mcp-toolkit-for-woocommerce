@@ -28,10 +28,18 @@
       "commit": "3a87241015aff96c7a38c1304949908b9588b218"
     },
     "woocommerce_current": {
-      "version": "11.2.2",
-      "url": "https://github.com/woocommerce/woocommerce/tree/11.2.2/plugins/woocommerce",
-      "commit": "8ab82808f207c420703863c8ecec62e2fdc834a4",
-      "note": "Added in wave 2 (lane kinds). Every WooCommerce fact pinned for 10.9.0 below was re-read at this tag; see woocommerce.current_version_check. WordPress.org listed 11.3.0 as the newest release on 2026-11-15; it was not pinned in this pass."
+      "version": "11.3.0",
+      "url": "https://github.com/woocommerce/woocommerce/tree/11.3.0/plugins/woocommerce",
+      "commit": "74a33ab397bdbfd9dff295bd644c6c818cd5cdf4",
+      "note": "Moved to 11.3.0 in wave 6 (lane source, 2026-11-16). Every WooCommerce fact pinned for 10.9.0 and 11.2.2 below was re-read at this tag commit; see woocommerce.current_version_check. 10.9.0 (sources.woocommerce) stays the minimum. The 30 cited files are byte-identical to the WordPress.org woocommerce.11.3.0.zip copies.",
+      "previous": [
+        {
+          "version": "11.2.2",
+          "url": "https://github.com/woocommerce/woocommerce/tree/11.2.2/plugins/woocommerce",
+          "commit": "8ab82808f207c420703863c8ecec62e2fdc834a4",
+          "note": "Current version from wave 2 (lane kinds) to wave 6; its check is kept under woocommerce.current_version_check.history."
+        }
+      ]
     },
     "paypal_payments": {
       "plugin_slug": "woocommerce-paypal-payments",
@@ -298,7 +306,7 @@
     "logs": {
       "sources": ["square", "square_credit_card", "square_cash_app_pay", "gift_cards_pay", "sync", "square-coupons", "error"],
       "level": "notice",
-      "level_note": "every Square plugin entry goes through WC_Logger::add(), whose default level is notice (WooCommerce includes/class-wc-logger.php:136 in 10.9.0 and 11.2.2), so the plugin writes no error-level entries; 'error' here is a source name, not a level",
+      "level_note": "every Square plugin entry goes through WC_Logger::add(), whose default level is notice (WooCommerce includes/class-wc-logger.php:136 in 10.9.0, 11.2.2 and 11.3.0), so the plugin writes no error-level entries; 'error' here is a source name, not a level",
       "enabled_when": "the plugin's debug setting logs, checked by Plugin::log() and Payment_Gateway::debug_log()",
       "toolkit_consequence": "an error/fatal log check cannot observe this family; treat Square log diagnostics as unavailable, not as an empty healthy log",
       "webhook_failure_pattern": null
@@ -345,10 +353,11 @@
         "total": "wc_orders.total_amount",
         "parent": "wc_orders.parent_order_id",
         "created_via": "wc_order_operational_data.created_via",
-        "paid": "wc_order_operational_data.date_paid_gmt (datetime, UTC, NULL when unset)"
+        "paid": "wc_order_operational_data.date_paid_gmt (datetime, UTC, NULL when unset)",
+        "updated": "wc_orders.date_updated_gmt (datetime, UTC, NULL allowed; set from date_modified, which persist_updates() fills on every CRUD save that did not set it)"
       },
       "join": "wc_order_operational_data.order_id = wc_orders.id (unique key order_id)",
-      "indexes": "wc_orders has type_status_date (type, status, date_created_gmt); wc_order_operational_data has no index on date_paid_gmt",
+      "indexes": "wc_orders has type_status_date (type, status, date_created_gmt) and date_updated (date_updated_gmt); wc_order_operational_data has no index on date_paid_gmt",
       "date_write_format": "Y-m-d H:i:s in UTC"
     },
     "legacy": {
@@ -412,19 +421,35 @@
       "file_line": "<ISO-8601 UTC 'c' time> <LEVEL upper case> <message>[ CONTEXT: <json>]; filterable by woocommerce_format_log_entry",
       "db_table": "{prefix}woocommerce_log (log_id, timestamp datetime UTC, level smallint, source varchar(200), message longtext, context longtext NULL); index on level only",
       "level_severity": { "emergency": 800, "alert": 700, "critical": 600, "error": 500, "warning": 400, "notice": 300, "info": 200, "debug": 100 },
-      "legacy_add_default_level": "WC_Logger::add( $handle, $message ) logs at notice unless a level is passed (includes/class-wc-logger.php:136, unchanged in 11.2.2)"
+      "legacy_add_default_level": "WC_Logger::add( $handle, $message ) logs at notice unless a level is passed (includes/class-wc-logger.php:136, unchanged in 11.2.2 and 11.3.0)"
     },
     "current_version_check": {
-      "version": "11.2.2",
-      "commit": "8ab82808f207c420703863c8ecec62e2fdc834a4",
-      "method": "each 10.9.0 line range cited in the receipt was matched as an exact whitespace-normalised block in the 11.2.2 file; 52 of 54 matched unchanged (some at new line numbers), the other 2 are listed under changed",
-      "unchanged": ["authority and sync options", "HPOS table names, column maps and both CREATE TABLE schemas (no paid-date index)", "HPOS UTC date write format", "legacy meta keys, _date_paid / _paid_date precedence, write formats and first-row reads", "set_date_prop parsing", "created_via 'checkout' and 'store-api', draft status 'checkout-draft'", "status enums and is_paid statuses", "maybe_set_date_paid", "refund type", "core manual gateways and their statuses", "PageController edit URL shapes and the HPOS hydration and log side effect", "hold-stock option, default, conditions, interval filter, Action Scheduler hook and group, checkout/store-api-only cancellation filter", "logging settings getters and defaults, log directory creation default, file naming and hash", "DB log table schema and DB handler (file byte-identical)", "LoggingUtil (file byte-identical)", "log levels (file byte-identical)", "wc_payment_gateways_initialized action and the public payment_gateways property"],
+      "version": "11.3.0",
+      "commit": "74a33ab397bdbfd9dff295bd644c6c818cd5cdf4",
+      "method": "wave 6 (lane source): each 10.9.0 range cited in the receipt, plus the 11.2.2-only ranges (date_updated_gmt column and date_updated index, persist_updates, LogHandlerFileV2 11.2.2 form, gateway registry lines 30, 92-104 and 146, OrderUtil:81), was matched as an exact whitespace-normalised block in the 11.3.0 file; 72 of 73 matched unchanged (71 byte-for-byte, 1 re-indented only, some at new line numbers), the other 1 is listed under changed",
+      "unchanged": ["authority and sync options", "HPOS table names, column maps and both CREATE TABLE schemas (no paid-date index)", "wc_orders.date_updated_gmt column (map OrdersTableDataStore.php:317-320, schema :3564) and its date_updated index (:3581)", "persist_updates() sets date_modified when the save did not (OrdersTableDataStore.php:3217-3227)", "HPOS UTC date write format", "legacy meta keys, _date_paid / _paid_date precedence, write formats and first-row reads", "created_via 'checkout' and 'store-api', draft status 'checkout-draft'", "status enums and is_paid statuses", "maybe_set_date_paid", "refund type", "core manual gateway IDs and their default statuses and filters", "PageController edit URL shapes and the HPOS hydration and log side effect", "hold-stock option, default, conditions, interval filter, Action Scheduler hook and group, checkout/store-api-only cancellation filter, HPOS and legacy unpaid selection", "logging settings getters and defaults, log directory creation default, file naming and hash, file line format (11.2.2 form)", "DB log table schema and DB handler (file byte-identical)", "LoggingUtil, WC_Logger, log levels and abstract log handler (files byte-identical)", "woocommerce_payment_gateways filter, option-cache priming, wc_payment_gateways_initialized action and the public payment_gateways property (file byte-identical to 11.2.2)", "OrderUtil::custom_orders_table_data_sync_is_enabled() still present (OrderUtil.php byte-identical to 11.2.2)"],
       "changed": [
-        { "what": "file log context encoding", "where": "src/Internal/Admin/Logging/LogHandlerFileV2.php:91-95", "detail": "context JSON now uses JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES and is no longer passed through stripslashes; the entry shape '<time> <LEVEL> <message>[ CONTEXT: <json>]' and gmdate('c') time are unchanged" },
-        { "what": "gateway registry init", "where": "includes/class-wc-payment-gateways.php:95-103", "detail": "init() now primes option caches for the core gateways' settings before constructing gateways (10.9.0 had a comment saying none was needed); the construction loop and the action at line 146 are otherwise unchanged" }
+        { "what": "set_date_prop WC_DateTime check", "where": "includes/abstracts/abstract-wc-data.php:981", "detail": "is_a( $value, 'WC_DateTime' ) became $value instanceof WC_DateTime; same result for every input, so the numeric-is-UTC / string-is-local parsing is unchanged (function still at :974-1004)" },
+        { "what": "HPOS ephemeral meta keys", "where": "src/Internal/DataStores/Orders/OrdersTableDataStore.php:121-128", "detail": "_wp_trash_meta_status, _wp_trash_meta_time, _wp_trash_meta_comments_status, _debug_log_source and _debug_log_source_pending_deletion joined the edit lock as meta keys whose change alone does not trigger the modified-date save (should_save_after_meta_change, :3786). Not a payment field: recording a payment changes status, transaction ID or paid date, which still go through persist_updates() and move date_updated_gmt" }
       ],
       "added": [
-        { "what": "OrderUtil::custom_orders_table_data_sync_is_enabled()", "where": "src/Utilities/OrderUtil.php:81", "since": "11.0.0", "detail": "cheap read of the sync setting; not present at the 10.9 floor, so the toolkit cannot rely on it" }
+        { "what": "wc_order_stats.payment_method column and idx_payment_method_date_paid_status index", "where": "includes/class-wc-install.php:1500, :1510; update callback wc_update_1130_backfill_order_stats_payment_method :376", "since": "11.3.0", "detail": "Analytics lookup table only; the toolkit does not read wc_order_stats for payment health and cannot rely on it at the 10.9 floor" },
+        { "what": "ShippingMethodRestrictionsTrait on bacs and cheque (COD already had it)", "where": "includes/gateways/bacs/class-wc-gateway-bacs.php:28, includes/gateways/cheque/class-wc-gateway-cheque.php:28", "since": "11.3.0", "detail": "adds settings fields; the enabled key, gateway IDs and process_payment default statuses and filters are unchanged" }
+      ],
+      "history": [
+        {
+          "version": "11.2.2",
+          "commit": "8ab82808f207c420703863c8ecec62e2fdc834a4",
+          "method": "each 10.9.0 line range cited in the receipt was matched as an exact whitespace-normalised block in the 11.2.2 file; 52 of 54 matched unchanged (some at new line numbers), the other 2 are listed under changed",
+          "unchanged": ["authority and sync options", "HPOS table names, column maps and both CREATE TABLE schemas (no paid-date index)", "HPOS UTC date write format", "legacy meta keys, _date_paid / _paid_date precedence, write formats and first-row reads", "set_date_prop parsing", "created_via 'checkout' and 'store-api', draft status 'checkout-draft'", "status enums and is_paid statuses", "maybe_set_date_paid", "refund type", "core manual gateways and their statuses", "PageController edit URL shapes and the HPOS hydration and log side effect", "hold-stock option, default, conditions, interval filter, Action Scheduler hook and group, checkout/store-api-only cancellation filter", "logging settings getters and defaults, log directory creation default, file naming and hash", "DB log table schema and DB handler (file byte-identical)", "LoggingUtil (file byte-identical)", "log levels (file byte-identical)", "wc_payment_gateways_initialized action and the public payment_gateways property"],
+          "changed": [
+            { "what": "file log context encoding", "where": "src/Internal/Admin/Logging/LogHandlerFileV2.php:91-95", "detail": "context JSON now uses JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES and is no longer passed through stripslashes; the entry shape '<time> <LEVEL> <message>[ CONTEXT: <json>]' and gmdate('c') time are unchanged" },
+            { "what": "gateway registry init", "where": "includes/class-wc-payment-gateways.php:95-103", "detail": "init() now primes option caches for the core gateways' settings before constructing gateways (10.9.0 had a comment saying none was needed); the construction loop and the action at line 146 are otherwise unchanged" }
+          ],
+          "added": [
+            { "what": "OrderUtil::custom_orders_table_data_sync_is_enabled()", "where": "src/Utilities/OrderUtil.php:81", "since": "11.0.0", "detail": "cheap read of the sync setting; not present at the 10.9 floor, so the toolkit cannot rely on it" }
+          ]
+        }
       ]
     }
   },
