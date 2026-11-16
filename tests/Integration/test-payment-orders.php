@@ -136,6 +136,100 @@ blzmcp_it_assert( ! in_array( $ids['at_mature_before'], $cur_ids, true ), 'order
 $e1 = PaymentOrders::read( $now, 1, $tz );
 blzmcp_it_equals( array( 'pending' => 0, 'cancelled_unpaid' => 0, 'taken' => 0, 'transaction_recorded_unpaid' => 0 ), $e1['store']['current'], 'since_hours=1 has an empty mature cohort' );
 
+// ---------------------------------------------------------------- legacy meta read paths (wave 5).
+// legacy_chunk() reads the meta rows either by a primary-key span (dense batches) or by post_id
+// (fallback), chosen by density guards. Both must return identical read() output for the same
+// order set: this scenario already holds an older-created order paid inside the history, a
+// site-local `_paid_date`-only order, duplicate `_date_paid` rows with differing meta_id and an
+// empty payment method. The path counters and override are private test instrumentation.
+if ( ! $hpos ) {
+	$paths_prop = new ReflectionProperty( PaymentOrders::class, 'legacy_paths' );
+	$force_prop = new ReflectionProperty( PaymentOrders::class, 'legacy_path_override' );
+	$paths_prop->setAccessible( true );
+	$force_prop->setAccessible( true );
+	$read_with  = static function ( ?string $force, int $hours ) use ( $paths_prop, $force_prop, $now, $tz ): array {
+		$paths_prop->setValue( null, array( 'span' => 0, 'fallback' => 0 ) );
+		$force_prop->setValue( null, $force );
+		try {
+			wp_cache_flush();
+			$r = PaymentOrders::read( $now, $hours, $tz );
+		} finally {
+			$force_prop->setValue( null, null );
+		}
+		return array( $r, $paths_prop->getValue() );
+	};
+	$same = static function ( string $label ) use ( $read_with ): array {
+		$seen = array();
+		foreach ( array( 24, 168 ) as $hours ) {
+			list( $natural, $p ) = $read_with( null, $hours );
+			list( $span, $ps )   = $read_with( 'span', $hours );
+			list( $fallback, $pf ) = $read_with( 'fallback', $hours );
+			blzmcp_it_assert( true === $natural['ok'], "{$label} ({$hours}h): reader succeeded" );
+			blzmcp_it_assert( $ps['span'] >= 1 && 0 === $ps['fallback'], "{$label} ({$hours}h): forced span path ran" );
+			blzmcp_it_assert( $pf['fallback'] >= 1 && 0 === $pf['span'], "{$label} ({$hours}h): forced post_id path ran" );
+			blzmcp_it_assert( serialize( $natural ) === serialize( $span ), "{$label} ({$hours}h): span path output identical" ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- exact structural comparison.
+			blzmcp_it_assert( serialize( $natural ) === serialize( $fallback ), "{$label} ({$hours}h): post_id path output identical" ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- exact structural comparison.
+			$seen[ $hours ] = array( $natural, $p );
+		}
+		return $seen;
+	};
+	$filler_posts = array();
+	blzmcp_it_cleanup(
+		static function () use ( $wpdb, &$filler_posts, $ids ): void {
+			foreach ( array_chunk( $filler_posts, 500 ) as $chunk ) {
+				$in = implode( ',', array_map( 'intval', $chunk ) );
+				$wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE post_id IN ({$in})" );
+				$wpdb->query( "DELETE FROM {$wpdb->posts} WHERE ID IN ({$in})" );
+			}
+			delete_post_meta( $ids['paid_recent'], '_blzmcp_pf_span_probe' );
+		}
+	);
+	$add_filler = static function ( int $n ) use ( $wpdb, &$filler_posts ): void {
+		$base = (int) $wpdb->get_var( "SELECT COALESCE( MAX( ID ), 0 ) FROM {$wpdb->posts}" );
+		for ( $i = 0; $i < $n; $i += 500 ) {
+			$vals = array();
+			$end  = min( $n, $i + 500 );
+			for ( $j = $i; $j < $end; $j++ ) {
+				$id             = $base + 1 + $j;
+				$filler_posts[] = $id;
+				$vals[]         = $wpdb->prepare( '(%d, %s, %s, %s, %s, %s, %s, %s, %s)', $id, 'blzmcp_pf_filler', 'draft', 'blzmcp-pf-filler', '', '', '', '', '' );
+			}
+			$wpdb->query( "INSERT INTO {$wpdb->posts} (ID, post_type, post_status, post_title, post_content, post_excerpt, to_ping, pinged, post_content_filtered) VALUES " . implode( ',', $vals ) );
+		}
+	};
+	$candidates = static fn(): int => (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE post_type = %s', $wpdb->posts, 'shop_order' ) );
+
+	// 1. This scenario as seeded: consecutive order IDs and meta rows, so the guards pick the span.
+	$dense = $same( 'dense scenario' );
+	blzmcp_it_assert( $dense[24][1]['span'] >= 1 && 0 === $dense[24][1]['fallback'], 'dense scenario: the guards chose the primary-key span read' );
+
+	// 2. Meta rows far apart: thousands of postmeta rows of a non-order post land between the
+	// orders' meta rows and one later, unread meta row of an order, so the span guard falls back.
+	$add_filler( 1 );
+	$filler = end( $filler_posts );
+	$rows   = 64 * $candidates() + 200;
+	for ( $i = 0; $i < $rows; $i += 500 ) {
+		$vals = array();
+		$end  = min( $rows, $i + 500 );
+		for ( $j = $i; $j < $end; $j++ ) {
+			$vals[] = $wpdb->prepare( '(%d, %s, %s)', $filler, '_blzmcp_pf_filler', (string) $j );
+		}
+		$wpdb->query( "INSERT INTO {$wpdb->postmeta} (post_id, meta_key, meta_value) VALUES " . implode( ',', $vals ) );
+	}
+	add_post_meta( $ids['paid_recent'], '_blzmcp_pf_span_probe', '1' );
+	$sparse_meta = $same( 'sparse meta_id span' );
+	blzmcp_it_assert( 0 === $sparse_meta[24][1]['span'] && $sparse_meta[24][1]['fallback'] >= 1, 'sparse meta_id span: the guards chose the post_id read' );
+	blzmcp_it_assert( serialize( $dense[24][0] ) === serialize( $sparse_meta[24][0] ) && serialize( $dense[168][0] ) === serialize( $sparse_meta[168][0] ), 'same orders read through either path give the same output' ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- exact structural comparison.
+
+	// 3. Orders interleaved among many non-order posts: a new order after more than 4 non-order
+	// posts per order, so the post-ID guard falls back before any span read.
+	$add_filler( 4 * $candidates() + 50 );
+	$ids['after_filler'] = blzmcp_pf_order( array( 'method' => 'stripe', 'via' => 'checkout', 'status' => 'processing', 'created' => $now - 2 * DAY_IN_SECONDS, 'paid' => $now - 2 * DAY_IN_SECONDS + 60 ) );
+	$sparse_ids = $same( 'interleaved post IDs' );
+	blzmcp_it_assert( 0 === $sparse_ids[24][1]['span'] && $sparse_ids[24][1]['fallback'] >= 1, 'interleaved post IDs: the guards chose the post_id read' );
+	blzmcp_it_equals( $dense[24][0]['store']['series']['count'] + 1, $sparse_ids[24][0]['store']['series']['count'], 'the order after the filler is read (one more taken event)' );
+}
+
 // ---------------------------------------------------------------- failure paths fail closed.
 $break = static fn( $q ) => ( str_contains( $q, '_blzmcp_never' ) || str_contains( $q, 'ORDER BY o.id ASC' ) || str_contains( $q, 'ORDER BY p.ID ASC LIMIT' ) ) ? 'SELECT broken_column FROM blzmcp_no_such_table' : $q;
 add_filter( 'query', $break );

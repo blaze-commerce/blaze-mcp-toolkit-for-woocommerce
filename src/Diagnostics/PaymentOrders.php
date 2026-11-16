@@ -27,6 +27,35 @@ final class PaymentOrders {
 	/** Rows per keyset chunk. */
 	private const CHUNK = 5000;
 
+	/**
+	 * Legacy access-path guards (no effect on results): the meta_id span pre-read runs only when a
+	 * batch's post-ID range holds at most this many posts per batch order...
+	 */
+	private const DENSE_IDS = 4;
+
+	/** ...and the primary-key range read only when that span holds at most this many rows per order. */
+	private const DENSE_META = 64;
+
+	/**
+	 * Test instrumentation only (read and set through reflection by the parity test; no public
+	 * API, no hook): how many legacy batches used each meta read path in this process.
+	 *
+	 * @var array{span:int,fallback:int}
+	 */
+	private static array $legacy_paths = array(
+		'span'     => 0,
+		'fallback' => 0,
+	);
+
+	/**
+	 * Test instrumentation only: null (always, in production) lets the density guards choose;
+	 * 'span' or 'fallback' forces that read path so the parity test can prove both paths return
+	 * the same rows for the same orders.
+	 *
+	 * @var string|null
+	 */
+	private static ?string $legacy_path_override = null;
+
 	/** Safety bound on rows scanned in one call; beyond it the result is partial. */
 	public const MAX_ROWS = 500000;
 
@@ -433,58 +462,135 @@ final class PaymentOrders {
 		// Site-local paid strings: widen by the largest possible offset (14 hours) and filter exactly in PHP.
 		$local_from = gmdate( 'Y-m-d H:i:s', $start - 14 * 3600 );
 		$pm         = $wpdb->postmeta;
-		$wpdb->last_error = '';
-		// Step 1: the chunk's order rows (same predicate as before). Step 2: the five meta keys for
-		// exactly those IDs in one indexed read, keeping the first meta_id row per key in PHP, so the
-		// precedence is that of the former correlated `ORDER BY meta_id LIMIT 1` subqueries.
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
-		$rows = $wpdb->get_results(
-			$wpdb->prepare(
-				'SELECT p.ID AS id, p.post_status AS s, p.post_date_gmt AS c FROM %i p WHERE p.post_type = %s AND p.ID > %d AND ( p.post_date_gmt >= %s OR EXISTS ( SELECT 1 FROM %i pm WHERE pm.post_id = p.ID AND ( ( pm.meta_key = %s AND pm.meta_value REGEXP %s AND CAST( pm.meta_value AS UNSIGNED ) >= %d ) OR ( pm.meta_key = %s AND pm.meta_value >= %s ) ) ) ) ORDER BY p.ID ASC LIMIT %d',
-				$wpdb->posts,
-				'shop_order',
-				$after,
-				$from,
-				$pm,
-				'_date_paid',
-				'^[0-9]+$',
-				$start,
-				'_paid_date',
-				$local_from,
-				self::CHUNK
-			),
-			ARRAY_A
-		);
-		if ( '' !== $wpdb->last_error || ! is_array( $rows ) ) {
-			return false;
-		}
-		$meta = array();
-		if ( array() !== $rows ) {
-			$ids    = array_map( static fn( $r ) => (int) $r['id'], $rows );
-			$keys   = array( '_payment_method', '_created_via', '_transaction_id', '_date_paid', '_paid_date' );
-			$id_ph  = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
-			$key_ph = implode( ',', array_fill( 0, count( $keys ), '%s' ) );
-			// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- only generated %d/%s placeholder lists are interpolated; every value is a placeholder.
+		$keys       = array( '_payment_method', '_created_via', '_transaction_id', '_date_paid', '_paid_date' );
+		$key_ph     = implode( ',', array_fill( 0, count( $keys ), '%s' ) );
+		// Selection is unchanged: the first CHUNK `shop_order` rows with ID > $after whose
+		// post_date_gmt is in the history OR that have any paid-looking meta row in range. The
+		// former correlated EXISTS is evaluated instead as the same SQL expressions on each row of
+		// one grouped meta read per batch of candidate orders (`r` on the order row, `h` on each
+		// meta row), so comparison, collation and NULL semantics stay MySQL's. The first-row
+		// precedence (lowest meta_id per key) is kept in PHP from the selected meta_id, without a
+		// sort. A batch never yields more than CHUNK selected rows to the caller; any surplus is
+		// dropped and re-read by the next call, so the chunk boundaries (and the row cap) are those
+		// of the former single query.
+		$rows   = array();
+		$meta   = array();
+		$cursor = $after;
+		do {
+			$wpdb->last_error = '';
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
-			$mrows = $wpdb->get_results(
+			$cands = $wpdb->get_results(
 				$wpdb->prepare(
-					"SELECT post_id, meta_key, meta_value FROM %i WHERE post_id IN ({$id_ph}) AND meta_key IN ({$key_ph}) ORDER BY post_id ASC, meta_id ASC",
-					array_merge( array( $pm ), $ids, $keys )
+					'SELECT p.ID AS id, p.post_status AS s, p.post_date_gmt AS c, ( p.post_date_gmt >= %s ) AS r FROM %i p WHERE p.post_type = %s AND p.ID > %d ORDER BY p.ID ASC LIMIT %d',
+					$from,
+					$wpdb->posts,
+					'shop_order',
+					$cursor,
+					self::CHUNK
 				),
 				ARRAY_A
 			);
+			if ( '' !== $wpdb->last_error || ! is_array( $cands ) ) {
+				return false;
+			}
+			if ( array() === $cands ) {
+				break;
+			}
+			$ids   = array_map( static fn( $r ) => (int) $r['id'], $cands );
+			$id_ph = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+			// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- only generated %d/%s placeholder lists are interpolated; every value is a placeholder.
+			// Access path only (the row set is identical either way): when the batch's post IDs are
+			// dense, the exact meta_id span of these orders' meta rows is read with a loose index
+			// scan of the post_id index (per-post MIN/MAX of meta_id, which that index holds: two
+			// index reads per post, no row lookups), restricted to the batch's IDs in PHP. When that
+			// span is dense too, the meta rows are read by a primary-key range (sequential) bounded
+			// by the span and the batch's post-ID range, and rows of posts outside the batch are
+			// dropped in PHP by their integer post_id; otherwise by one post_id index probe per
+			// order, as before. The span is the true bound of the batch's meta rows, so both reads
+			// keep exactly the batch's rows of the five keys.
+			$in_batch = array_flip( $ids );
+			$lo       = null;
+			$hi       = null;
+			$min_i    = min( $ids );
+			$max_i    = max( $ids );
+			$force    = self::$legacy_path_override;
+			if ( 'fallback' !== $force && ( 'span' === $force || $max_i - $min_i + 1 <= self::DENSE_IDS * count( $ids ) ) ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
+				$spans = $wpdb->get_results(
+					$wpdb->prepare( 'SELECT post_id AS p, MIN( meta_id ) AS lo, MAX( meta_id ) AS hi FROM %i WHERE post_id BETWEEN %d AND %d GROUP BY post_id', $pm, $min_i, $max_i ),
+					ARRAY_A
+				);
+				if ( '' !== $wpdb->last_error || ! is_array( $spans ) ) {
+					return false;
+				}
+				foreach ( $spans as $sp ) {
+					if ( isset( $in_batch[ (int) $sp['p'] ] ) ) {
+						$lo = null === $lo ? (int) $sp['lo'] : min( $lo, (int) $sp['lo'] );
+						$hi = null === $hi ? (int) $sp['hi'] : max( $hi, (int) $sp['hi'] );
+					}
+				}
+				unset( $spans );
+			}
+			if ( null !== $lo && ( 'span' === $force || $hi - $lo + 1 <= self::DENSE_META * count( $ids ) ) ) {
+				++self::$legacy_paths['span'];
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
+				$mrows = $wpdb->get_results(
+					$wpdb->prepare(
+						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE meta_id BETWEEN %d AND %d AND post_id BETWEEN %d AND %d AND meta_key IN ({$key_ph})",
+						array_merge( array( '_date_paid', '^[0-9]+$', $start, '_paid_date', $local_from, $pm, $lo, $hi, $min_i, $max_i ), $keys )
+					),
+					ARRAY_A
+				);
+			} else {
+				++self::$legacy_paths['fallback'];
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
+				$mrows = $wpdb->get_results(
+					$wpdb->prepare(
+						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE post_id IN ({$id_ph}) AND meta_key IN ({$key_ph})",
+						array_merge( array( '_date_paid', '^[0-9]+$', $start, '_paid_date', $local_from, $pm ), $ids, $keys )
+					),
+					ARRAY_A
+				);
+			}
 			// phpcs:enable
 			if ( '' !== $wpdb->last_error || ! is_array( $mrows ) ) {
 				return false;
 			}
+			$bmeta = array();
+			$first = array();
+			$hit   = array();
 			foreach ( $mrows as $mr ) {
 				$pid = (int) $mr['post_id'];
+				if ( ! isset( $in_batch[ $pid ] ) ) {
+					continue;
+				}
 				$key = (string) $mr['meta_key'];
-				if ( ! isset( $meta[ $pid ] ) || ! array_key_exists( $key, $meta[ $pid ] ) ) {
-					$meta[ $pid ][ $key ] = null === $mr['meta_value'] ? null : (string) $mr['meta_value'];
+				$mid = (int) $mr['meta_id'];
+				if ( null !== $mr['h'] && 1 === (int) $mr['h'] ) {
+					$hit[ $pid ] = true;
+				}
+				if ( ! isset( $first[ $pid ][ $key ] ) || $mid < $first[ $pid ][ $key ] ) {
+					$first[ $pid ][ $key ] = $mid;
+					$bmeta[ $pid ][ $key ] = null === $mr['meta_value'] ? null : (string) $mr['meta_value'];
 				}
 			}
-		}
+			unset( $mrows, $first, $in_batch );
+			foreach ( $cands as $c ) {
+				$cid = (int) $c['id'];
+				if ( ( null !== $c['r'] && 1 === (int) $c['r'] ) || isset( $hit[ $cid ] ) ) {
+					$rows[] = $c;
+					if ( isset( $bmeta[ $cid ] ) ) {
+						$meta[ $cid ] = $bmeta[ $cid ];
+					}
+					if ( count( $rows ) >= self::CHUNK ) {
+						break 2;
+					}
+				}
+			}
+			$cursor = (int) end( $cands )['id'];
+			$more   = count( $cands ) >= self::CHUNK;
+			unset( $cands, $bmeta, $hit );
+		} while ( $more );
 		$out = array();
 		foreach ( $rows as $r ) {
 			$id      = (int) $r['id'];
