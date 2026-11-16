@@ -16,6 +16,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-test-record.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 pass=0
 fail=0
+OUT_SEQ=0
 
 # A faithful package at HEAD: tracked src/ and top-level files, vendor-src mapped into vendor/.
 stage_good() {
@@ -80,7 +81,16 @@ forced_passed() {
 # Mutations: bad-sha, stale-version, no-storage, failed-storage, no-perf, perf-unbound, perf-over,
 # perf-short, state-not-run, log-leak, log-path.
 check() {
-	local label=$1 want=$2 dir=$3 mut=${4:-} zip="$WORK/candidate-test.zip" out="$WORK/out-$RANDOM.md" sha version state combo suite
+	# Each check gets its own record name from a counter. It was out-$RANDOM.md: refused records
+	# (exit 3) are still written, so a repeated $RANDOM made record.sh refuse an existing file
+	# (exit 4) instead (seen once in CI "integration (min)" on ab5ad0a).
+	OUT_SEQ=$((OUT_SEQ + 1))
+	local label=$1 want=$2 dir=$3 mut=${4:-} zip="$WORK/candidate-test.zip" out="$WORK/out-$OUT_SEQ.md" sha version state combo suite
+	if [ -e "$out" ]; then
+		echo "FAIL  $label (test harness: $out already exists)"
+		fail=$((fail + 1))
+		return
+	fi
 	rm -f "$zip" "$WORK"/*.log
 	(cd "$dir" && zip -qr "$zip" .)
 	sha=$(shasum -a 256 "$zip" | awk '{print $1}')
