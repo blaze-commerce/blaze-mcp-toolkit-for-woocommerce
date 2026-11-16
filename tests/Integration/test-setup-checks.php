@@ -139,32 +139,64 @@ if ( 'recommended' === $state && ! $denylist ) {
 	blzmcp_it_assert( is_array( $fixture ) && isset( $fixture['_inputs'], $fixture['rows'] ), 'recommended: 1.0 fixture loads' );
 	$restore = blzmcp_fx_set_inputs();
 	try {
-		$now     = json_decode( (string) wp_json_encode( blzmcp_fx_inputs() ), true );
-		$changed = array();
-		// Abilities this plugin added after 1.0. The 1.0 fixture stays unchanged; the binding expects
-		// exactly the 1.0 inventory plus these names, so any other drift still fails as before.
-		$added_since_1_0 = array( 'blaze-mcp-toolkit/payment-health' );
-		$bound_inputs    = (array) ( $fixture['_inputs'] ?? array() );
-		// The pinned current environment moved from WooCommerce 11.2.2 (the capture) to 11.3.0 (wave 6),
-		// which also registers woocommerce/order-notes-query. Only that exact move is allowed; the
-		// rows are still compared with the 1.0 fixture (checked identical on 11.3.0).
-		$wc_pinned_now    = '11.3.0';
-		$wc_added_in_11_3 = array( 'woocommerce/order-notes-query' );
-		if ( '11.2.2' === ( $bound_inputs['plugins']['woocommerce/woocommerce.php'] ?? null ) ) {
-			$bound_inputs['plugins']['woocommerce/woocommerce.php'] = $wc_pinned_now;
-			$added_since_1_0 = array_merge( $added_since_1_0, $wc_added_in_11_3 );
-		}
-		if ( isset( $bound_inputs['abilities'] ) && is_array( $bound_inputs['abilities'] ) ) {
-			$bound_abilities = array_values( array_unique( array_merge( $bound_inputs['abilities'], $added_since_1_0 ) ) );
-			sort( $bound_abilities );
-			$bound_inputs['abilities'] = $bound_abilities;
-			blzmcp_it_assert( array() === array_diff( $added_since_1_0, (array) ( $now['abilities'] ?? array() ) ), 'recommended: abilities added since 1.0 are registered (' . implode( ', ', $added_since_1_0 ) . ')' );
-		}
-		foreach ( $bound_inputs as $key => $value ) {
-			if ( ( $now[ $key ] ?? null ) !== $value ) {
-				$changed[] = $key;
+		$now = json_decode( (string) wp_json_encode( blzmcp_fx_inputs() ), true );
+		// The binding: the 1.0 fixture's inputs plus what is allowed to have moved since, for the
+		// WooCommerce version actually running. The 1.0 fixture file itself stays unchanged.
+		// - Every environment: the toolkit's own abilities added after 1.0 (blaze-mcp-toolkit/payment-health).
+		// - Only when the fixture says WooCommerce 11.2.2 (the capture) AND the store runs exactly 11.3.0
+		// (the pinned current environment since wave 6): the version moves to 11.3.0 and WooCommerce's own
+		// new woocommerce/order-notes-query ability is expected. Rows were checked identical on 11.3.0.
+		// Any other drift (including the minimum environment, WooCommerce 10.9) still counts as changed.
+		$bind = static function ( array $inputs, ?string $live_wc ): array {
+			$required = array( 'blaze-mcp-toolkit/payment-health' );
+			if ( '11.2.2' === ( $inputs['plugins']['woocommerce/woocommerce.php'] ?? null ) && '11.3.0' === $live_wc ) {
+				$inputs['plugins']['woocommerce/woocommerce.php'] = '11.3.0';
+				$required[] = 'woocommerce/order-notes-query';
 			}
+			if ( isset( $inputs['abilities'] ) && is_array( $inputs['abilities'] ) ) {
+				$abilities = array_values( array_unique( array_merge( $inputs['abilities'], $required ) ) );
+				sort( $abilities );
+				$inputs['abilities'] = $abilities;
+			}
+			return array( $inputs, $required );
+		};
+		$changed_keys = static function ( array $bound, array $live ): array {
+			$out = array();
+			foreach ( $bound as $key => $value ) {
+				if ( ( $live[ $key ] ?? null ) !== $value ) {
+					$out[] = $key;
+				}
+			}
+			return $out;
+		};
+		$fixture_inputs = (array) ( $fixture['_inputs'] ?? array() );
+
+		// Both sides of the WooCommerce 11.3.0 boundary, independent of the running environment.
+		blzmcp_it_equals( array( 'blaze-mcp-toolkit/payment-health', 'woocommerce/order-notes-query' ), $bind( $fixture_inputs, '11.3.0' )[1], 'binding: on WooCommerce 11.3.0 exactly one core ability is added (woocommerce/order-notes-query)' );
+		blzmcp_it_equals( '11.3.0', $bind( $fixture_inputs, '11.3.0' )[0]['plugins']['woocommerce/woocommerce.php'] ?? null, 'binding: on WooCommerce 11.3.0 the bound WooCommerce version is 11.3.0' );
+		foreach ( array( '10.9.0', '11.2.2', '11.3.1', '11.4.0', null ) as $other ) {
+			list( $o_inputs, $o_required ) = $bind( $fixture_inputs, $other );
+			blzmcp_it_equals( array( 'blaze-mcp-toolkit/payment-health' ), $o_required, 'binding: on WooCommerce ' . ( $other ?? 'none' ) . ' no core ability is expected, only the toolkit\'s own' );
+			blzmcp_it_equals( '11.2.2', $o_inputs['plugins']['woocommerce/woocommerce.php'] ?? null, 'binding: on WooCommerce ' . ( $other ?? 'none' ) . ' the bound version stays the captured 11.2.2' );
 		}
+		$fx_11_3 = $fixture_inputs;
+		$fx_11_3['plugins']['woocommerce/woocommerce.php'] = '11.3.0';
+		blzmcp_it_equals( array( 'blaze-mcp-toolkit/payment-health' ), $bind( $fx_11_3, '11.3.0' )[1], 'binding: the allowance applies only to a fixture captured on 11.2.2' );
+		// Strictness on 11.3.0: a store missing the core ability, or with one more unknown ability, is changed.
+		list( $b11 ) = $bind( $fixture_inputs, '11.3.0' );
+		$sim_live    = $b11;
+		$sim_live['abilities'] = array_values( array_diff( $b11['abilities'], array( 'woocommerce/order-notes-query' ) ) );
+		blzmcp_it_equals( array( 'abilities' ), $changed_keys( $b11, $sim_live ), 'binding: on 11.3.0 a missing woocommerce/order-notes-query counts as changed' );
+		$sim_live['abilities'] = array_merge( $b11['abilities'], array( 'woocommerce/some-other-new-ability' ) );
+		sort( $sim_live['abilities'] );
+		blzmcp_it_equals( array( 'abilities' ), $changed_keys( $b11, $sim_live ), 'binding: on 11.3.0 any other extra ability still counts as changed' );
+		blzmcp_it_equals( array(), $changed_keys( $b11, $b11 ), 'binding: the exact 11.3.0 inputs count as unchanged' );
+
+		// The running environment.
+		$live_wc                         = isset( $now['plugins']['woocommerce/woocommerce.php'] ) ? (string) $now['plugins']['woocommerce/woocommerce.php'] : null;
+		list( $bound_inputs, $required ) = $bind( $fixture_inputs, $live_wc );
+		blzmcp_it_assert( array() === array_diff( $required, (array) ( $now['abilities'] ?? array() ) ), 'recommended: abilities added since 1.0 are registered on WooCommerce ' . ( $live_wc ?? '?' ) . ' (' . implode( ', ', $required ) . ')' );
+		$changed = $changed_keys( $bound_inputs, $now );
 		if ( $changed && 'min' === getenv( 'BLZMCP_FIXTURE_ENV' ) ) {
 			// CI minimum-versions job only: the fixture is bound to the pinned current environment.
 			echo 'NOTE  1.0 fixture comparison not applicable in the minimum-versions environment (fixture captured on WooCommerce ' . ( $fixture['_inputs']['plugins']['woocommerce/woocommerce.php'] ?? '?' ) . ")\n";
