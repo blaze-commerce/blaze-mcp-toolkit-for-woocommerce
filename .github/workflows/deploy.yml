@@ -17,7 +17,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to (re)check, e.g. v1.2.1
+        description: >-
+          Tag to check out, e.g. v1.2.1, or a pre-release tag on the same commit (v1.2.1-rc1) to
+          rehearse before the release tag exists; a pre-release tag is always a dry run
         required: true
       sha256:
         description: Approved candidate sha256 (used instead of the tag annotation)
@@ -61,6 +63,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
+          VERSION="${VERSION%%-*}" # v1.2.1-rc1 rehearses the v1.2.1 release
+          if [ "$TAG" != "v$VERSION" ] && [ "$DRY_RUN" != "true" ]; then
+            echo "::error::$TAG is a pre-release tag; it can only be a dry run"; exit 1
+          fi
           COMMIT="$(git rev-parse HEAD)"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             WANT_SHA="${{ inputs.sha256 }}"
@@ -81,13 +87,14 @@ jobs:
         run: |
           set -euo pipefail
           ASSET="$SLUG-$VERSION.zip"
-          RELEASES="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$TAG\")]")"
-          [ "$(echo "$RELEASES" | jq length)" = 1 ] || { echo "::error::Need exactly one GitHub release for $TAG"; exit 1; }
+          REL_TAG="v$VERSION"
+          RELEASES="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$REL_TAG\")]")"
+          [ "$(echo "$RELEASES" | jq length)" = 1 ] || { echo "::error::Need exactly one GitHub release for $REL_TAG"; exit 1; }
           TARGET="$(echo "$RELEASES" | jq -r '.[0].target_commitish')"
-          [ "$TARGET" = "$COMMIT" ] || { echo "::error::Release $TAG targets $TARGET, not $COMMIT"; exit 1; }
-          [ "$(echo "$RELEASES" | jq '[.[0].assets[] | select(.name | endswith(".zip"))] | length')" = 1 ] || { echo "::error::Release $TAG must hold exactly one zip"; exit 1; }
+          [ "$TARGET" = "$COMMIT" ] || { echo "::error::Release $REL_TAG targets $TARGET, not $COMMIT"; exit 1; }
+          [ "$(echo "$RELEASES" | jq '[.[0].assets[] | select(.name | endswith(".zip"))] | length')" = 1 ] || { echo "::error::Release $REL_TAG must hold exactly one zip"; exit 1; }
           ASSET_ID="$(echo "$RELEASES" | jq -r --arg n "$ASSET" '.[0].assets[] | select(.name == $n) | .id')"
-          [ -n "$ASSET_ID" ] || { echo "::error::Release $TAG has no $ASSET"; exit 1; }
+          [ -n "$ASSET_ID" ] || { echo "::error::Release $REL_TAG has no $ASSET"; exit 1; }
           echo "RELEASE_ID=$(echo "$RELEASES" | jq -r '.[0].id')" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/promote"
           gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" > "$RUNNER_TEMP/promote/$ASSET"
