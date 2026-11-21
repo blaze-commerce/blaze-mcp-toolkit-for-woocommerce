@@ -1,13 +1,23 @@
 name: Deploy to WordPress.org
 
 # Build once, promote: this workflow never builds the plugin. It ships the candidate zip that was
-# built by scripts/release-candidate.sh, tested, signed and staged as the asset of the draft GitHub
-# release for the tag. The tag must be annotated with the approved digest and source commit:
+# built by scripts/release-candidate.sh, tested, signed and staged as the only asset of the draft
+# GitHub release for the version. Every check below fails closed; there is no rebuild fallback.
+#
+# Only a push of an annotated final release tag (vX.Y.Z) publishes. Its message must hold exactly
+# one line of each:
 #
 #   candidate-sha256: <64 hex>
-#   source-sha: <40 hex>
+#   source-sha: <40 hex, the tagged commit>
 #
-# Every check below fails closed; there is no rebuild fallback.
+# Pre-release tag pushes (v1.2.1-rc1) never deploy. A manual dispatch is always a dry run (a
+# request for dry_run=false is refused): it rehearses the draft vX.Y.Z from a final or pre-release
+# tag on the same commit, with the approved sha256 as an input, through the 10up copy and
+# `svn status` without a commit, and never publishes the GitHub release.
+#
+# Request values (tag, sha256, dry_run) reach the shell only as environment variables and are
+# validated as data (scripts/check-release-artifact.py); none is interpolated into a script.
+# The 10up action is pinned to a reviewed commit (2.3.0).
 
 on:
   push:
@@ -19,13 +29,13 @@ on:
       tag:
         description: >-
           Tag to check out, e.g. v1.2.1, or a pre-release tag on the same commit (v1.2.1-rc1) to
-          rehearse before the release tag exists; a pre-release tag is always a dry run
+          rehearse before the release tag exists
         required: true
       sha256:
-        description: Approved candidate sha256 (used instead of the tag annotation)
+        description: Approved candidate sha256 (the staged asset must hash to it)
         required: true
       dry_run:
-        description: Check everything and run the SVN deploy as a dry run (no commit)
+        description: A dispatch is always a dry run; false is refused (only a tag push publishes)
         type: boolean
         default: true
 
@@ -39,18 +49,36 @@ concurrency:
 env:
   SLUG: blaze-mcp-toolkit-for-woocommerce
   TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
   GH_TOKEN: ${{ github.token }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Check the request before checkout
+        env:
+          REQ_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          n='(0|[1-9][0-9]*)'
+          final="^v$n\.$n\.$n\$"
+          rc="^v$n\.$n\.$n-rc[1-9][0-9]*\$"
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              [[ "$TAG" =~ $final ]] || { echo "::error::A push deploys only a final release tag (vX.Y.Z)"; exit 1; } ;;
+            workflow_dispatch)
+              [[ "$TAG" =~ $final || "$TAG" =~ $rc ]] || { echo "::error::Not a release or pre-release tag"; exit 1; }
+              [ "$REQ_DRY_RUN" = true ] || { echo "::error::A dispatch never publishes; dry_run=false is refused"; exit 1; } ;;
+            *) echo "::error::Unsupported event"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
 
-      # Source checks on the tagged commit. These do not touch the shipped artifact.
+      # Source checks on the tagged commit. Composer works in the checkout only, never in the
+      # extracted candidate (BUILD_DIR is under RUNNER_TEMP), and runs before the candidate exists.
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -60,84 +88,95 @@ jobs:
       - run: composer test
 
       - name: Read the approved digest and source commit
+        env:
+          REQ_SHA256: ${{ inputs.sha256 }}
+          REQ_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          VERSION="${TAG#v}"
-          VERSION="${VERSION%%-*}" # v1.2.1-rc1 rehearses the v1.2.1 release
-          if [ "$TAG" != "v$VERSION" ] && [ "$DRY_RUN" != "true" ]; then
-            echo "::error::$TAG is a pre-release tag; it can only be a dry run"; exit 1
-          fi
+          CHECK=(python3 "$GITHUB_WORKSPACE/scripts/check-release-artifact.py")
           COMMIT="$(git rev-parse HEAD)"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            WANT_SHA="${{ inputs.sha256 }}"
-            WANT_SOURCE="$COMMIT"
+          WORK="$RUNNER_TEMP/request"
+          mkdir -p "$WORK"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            "${CHECK[@]}" tag-info --event workflow_dispatch --tag "$TAG" --sha256 "$REQ_SHA256" --dry-run-input "$REQ_DRY_RUN" >"$WORK/info"
           else
-            REF_JSON="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")"
-            [ "$(echo "$REF_JSON" | jq -r .object.type)" = "tag" ] || { echo "::error::$TAG is a lightweight tag; it must be annotated with candidate-sha256 and source-sha"; exit 1; }
-            MESSAGE="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(echo "$REF_JSON" | jq -r .object.sha)" --jq .message)"
-            WANT_SHA="$(echo "$MESSAGE" | sed -n 's/^candidate-sha256:[[:space:]]*\([0-9a-f]\{64\}\)[[:space:]]*$/\1/p')"
-            WANT_SOURCE="$(echo "$MESSAGE" | sed -n 's/^source-sha:[[:space:]]*\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p')"
+            "${CHECK[@]}" tag-info --event "$GITHUB_EVENT_NAME" --tag "$TAG" >"$WORK/info"
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >"$WORK/ref.json"
+            TAG_OBJECT="$(jq -r '.object.sha' "$WORK/ref.json")"
+            [[ "$TAG_OBJECT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$TAG has no tag object id"; exit 1; }
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT" >"$WORK/tag.json"
+            "${CHECK[@]}" tag-annotation --tag "$TAG" --commit "$COMMIT" --ref-json "$WORK/ref.json" --tag-json "$WORK/tag.json" >>"$WORK/info"
           fi
-          [[ "$WANT_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::No candidate-sha256 for $TAG"; exit 1; }
-          [ "$WANT_SOURCE" = "$COMMIT" ] || { echo "::error::$TAG is at $COMMIT, approved source-sha is '${WANT_SOURCE}'"; exit 1; }
-          { echo "VERSION=$VERSION"; echo "WANT_SHA=$WANT_SHA"; echo "COMMIT=$COMMIT"; } >> "$GITHUB_ENV"
-          echo "Approved: $SLUG $VERSION, sha256 $WANT_SHA, source $COMMIT"
+          WANT_SHA="$(sed -n 's/^WANT_SHA=//p' "$WORK/info")"
+          VERSION="$(sed -n 's/^VERSION=//p' "$WORK/info")"
+          DRY_RUN="$(sed -n 's/^DRY_RUN=//p' "$WORK/info")"
+          [[ "$WANT_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::No approved sha256"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::No version"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = push ]; then [ "$DRY_RUN" = false ]; else [ "$DRY_RUN" = true ]; fi
+          { echo "VERSION=$VERSION"; echo "WANT_SHA=$WANT_SHA"; echo "COMMIT=$COMMIT"; echo "DRY_RUN=$DRY_RUN"; } >>"$GITHUB_ENV"
+          echo "Approved: $SLUG $VERSION, sha256 $WANT_SHA, source $COMMIT, dry run $DRY_RUN"
 
-      - name: Download the staged candidate and check its digest
+      - name: Download the staged candidate and check it against the tagged source
         run: |
           set -euo pipefail
+          CHECK=(python3 "$GITHUB_WORKSPACE/scripts/check-release-artifact.py")
           ASSET="$SLUG-$VERSION.zip"
-          REL_TAG="v$VERSION"
-          RELEASES="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$REL_TAG\")]")"
-          [ "$(echo "$RELEASES" | jq length)" = 1 ] || { echo "::error::Need exactly one GitHub release for $REL_TAG"; exit 1; }
-          TARGET="$(echo "$RELEASES" | jq -r '.[0].target_commitish')"
-          [ "$TARGET" = "$COMMIT" ] || { echo "::error::Release $REL_TAG targets $TARGET, not $COMMIT"; exit 1; }
-          [ "$(echo "$RELEASES" | jq '[.[0].assets[] | select(.name | endswith(".zip"))] | length')" = 1 ] || { echo "::error::Release $REL_TAG must hold exactly one zip"; exit 1; }
-          ASSET_ID="$(echo "$RELEASES" | jq -r --arg n "$ASSET" '.[0].assets[] | select(.name == $n) | .id')"
-          [ -n "$ASSET_ID" ] || { echo "::error::Release $REL_TAG has no $ASSET"; exit 1; }
-          echo "RELEASE_ID=$(echo "$RELEASES" | jq -r '.[0].id')" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/promote"
-          gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" > "$RUNNER_TEMP/promote/$ASSET"
-          GOT="$(sha256sum "$RUNNER_TEMP/promote/$ASSET" | cut -d' ' -f1)"
-          [ "$GOT" = "$WANT_SHA" ] || { echo "::error::$ASSET sha256 $GOT, approved $WANT_SHA"; exit 1; }
-          echo "$ASSET sha256 $GOT matches the approved digest"
-          unzip -q "$RUNNER_TEMP/promote/$ASSET" -d "$RUNNER_TEMP/promote/unzipped"
-          BUILD="$RUNNER_TEMP/promote/unzipped/$SLUG"
-          [ -f "$BUILD/$SLUG.php" ] || { echo "::error::$ASSET has no $SLUG/$SLUG.php"; exit 1; }
-          echo "BUILD_DIR=$BUILD" >> "$GITHUB_ENV"
+          P="$RUNNER_TEMP/promote"
+          mkdir -p "$P"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" >"$P/releases.json"
+          # Exactly one release for vVERSION: a draft at this commit holding exactly one asset, the
+          # expected zip, fully uploaded (and with the approved digest when the API reports one).
+          "${CHECK[@]}" release-state --releases-json "$P/releases.json" --version "$VERSION" --source-sha "$COMMIT" --sha256 "$WANT_SHA" --require-staged >"$P/state"
+          RELEASE_ID="$(sed -n 's/^RELEASE_ID=//p' "$P/state")"
+          ASSET_ID="$(sed -n 's/^ASSET_ID=//p' "$P/state")"
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ && "$ASSET_ID" =~ ^[0-9]+$ ]] || { echo "::error::No staged draft asset"; exit 1; }
+          echo "RELEASE_ID=$RELEASE_ID" >>"$GITHUB_ENV"
+          gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" >"$P/$ASSET"
+          # Archive entries are inspected before extraction; the package must match the tagged
+          # source inventory byte for byte (Composer's generated vendor files are the bytes the
+          # digest names); header, BLZMCP_VERSION and Stable tag must equal VERSION.
+          "${CHECK[@]}" check "$P/$ASSET" --version "$VERSION" --repo "$GITHUB_WORKSPACE" --source-sha "$COMMIT" \
+            --sha256 "$WANT_SHA" --manifest-out "$P/manifest.sha256" --extract-to "$P/build" | tee "$P/check"
+          BUILD="$P/build"
+          grep -qE "^Stable tag: ${VERSION}$" "$BUILD/readme.txt"
+          grep -qE "^ \* Version:[[:space:]]+${VERSION}$" "$BUILD/$SLUG.php"
+          grep -qF "define( 'BLZMCP_VERSION', '${VERSION}' );" "$BUILD/$SLUG.php"
+          echo "BUILD_DIR=$BUILD" >>"$GITHUB_ENV"
+          echo "MANIFEST=$P/manifest.sha256" >>"$GITHUB_ENV"
+          echo "Candidate manifest ($ASSET, sha256 $WANT_SHA):"
+          cat "$P/manifest.sha256"
 
-      - name: Check the candidate against the tagged source
-        run: |
-          set -euo pipefail
-          cd "$BUILD_DIR"
-          grep -qE "^Stable tag: ${VERSION}$" readme.txt
-          grep -qE "^ \* Version:[[:space:]]+${VERSION}$" "$SLUG.php"
-          # Every non-vendor file shipped must be the tagged commit's file, byte for byte.
-          # vendor/ is the reviewed Composer output and is covered by the digest.
-          BAD=0
-          while IFS= read -r -d '' f; do
-            f="${f#./}"
-            case "$f" in vendor/*) continue ;; esac
-            if ! git -C "$GITHUB_WORKSPACE" cat-file -e "HEAD:$f" 2>/dev/null; then
-              echo "::error::$f is in the candidate but not in $TAG"; BAD=1
-            elif ! cmp -s "$f" <(git -C "$GITHUB_WORKSPACE" show "HEAD:$f"); then
-              echo "::error::$f differs from $TAG"; BAD=1
-            fi
-          done < <(find . -type f -print0)
-          [ "$BAD" = 0 ]
-          echo "$(find . -type f | wc -l) files; non-vendor files match $TAG"
+      - name: Check the extracted candidate is unchanged
+        run: python3 "$GITHUB_WORKSPACE/scripts/check-release-artifact.py" manifest-dir "$BUILD_DIR" --expect "$MANIFEST"
 
       - name: WordPress.org plugin deploy (the candidate, unchanged)
-        uses: 10up/action-wordpress-plugin-deploy@stable
+        uses: 10up/action-wordpress-plugin-deploy@54bd289b8525fd23a5c365ec369185f2966529c2 # 2.3.0
         with:
-          dry-run: ${{ env.DRY_RUN }}
+          dry-run: ${{ github.event_name != 'push' || env.DRY_RUN != 'false' }}
         env:
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
           SLUG: ${{ env.SLUG }}
+          VERSION: ${{ env.VERSION }}
           ASSETS_DIR: .wordpress-org
           BUILD_DIR: ${{ env.BUILD_DIR }}
 
+      # The SVN working copy the action staged must hold exactly the candidate's files, Composer
+      # output included, in trunk and in tags/VERSION. A copy that never ran (for example "already
+      # published") fails here, so a rehearsal cannot pass without the copy and svn status.
+      - name: Check the staged SVN files are the candidate's
+        run: |
+          set -euo pipefail
+          CHECK=(python3 "$GITHUB_WORKSPACE/scripts/check-release-artifact.py")
+          SVN_DIR="$HOME/svn-$SLUG"
+          [ -d "$SVN_DIR/trunk" ] || { echo "::error::No SVN working copy at $SVN_DIR; the deploy did not copy the candidate"; exit 1; }
+          "${CHECK[@]}" manifest-dir "$BUILD_DIR" --expect "$MANIFEST"
+          "${CHECK[@]}" manifest-dir "$SVN_DIR/trunk" --expect "$MANIFEST" --manifest-out "$RUNNER_TEMP/promote/svn-trunk.sha256"
+          "${CHECK[@]}" manifest-dir "$SVN_DIR/tags/$VERSION" --expect "$MANIFEST" --manifest-out "$RUNNER_TEMP/promote/svn-tag.sha256"
+          echo "SVN trunk and tags/$VERSION match the candidate manifest:"
+          cat "$RUNNER_TEMP/promote/svn-trunk.sha256"
+          svn status "$SVN_DIR" | sed 's/^/svn status: /'
+
       - name: Publish the GitHub release
-        if: env.DRY_RUN != 'true'
+        if: github.event_name == 'push' && env.DRY_RUN == 'false'
         run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true >/dev/null
