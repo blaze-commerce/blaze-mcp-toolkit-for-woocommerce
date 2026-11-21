@@ -215,6 +215,46 @@ blzmcp_it_equals( 'amber', $pp_ref['status'], 'PayPal card with a recorded captu
 $st_row = PaymentMethods::inventory( array() )['methods']['stripe'];
 blzmcp_it_equals( true, $st_row['reference_implies_charge'], 'registered Stripe keeps the reference rule' );
 
+// 1.2.1 item 2: outside-checkout IDs join the inventory as a separate source (C3).
+$avail       = 0;
+$count_avail = static function ( $gw ) use ( &$avail ) {
+	++$avail;
+	return $gw;
+};
+add_filter( 'woocommerce_available_payment_gateways', $count_avail );
+$gw_before = count( $registry->payment_gateways );
+$o         = PaymentMethods::inventory( array( 'stripe', 'cod' ), array( 'stripe', 'cod', 'bacs', 'oldgateway', 'stripe_sepa', 'blzpm_out', '<bad>', '', 'cod' ) );
+$om        = $o['methods'];
+remove_filter( 'woocommerce_available_payment_gateways', $count_avail );
+blzmcp_it_equals( array( 0, $gw_before ), array( $avail, count( $registry->payment_gateways ) ), 'outside IDs: no available-gateways call and no gateway constructed' );
+blzmcp_it_assert( isset( $om['stripe'], $om['cod'], $om['bacs'], $om['oldgateway'], $om['stripe_sepa'], $om['blzpm_out'] ) && ! isset( $om['<bad>'] ) && ! isset( $om[''] ), 'outside IDs: one row per safe ID, invalid and empty IDs never rows' );
+$keys   = array_map( 'strval', array_keys( $om ) );
+$sorted = $keys;
+sort( $sorted, SORT_STRING );
+blzmcp_it_equals( $sorted, $keys, 'rows sorted stably by ID' );
+$assess = array_map( static fn( $r ) => $r['assessment'], $om );
+blzmcp_it_equals( array( 'checkout_health', 'checkout_health', 'checkout_health' ), array( $assess['stripe'], $assess['cod'], $assess['bacs'] ), 'mixed (checkout plus outside) and enabled registered methods keep the checkout_health path' );
+blzmcp_it_equals( array( 'inventory_only', 'inventory_only', 'inventory_only' ), array( $assess['oldgateway'], $assess['stripe_sepa'], $assess['blzpm_out'] ), 'outside-only methods (absent, registered-disabled, unknown) are inventory only' );
+blzmcp_it_equals( array( false, null, null ), array( $om['oldgateway']['registered'], $om['oldgateway']['enabled'], $om['oldgateway']['test_mode'] ), 'inventory only, known absent: registered false, retained settings not read as enabled or mode' );
+blzmcp_it_equals( array( true, false ), array( $om['stripe_sepa']['registered'], $om['stripe_sepa']['enabled'] ), 'inventory only, registered and switched off: tri-state facts kept' );
+blzmcp_it_equals( 'Payment method (blzpm_out)', $om['blzpm_out']['title'], 'inventory only, unknown ID: the fixed label' );
+$no_assess = static fn( array $r ): array => array_diff_key( $r, array( 'assessment' => 1 ) );
+blzmcp_it_equals( $no_assess( PaymentMethods::inventory( array( 'stripe' ) )['methods']['stripe'] ), $no_assess( $om['stripe'] ), 'an outside observation does not change a checkout method\'s facts' );
+blzmcp_it_equals( 'checkout_health', PaymentMethods::inventory( array( 'blzpm_out' ), array( 'blzpm_out' ) )['methods']['blzpm_out']['assessment'], 'presence in both sources is one mixed checkout_health row' );
+$no_outside = PaymentMethods::inventory( array( 'stripe', 'cod' ) );
+blzmcp_it_equals( array( 'checkout_health' ), array_values( array_unique( array_column( $no_outside['methods'], 'assessment' ) ) ), 'without outside IDs every row keeps the checkout_health path (1.2 behaviour)' );
+// A readable-but-broken registry (not an array): registration unknown, so nothing is a known
+// enabled registered gateway and an outside-only bacs is inventory only.
+$saved_list                 = $registry->payment_gateways;
+$registry->payment_gateways = 'unreadable';
+$ur                         = PaymentMethods::inventory( array(), array( 'bacs' ) );
+$registry->payment_gateways = $saved_list;
+blzmcp_it_equals( array( false, null, true, 'inventory_only' ), array( $ur['registry_known'], $ur['methods']['bacs']['registered'], $ur['methods']['bacs']['enabled'], $ur['methods']['bacs']['assessment'] ), 'unreadable registry: registered null, enabled from the setting, outside-only bacs inventory only' );
+$registry->payment_gateways = array();
+$be                         = PaymentMethods::inventory( array(), array( 'bacs' ) );
+$registry->payment_gateways = $saved_list;
+blzmcp_it_equals( array( true, false, null, 'inventory_only' ), array( $be['registry_known'], $be['methods']['bacs']['registered'], $be['methods']['bacs']['enabled'], $be['methods']['bacs']['assessment'] ), 'built-empty registry: registered false (known absent), enabled null, inventory only' );
+
 // Mode separation and unknown format.
 update_option( 'woocommerce_stripe_settings', array( 'enabled' => 'yes' ) );
 blzmcp_it_equals( false, PaymentMethods::inventory( array() )['methods']['stripe']['test_mode'], 'missing testmode key is live' );

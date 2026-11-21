@@ -851,6 +851,50 @@ final class PaymentRulesTest extends TestCase {
 		$this->assertSame( $want, PaymentRules::rollup( $checks ) );
 	}
 
+	/**
+	 * 1.2.1 (C7): an inventory-only check is unassessed, casts no vote and supplies no coverage.
+	 */
+	public function test_unassessed_check_casts_no_vote(): void {
+		foreach ( array( 'outside_checkout_only' => true, 'outside_checkout_observed_partial' => false ) as $reason => $complete ) {
+			$c = PaymentRules::unassessed_check( $complete );
+			$this->assertSame(
+				array(
+					'status'     => 'unknown',
+					'checked'    => false,
+					'applicable' => false,
+					'coverage'   => 'not_applicable',
+					'reason'     => $reason,
+				),
+				$c
+			);
+			$this->assertContains( $reason, PaymentRules::REASONS );
+			$green = array(
+				'status'     => 'green',
+				'checked'    => true,
+				'applicable' => true,
+				'coverage'   => 'complete',
+			);
+			$this->assertSame( 'green', PaymentRules::rollup( array( $green, $c, $c ) ), 'no vote: a healthy sibling stays green' );
+			$this->assertSame( 'unknown', PaymentRules::rollup( array( $c ) ), 'alone: no applicable evidence is unknown, never green' );
+			$this->assertSame( 'complete', PaymentRules::coverage( array( $green, $c ) ), 'not applicable: no coverage of its own (the ability adds the unassessed gap)' );
+			$this->assertSame( 'unavailable', PaymentRules::coverage( array( $c ) ) );
+		}
+		foreach ( array( 'order_scan_budget', 'outside_checkout_method_cap' ) as $code ) {
+			$this->assertContains( $code, PaymentRules::REASONS );
+		}
+	}
+
+	/**
+	 * 1.2.1: the inventory rules raise no disabled or registration alert without eligible
+	 * history. The ability never calls them for inventory-only rows (integration probe); this
+	 * pins the rule's own no-history behaviour.
+	 */
+	public function test_no_history_inventory_rules_raise_no_disabled_or_registration_alert(): void {
+		foreach ( array( array( 'registered' => false, 'enabled' => null ), array( 'registered' => true, 'enabled' => false ), array( 'registered' => null, 'enabled' => true ) ) as $row ) {
+			$this->assertSame( array(), PaymentRules::inventory_findings( $row + array( 'test_mode' => null ), false, true, 'green' ) );
+		}
+	}
+
 	public function test_inventory_findings(): void {
 		$disabled = array( 'registered' => true, 'enabled' => false, 'test_mode' => null, 'replacements' => array( 'stripe_sepa_debit' ) );
 		$this->assertSame( 'method_disabled_with_history', PaymentRules::inventory_findings( $disabled, true, true, 'green' )[0]['code'] );

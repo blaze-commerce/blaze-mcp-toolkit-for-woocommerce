@@ -139,25 +139,46 @@ final class PaymentMethods {
 	private const MAX_TOKENS = 20;
 
 	/**
-	 * Inventory: every enabled registered method plus every valid method ID with eligible order
-	 * activity. One row per method ID.
+	 * Inventory: every enabled registered method, every valid method ID with eligible checkout
+	 * activity and (1.2.1, C3) every valid method ID observed only outside verified checkout
+	 * activity. One row per method ID, sorted by ID. Presence in the outside list is never
+	 * evidence of checkout activity: a method that is in it, has no checkout activity and is not
+	 * an enabled registered gateway gets assessment inventory_only; every other row keeps the
+	 * existing checkout_health path.
 	 *
-	 * @param string[] $activity_ids Safe method IDs with activity in the 28-day horizon (from PaymentOrders).
+	 * @param string[] $activity_ids Safe method IDs with checkout activity in the 28-day horizon (from PaymentOrders).
+	 * @param string[] $outside_ids  Safe method IDs observed outside verified checkout activity (PaymentOrders outside map).
 	 * @return array{registry_known:bool,methods:array<string,array<string,mixed>>,families:array<string,array<string,string[]>>}
 	 */
-	public static function inventory( array $activity_ids ): array {
-		$families = self::token_map();
-		$registry = self::registry();
-		$ids      = array();
+	public static function inventory( array $activity_ids, array $outside_ids = array() ): array {
+		$families   = self::token_map();
+		$registry   = self::registry();
+		$ids        = array();
+		$configured = array();
+		$checkout   = array();
 		foreach ( $registry['gateways'] as $id => $info ) {
 			if ( true === self::enabled( $id ) ) {
-				$ids[ $id ] = true;
+				$ids[ $id ]        = true;
+				$configured[ $id ] = true;
 			}
 		}
-		foreach ( $activity_ids as $id ) {
+		$valid = static function ( $id ): ?string {
 			$id = (string) $id;
-			if ( '' !== $id && PaymentRules::safe_method_id( $id ) === $id ) {
-				$ids[ $id ] = true;
+			return '' !== $id && PaymentRules::safe_method_id( $id ) === $id ? $id : null;
+		};
+		foreach ( $activity_ids as $id ) {
+			$id = $valid( $id );
+			if ( null !== $id ) {
+				$ids[ $id ]      = true;
+				$checkout[ $id ] = true;
+			}
+		}
+		$outside = array();
+		foreach ( $outside_ids as $id ) {
+			$id = $valid( $id );
+			if ( null !== $id ) {
+				$ids[ $id ]     = true;
+				$outside[ $id ] = true;
 			}
 		}
 		ksort( $ids, SORT_STRING );
@@ -196,6 +217,9 @@ final class PaymentMethods {
 				// running, so no webhook verdict is drawn from them (same rule as enabled/test mode).
 				'webhook_adapter'          => 'stripe' === $family && ! $absent ? 'stripe' : null,
 				'webhook_required'         => 'stripe' === $id ? false : null,
+				// C3: an outside-only fallback row is inventory only. A retained enabled setting
+				// without a known registered gateway does not lift the restriction.
+				'assessment'               => isset( $outside[ $id ] ) && ! isset( $checkout[ $id ] ) && ! isset( $configured[ $id ] ) ? 'inventory_only' : 'checkout_health',
 			);
 		}
 		return array(

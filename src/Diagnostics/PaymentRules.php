@@ -77,8 +77,13 @@ final class PaymentRules {
 		'read_failed',
 		'operational_data_missing',
 		'row_cap',
+		'order_scan_budget',
 		// Inventory (PaymentMethods), a note only.
 		'registry_not_loaded',
+		// Outside-checkout observations (1.2.1, C3/C4/C7): inventory-only disclosure and its limits.
+		'outside_checkout_only',
+		'outside_checkout_observed_partial',
+		'outside_checkout_method_cap',
 		// Diagnostics access and mapping (PaymentErrors).
 		'diagnostics_not_permitted',
 		'no_verified_mapping',
@@ -837,6 +842,25 @@ final class PaymentRules {
 			}
 		}
 		return 'unknown';
+	}
+
+	/**
+	 * The one check shape for a method assessed as inventory_only (C7): never evaluated, so not
+	 * applicable, not checked, unknown, with the disclosure reason. It casts no vote in rollup()
+	 * and no coverage in coverage(); no rule is called to produce it.
+	 *
+	 * @param bool $complete Whether the relevant order scan was complete (outside_checkout_only)
+	 *                       or not (outside_checkout_observed_partial).
+	 * @return array{status:string,checked:bool,applicable:bool,coverage:string,reason:string}
+	 */
+	public static function unassessed_check( bool $complete ): array {
+		return array(
+			'status'     => 'unknown',
+			'checked'    => false,
+			'applicable' => false,
+			'coverage'   => 'not_applicable',
+			'reason'     => $complete ? 'outside_checkout_only' : 'outside_checkout_observed_partial',
+		);
 	}
 
 	/**

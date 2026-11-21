@@ -14,6 +14,7 @@
 // phpcs:disable WordPress.Security.EscapeOutput, WordPress.NamingConventions.PrefixAllGlobals, WordPress.DB, WordPress.WP.AlternativeFunctions
 
 require_once __DIR__ . '/assert.php';
+require_once __DIR__ . '/payment-fixtures.php';
 
 // Analytics must be complete for the "allowed" rows, whatever earlier files left behind.
 blzmcp_it_sync_analytics();
@@ -198,6 +199,55 @@ try {
 				}
 				$matrix[ $tag ][ $name ][ $role ] = $want ? ( $denied_direct ? 'ERR' : 'allow' ) : ( $denied_direct ? 'deny' : 'LEAK' );
 			}
+		}
+	}
+
+	// 1.2.1 item 3 (own pass, so the new order cannot disturb the Analytics import state above):
+	// a method seen only outside verified checkout activity. Managers see it with diagnostics off
+	// or on (same order authority as checkout inventory), denied roles never get it and never
+	// trigger an order read, and diagnostics off/on/off never serves a privileged entry.
+	blzmcp_pf_quiet_side_effects();
+	blzmcp_pf_order( array( 'method' => 'blzpm_perm_out', 'via' => 'admin', 'status' => 'completed', 'created' => time() - 2 * DAY_IN_SECONDS, 'paid' => time() - 2 * DAY_IN_SECONDS ) );
+	// An order change may stay cached for up to 300 seconds by contract (C2): start from cold.
+	global $wpdb;
+	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s', $wpdb->options, $wpdb->esc_like( '_transient_blzmcp_c_' ) . '%', $wpdb->esc_like( '_transient_timeout_blzmcp_c_' ) . '%' ) );
+	wp_cache_flush();
+	$pm_order_sql = 0;
+	$pm_order_spy = static function ( $q ) use ( &$pm_order_sql ) {
+		if ( str_contains( (string) $q, 'shop_order' ) ) {
+			++$pm_order_sql;
+		}
+		return $q;
+	};
+	$pm_ability = $abilities['blaze-mcp-toolkit/payment-health'] ?? wp_get_ability( 'blaze-mcp-toolkit/payment-health' );
+	foreach ( array( false, true, false ) as $pass => $sm_diag ) {
+		$settings                             = Settings::get();
+		$settings['shop_manager_diagnostics'] = $sm_diag;
+		update_option( 'blzmcp_settings', $settings, false );
+		foreach ( $roles as $role ) {
+			wp_set_current_user( $user_ids[ $role ] );
+			$want         = $allowed_for( 'blaze-mcp-toolkit/payment-health', $role, $sm_diag );
+			$pm_order_sql = 0;
+			add_filter( 'query', $pm_order_spy );
+			$result = $pm_ability->execute( array() );
+			remove_filter( 'query', $pm_order_spy );
+			$label = "[outside pass {$pass}, sm_diag " . ( $sm_diag ? 'on' : 'off' ) . "] {$role}";
+			if ( ! $want ) {
+				blzmcp_it_assert( $is_permission_error( $result ), "{$label} denied" );
+				blzmcp_it_equals( 0, $pm_order_sql, "{$label} denied call reads no orders (outside observations never read)" );
+				blzmcp_it_assert( ! str_contains( (string) wp_json_encode( is_wp_error( $result ) ? array( $result->get_error_message(), $result->get_error_data() ) : $result ), 'blzpm_perm_out' ), "{$label} denied call carries no inventory data" );
+				continue;
+			}
+			blzmcp_it_assert( is_array( $result ), "{$label} allowed" );
+			$pm_ids = array_column( is_array( $result ) ? (array) $result['methods'] : array(), 'assessment', 'id' );
+			blzmcp_it_equals( 'inventory_only', $pm_ids['blzpm_perm_out'] ?? null, "{$label} sees the outside-checkout method as inventory only" );
+			$diag_ok = 'administrator' === $role || ( 'shop_manager' === $role && $sm_diag );
+			$blocked = \Blaze\McpToolkit\Abilities\PaymentHealth::reason_text( 'diagnostics_not_permitted' );
+			$leak    = false;
+			foreach ( is_array( $result ) ? $result['methods'] : array() as $pm_method ) {
+				$leak = $leak || ( ! $diag_ok && ! empty( $pm_method['errors']['logs']['checked'] ) ) || ( $diag_ok && $blocked === $pm_method['errors']['logs']['reason'] );
+			}
+			blzmcp_it_assert( ! $leak, "{$label} diagnostics follow the current permission, never a warm privileged entry" );
 		}
 	}
 } finally {

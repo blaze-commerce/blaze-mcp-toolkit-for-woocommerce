@@ -517,10 +517,25 @@ foreach ( $workflows as $name => $default_period ) {
 		blzmcp_it_assert( str_contains( $instructions, 'rolling look-back, not a reconstruction' ), "{$name} instructions say payment health is a rolling look-back" );
 		blzmcp_it_assert( str_contains( $instructions, 'never present them as Analytics sales, money lost or confirmed charges' ), "{$name} instructions keep payment counts apart from sales and charges" );
 		blzmcp_it_assert( str_contains( $instructions, 'Then run the order totals step alone' ), "{$name} instructions run totals alone after payment" );
+		// 1.2.1 item 4: inventory observations are kept apart from checkout counts and findings.
+		blzmcp_it_assert( str_contains( $instructions, 'no payment problem was found in the checks it assessed. Green never covers a method whose assessment is inventory_only.' ), "{$name} green is scoped to the assessed checks" );
+		blzmcp_it_assert( ! str_contains( $instructions, 'say in one line that no payment problem was found.' ), "{$name} no unscoped all-clear" );
+		blzmcp_it_assert( str_contains( $instructions, 'Only its findings are payment problems.' ) && str_contains( $instructions, 'Mention such methods separately, after any real findings' ), "{$name} real findings still lead; inventory-only methods are mentioned separately" );
+		blzmcp_it_assert( str_contains( $instructions, 'Never call them a payment problem, a checkout failure, a lost sale, a charge or money at risk' ) && str_contains( $instructions, 'never count their orders as accepted, unpaid or failed checkouts or as sales' ) && str_contains( $instructions, 'never suggest switching a method back on' ), "{$name} inventory-only methods are never problems, counts or re-enable instructions" );
+		blzmcp_it_assert( str_contains( $instructions, 'never say it was used only outside checkout' ) && str_contains( $instructions, 'methods_truncated' ), "{$name} partial reads and the identity cap are not described as exhaustive" );
+		blzmcp_it_assert( str_contains( $instructions, 'whether the method is meant for checkout, and how those orders were created' ), "{$name} the suggested check is manual confirmation, never a repair" );
+		blzmcp_it_assert( str_contains( $instructions, 'Never describe payments as healthy when a check is unknown.' ), "{$name} unknown is never reassuring" );
+		$own = array(
+			'blaze-mcp-toolkit/weekly-store-review' => 'list it in the Watch List as a method to confirm, never as a payment problem, a loss or a reason for a dip',
+			'blaze-mcp-toolkit/revenue-drop-triage' => 'mention it as a method to confirm, never as a cause of the drop, a lost sale or money at risk',
+			'blaze-mcp-toolkit/failed-order-triage' => 'mention it as a method to confirm, never as a failed checkout, a declined payment or card testing',
+		);
+		blzmcp_it_assert( str_contains( $instructions, $own[ $name ] ), "{$name} its own guidance keeps inventory-only methods out of its problem narrative" );
 	} else {
 		blzmcp_it_assert( null !== $first && 'wc-analytics/totals' === $first['tool'] && 'orders' === ( (array) $first['arguments'] )['subject'], "{$name} first step is totals orders" );
 		blzmcp_it_assert( null === $step_for( $result, $payment ), "{$name} has no payment step" );
 		blzmcp_it_assert( ! str_contains( $instructions, 'PAYMENT CHECK' ), "{$name} has no PAYMENT CHECK paragraph" );
+		blzmcp_it_assert( ! str_contains( $instructions, 'inventory_only' ), "{$name} has no payment inventory paragraph" );
 	}
 	blzmcp_it_equals( array(), $contradictions( $instructions . "\n" . $whys_of( $result ) ), "{$name} instructions and step reasons carry no contradictory stop or lead clause" );
 	blzmcp_it_assert( str_contains( $instructions, 'stop the Analytics work only' ) && str_contains( $instructions, 'Still run the listed steps that are not Analytics' ), "{$name} analytics unavailable stops only the Analytics work" );
@@ -698,6 +713,7 @@ $np = is_array( $no_pay ) ? $no_pay['instructions'] : '';
 blzmcp_it_assert( null === $step_for( $no_pay, $payment ) && 'wc-analytics/totals' === ( $no_pay['steps'][0]['ability'] ?? null ), 'payment denied: totals becomes the first step' );
 blzmcp_it_assert( str_contains( $np, 'NOT AVAILABLE FOR YOUR ROLE' ) && str_contains( $np, $payment ), 'payment denied: listed under not available for your role' );
 blzmcp_it_assert( str_contains( $np, 'The payment health check is not in this plan' ) && ! str_contains( $np, 'lead the answer with its findings' ), 'payment denied: explained once, review continues' );
+blzmcp_it_assert( ! str_contains( $np, 'Green never covers a method whose assessment is inventory_only' ), 'payment denied: no inventory guidance for a step that will not run' );
 blzmcp_it_assert( str_contains( $np, 'Run the first step alone. If it succeeds' ) && ! str_contains( $np, 'it is the payment health check' ), 'payment denied: run order names no payment step' );
 $nt = is_array( $no_totals ) ? $no_totals['instructions'] : '';
 blzmcp_it_assert( null === $step_for( $no_totals, 'wc-analytics/totals', 'orders' ) && 'blaze-mcp-toolkit/payment-health' === ( $no_totals['steps'][0]['ability'] ?? null ), 'totals denied: payment health still first' );

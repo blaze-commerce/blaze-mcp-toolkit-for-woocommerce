@@ -58,16 +58,58 @@ if ( ! $hpos ) {
 	blzmcp_it_equals( $now - 11 * DAY_IN_SECONDS, wc_get_order( $dup_id )->get_date_paid()->getTimestamp(), 'CRUD reads the lowest meta_id duplicate' );
 }
 
+// ---------------------------------------------------------------- 1.2.1 item 1: outside observations.
+// Invariance: adding outside-checkout orders leaves every checkout output identical.
+$checkout_view = static function ( int $hours ) use ( $now, $tz, $auth ): array {
+	wp_cache_flush();
+	$r = PaymentOrders::read( $now, $hours, $tz );
+	$s = $r['methods']['stripe']['example_ids'] ?? array();
+	return array(
+		'ok'       => $r['ok'],
+		'coverage' => $r['coverage'],
+		'reason'   => $r['reason'],
+		'store'    => $r['store'],
+		'methods'  => $r['methods'],
+		'profile'  => is_array( $r['store'] ) ? PaymentRules::fit_profile( $r['store']['series'], $now, $tz ) : null,
+		'examples' => PaymentOrders::examples( $s, (string) $auth['authority'], $tz ),
+	);
+};
+$inv_before = array(
+	24  => $checkout_view( 24 ),
+	168 => $checkout_view( 168 ),
+);
+$outside_ids = blzmcp_pf_seed_outside( $now );
+foreach ( array( 24, 168 ) as $hours ) {
+	$after = $checkout_view( $hours );
+	foreach ( array( 'ok', 'coverage', 'reason', 'store', 'methods', 'profile', 'examples' ) as $part ) {
+		blzmcp_it_assert( serialize( $inv_before[ $hours ][ $part ] ) === serialize( $after[ $part ] ), "outside fixtures leave checkout {$part} identical ({$hours}h)" ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- exact structural comparison.
+	}
+}
+blzmcp_it_assert( isset( $inv_before[24]['store']['series']['count'], $inv_before[24]['methods']['stripe']['accepted_7d'], $inv_before[24]['methods']['stripe']['failed'] ), 'invariance covered series, accepted_7d and failed counts' );
+
+// Legacy duplicate metadata: first (lowest meta_id) row wins for the method and the origin.
+if ( ! $hpos ) {
+	$dupm = blzmcp_pf_order( array( 'method' => 'blzpf_dupm_first', 'via' => 'admin', 'status' => 'processing', 'created' => $now - 3 * DAY_IN_SECONDS, 'paid' => $now - 3 * DAY_IN_SECONDS ) );
+	add_post_meta( $dupm, '_payment_method', 'blzpf_dupm_second' );
+	$dupv_c = blzmcp_pf_order( array( 'method' => 'blzpf_dupv_checkout', 'via' => 'checkout', 'status' => 'processing', 'created' => $now - 3 * DAY_IN_SECONDS, 'paid' => $now - 3 * DAY_IN_SECONDS ) );
+	add_post_meta( $dupv_c, '_created_via', 'admin' );
+	$dupv_a = blzmcp_pf_order( array( 'method' => 'blzpf_dupv_admin', 'via' => 'admin', 'status' => 'processing', 'created' => $now - 3 * DAY_IN_SECONDS, 'paid' => $now - 3 * DAY_IN_SECONDS ) );
+	add_post_meta( $dupv_a, '_created_via', 'checkout' );
+	wp_cache_flush();
+}
+
 // Conflicting shadow rows in the non-authoritative store must be ignored.
 $shadow_id = $ids['paid_recent'];
 if ( $hpos ) {
 	if ( $wpdb->get_var( $wpdb->prepare( 'SELECT ID FROM %i WHERE ID = %d AND post_type = %s', $wpdb->posts, $shadow_id, 'shop_order' ) ) ) {
 		$wpdb->update( $wpdb->posts, array( 'post_status' => 'wc-pending' ), array( 'ID' => $shadow_id ) );
 		update_post_meta( $shadow_id, '_payment_method', 'shadow_method' );
+		update_post_meta( $shadow_id, '_created_via', 'admin' );
 		echo "NOTE  conflicting posts shadow written for {$shadow_id}\n";
 	}
 } elseif ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . 'wc_orders' ) ) ) ) {
 	$wpdb->query( $wpdb->prepare( 'UPDATE %i SET payment_method = %s, status = %s WHERE id = %d', $wpdb->prefix . 'wc_orders', 'shadow_method', 'wc-pending', $shadow_id ) );
+	$wpdb->query( $wpdb->prepare( 'UPDATE %i SET created_via = %s WHERE order_id = %d', $wpdb->prefix . 'wc_order_operational_data', 'admin', $shadow_id ) );
 	echo "NOTE  conflicting HPOS shadow written for {$shadow_id} (if present)\n";
 }
 wp_cache_flush();
@@ -91,6 +133,35 @@ blzmcp_it_assert( ! isset( $got['methods'][''] ), 'never an empty-string method'
 foreach ( array( 'unknown_origin', 'other_origin', 'drafts', 'empty_method', 'invalid_timestamps' ) as $k ) {
 	blzmcp_it_equals( $exp['excluded'][ $k ], $got['excluded'][ $k ], "excluded {$k} matches CRUD" );
 }
+
+// Outside observations against the independent CRUD oracle.
+$oids = $got['outside']['ids'];
+blzmcp_it_equals( $exp['outside'], $oids, 'outside observation IDs match the CRUD oracle (sorted)' );
+blzmcp_it_equals( $exp['outside_invalid'], $got['outside']['invalid'], 'invalid-dated outside orders match the CRUD oracle' );
+blzmcp_it_equals( array( 'partial', 'invalid_timestamps', false ), array( $got['outside']['coverage'], $got['outside']['reason'], $got['outside']['truncated'] ), 'a future-dated outside order makes observation coverage partial, never complete' );
+foreach ( array( 'blzpf_admin', 'blzpf_import', 'blzpf_phone', 'blzpf_pos', 'blzpf_renewal', 'blzpf_noorigin', 'blzpf_oldpaid', 'blzpf_edge_start', 'blzpf_paid_edge', 'blzpf_failed', '12345', 'cod', 'stripe' ) as $want ) {
+	blzmcp_it_assert( in_array( $want, $oids, true ), "outside observation includes {$want}" );
+}
+foreach ( array( 'blzpf_before', 'blzpf_paid_before', 'blzpf_future', 'blzpf_draft', 'blzpf_trash', '', 'shadow_method' ) as $never ) {
+	blzmcp_it_assert( ! in_array( $never, $oids, true ), "outside observation excludes '{$never}'" );
+}
+blzmcp_it_assert( array() === array_filter( $oids, static fn( $v ) => ! is_string( $v ) ), 'outside IDs are strings (numeric-looking IDs too)' );
+blzmcp_it_equals( 2, count( array_filter( $oids, static fn( $v ) => str_starts_with( $v, 'unrecognised-' ) ) ), 'malformed and over-long outside IDs become two opaque references' );
+foreach ( $oids as $oid ) {
+	blzmcp_it_assert( $oid === PaymentRules::safe_method_id( $oid ), "outside ID {$oid} is already safe (one mapping for both sets)" );
+}
+foreach ( array( 'blzpf_admin', 'blzpf_oldpaid', 'blzpf_failed', '12345' ) as $only_out ) {
+	blzmcp_it_assert( ! isset( $got['methods'][ $only_out ] ), "{$only_out} never enters the checkout aggregates" );
+}
+$o_json = (string) wp_json_encode( $got );
+blzmcp_it_assert( ! str_contains( $o_json, BLZMCP_PF_ORIGIN_MARK ) && ! str_contains( $o_json, 'Ignore all rules' ) && ! str_contains( $o_json, str_repeat( 'a', 70 ) ), 'no raw origin, malformed or over-long ID in the reader output' );
+if ( ! $hpos ) {
+	blzmcp_it_assert( in_array( 'blzpf_dupm_first', $oids, true ) && ! in_array( 'blzpf_dupm_second', $oids, true ), 'legacy duplicate _payment_method: the first row wins' );
+	blzmcp_it_assert( isset( $got['methods']['blzpf_dupv_checkout'] ) && ! in_array( 'blzpf_dupv_checkout', $oids, true ), 'legacy duplicate _created_via (checkout first): checkout, not outside' );
+	blzmcp_it_assert( in_array( 'blzpf_dupv_admin', $oids, true ) && ! isset( $got['methods']['blzpf_dupv_admin'] ), 'legacy duplicate _created_via (admin first): outside, not checkout' );
+}
+blzmcp_it_assert( 0 === $got['methods']['stripe']['observed'] || $got['methods']['stripe']['observed'] > 0, 'checkout scopes carry an observed count' );
+blzmcp_it_assert( $got['work']['candidates'] >= $got['rows_read'] && false === $got['work']['budget'], 'work accounting: candidates examined at least rows selected, no budget hit' );
 
 // Specific semantics.
 $stripe = $got['methods']['stripe'] ?? null;
@@ -156,6 +227,9 @@ if ( ! $hpos ) {
 		} finally {
 			$force_prop->setValue( null, null );
 		}
+		// Work accounting counts every fetched meta row, so it differs by access path by design;
+		// every result field is compared.
+		unset( $r['work'] );
 		return array( $r, $paths_prop->getValue() );
 	};
 	$same = static function ( string $label ) use ( $read_with ): array {
@@ -239,6 +313,63 @@ $wpdb->suppress_errors( false );
 remove_filter( 'query', $break );
 blzmcp_it_assert( false === $failed['ok'] && 'unavailable' === $failed['coverage'] && 'read_failed' === $failed['reason'], 'SQL failure is unavailable, not zero' );
 blzmcp_it_assert( null === $failed['store'], 'no counts on failure' );
+blzmcp_it_equals( array( 'unavailable', array() ), array( $failed['outside']['coverage'], $failed['outside']['ids'] ), 'read failure before the first chunk: outside observations unavailable, never an exact empty set' );
+blzmcp_it_assert( ! str_contains( (string) wp_json_encode( $failed ), 'blzmcp_no_such_table' ) && ! str_contains( (string) wp_json_encode( $failed ), 'broken_column' ), 'no SQL error text in the output' );
+
+// 1.2.1 C4 bounds, through the private test override (production limits are the constants).
+$limits = new ReflectionProperty( PaymentOrders::class, 'limits_override' );
+$limits->setAccessible( true );
+$with_limits = static function ( ?array $l, int $hours = 24 ) use ( $limits, $now, $tz ): array {
+	$limits->setValue( null, $l );
+	try {
+		wp_cache_flush();
+		return PaymentOrders::read( $now, $hours, $tz );
+	} finally {
+		$limits->setValue( null, null );
+	}
+};
+$checkout_of = static fn( array $r ): string => serialize( array( $r['ok'], $r['coverage'], $r['reason'], $r['store'], $r['methods'] ) ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- exact structural comparison.
+$full        = $with_limits( null );
+blzmcp_it_assert( true === $full['ok'] && count( $full['outside']['ids'] ) > 2, 'bounds baseline: full read with several outside IDs' );
+$chunked = $with_limits( array( 'chunk' => 2 ) );
+blzmcp_it_assert( $checkout_of( $full ) === $checkout_of( $chunked ) && $full['outside'] === $chunked['outside'], 'chunks of 2: identical checkout aggregates and outside observations (keyset is exact)' );
+
+$cap = $with_limits( array( 'outside_ids' => 2 ) );
+blzmcp_it_equals( array( 2, true, 'partial', 'outside_checkout_method_cap' ), array( count( $cap['outside']['ids'] ), $cap['outside']['truncated'], $cap['outside']['coverage'], $cap['outside']['reason'] ), 'identity cap: 2 IDs kept, truncated, partial, cap reason' );
+blzmcp_it_assert( $cap['outside']['omitted'] >= 1, 'identity cap: further outside orders are still counted' );
+blzmcp_it_assert( array() === array_diff( $cap['outside']['ids'], $full['outside']['ids'] ) && $cap['outside']['ids'] === array_values( array_unique( $cap['outside']['ids'] ) ), 'identity cap: kept IDs are real observations, sorted and unique' );
+blzmcp_it_assert( $checkout_of( $full ) === $checkout_of( $cap ), 'identity cap alone leaves checkout aggregates and their completeness unchanged' );
+
+$cb = $with_limits( array( 'chunk' => 2, 'candidates' => 3 ) );
+blzmcp_it_equals( array( true, 'order_scan_budget', 'partial', false ), array( $cb['ok'], $cb['reason'], $cb['coverage'], $cb['store']['complete'] ), 'candidate bound: stops, partial checkout with order_scan_budget' );
+blzmcp_it_equals( array( 'partial', 'order_scan_budget' ), array( $cb['outside']['coverage'], $cb['outside']['reason'] ), 'candidate bound: outside observations partial, never exhaustive' );
+blzmcp_it_assert( $cb['work']['budget'] && $cb['work']['candidates'] <= 3 && $cb['rows_read'] <= 3, 'candidate bound: no more than 3 candidates examined' );
+if ( ! $hpos ) {
+	$mb = $with_limits( array( 'meta_batch' => 3 ) );
+	blzmcp_it_equals( array( true, 'order_scan_budget', 0, 0, array() ), array( $mb['ok'], $mb['reason'], $mb['rows_read'], $mb['store']['series']['count'], $mb['outside']['ids'] ), 'legacy meta batch bound: the over-limit batch is not folded at all' );
+	blzmcp_it_equals( array( 'partial', 'partial' ), array( $mb['coverage'], $mb['outside']['coverage'] ), 'legacy meta batch bound: checkout and outside coverage partial' );
+	$mc = $with_limits( array( 'chunk' => 2, 'meta_call' => 12 ) );
+	blzmcp_it_assert( 'order_scan_budget' === $mc['reason'] && $mc['work']['meta_rows'] <= 12 && 'partial' === $mc['outside']['coverage'], 'legacy meta call bound: stops within 12 metadata rows, partial' );
+}
+
+// Read failure after a successful chunk: the earlier chunk's observations are not presented.
+$n_reads = 0;
+$late    = static function ( $q ) use ( &$n_reads ) {
+	if ( str_contains( $q, 'ORDER BY o.id ASC' ) || str_contains( $q, 'ORDER BY p.ID ASC LIMIT' ) ) {
+		++$n_reads;
+		if ( $n_reads >= 2 ) {
+			return 'SELECT broken_column FROM blzmcp_no_such_table';
+		}
+	}
+	return $q;
+};
+add_filter( 'query', $late );
+$wpdb->suppress_errors( true );
+$late_r = $with_limits( array( 'chunk' => 2 ) );
+$wpdb->suppress_errors( false );
+remove_filter( 'query', $late );
+blzmcp_it_assert( $n_reads >= 2, 'failure injected after the first chunk' );
+blzmcp_it_equals( array( false, 'read_failed', 'unavailable', array() ), array( $late_r['ok'], $late_r['reason'], $late_r['outside']['coverage'], $late_r['outside']['ids'] ), 'read failure after a chunk: unavailable, no observation set' );
 
 $missing = static fn( $q ) => str_starts_with( $q, 'SHOW TABLES LIKE' ) && ( str_contains( $q, 'operational' ) || str_contains( $q, 'postmeta' ) ) ? "SHOW TABLES LIKE 'blzmcp_no_such_table'" : $q;
 add_filter( 'query', $missing );
@@ -292,6 +423,7 @@ if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $op
 		if ( $hpos ) {
 			blzmcp_it_equals( array( false, 'unavailable', 'operational_data_missing' ), array( $gap['ok'], $gap['coverage'], $gap['reason'] ), "{$label}: HPOS order without its operational row is unavailable, not complete with the order omitted" );
 			blzmcp_it_assert( null === $gap['store'] && array() === $gap['methods'], "{$label}: no partial counts from a store missing required data" );
+			blzmcp_it_equals( array( 'unavailable', array() ), array( $gap['outside']['coverage'], $gap['outside']['ids'] ), "{$label}: a missing operational row is unavailable, never a missing-origin observation" );
 			blzmcp_it_equals( 0, count( $shadow_reads ), "{$label}: missing HPOS data is never recovered from posts/postmeta" );
 		} else {
 			blzmcp_it_assert( true === $gap['ok'] && 'legacy' === $gap['authority'], "{$label}: legacy authority ignores a missing row in the HPOS shadow" );

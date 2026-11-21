@@ -194,7 +194,12 @@ if ( '' !== $ph_step ) {
 	// Healthy observed methods with the registry unbuilt: never green or complete.
 	$hide( (array) ( $state['ids'] ?? array() ) );
 	$healthy = $ph->execute();
-	blzmcp_it_assert( is_array( $healthy ) && null === $by_id( $healthy, 'cheque' ) && 'green' === ( $by_id( $healthy, 'cod' )['status'] ?? null ), 'unbuilt healthy: only the healthy method is observed, and it is green' );
+	blzmcp_it_assert( is_array( $healthy ) && 'green' === ( $by_id( $healthy, 'cod' )['status'] ?? null ), 'unbuilt healthy: the healthy checkout method is green' );
+	// 1.2.1: cheque's orders are now outside verified checkout activity. Its retained enabled
+	// setting is not a known registered gateway (registry unbuilt), so it is inventory only.
+	$u_cheque = $by_id( $healthy, 'cheque' );
+	blzmcp_it_equals( array( 'inventory_only', 'unknown', true, null, true ), array( $u_cheque['assessment'] ?? null, $u_cheque['status'] ?? null, is_array( $u_cheque ) && array_key_exists( 'registered', $u_cheque ), $u_cheque['registered'] ?? null, $u_cheque['enabled'] ?? null ), 'unbuilt healthy: the hidden method is listed as inventory only (registration unknown, setting shown without severity)' );
+	blzmcp_it_equals( array(), $codes_for( $healthy, 'cheque' ), 'unbuilt healthy: no quiet or other finding for the inventory-only method' );
 	blzmcp_it_equals( array( 'unknown', 'partial' ), array( $healthy['overall'] ?? null, $healthy['coverage'] ?? null ), 'unbuilt healthy: overall unknown and coverage partial, not green/complete' );
 	blzmcp_it_assert( in_array( $registry_note, (array) ( $healthy['notes'] ?? array() ), true ), 'unbuilt healthy: notes say the method list may be incomplete' );
 	blzmcp_it_assert( true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $healthy ), true ), $ph->get_output_schema(), 'output' ), 'unbuilt healthy: response validates' );
@@ -217,16 +222,22 @@ if ( '' !== $ph_step ) {
 	blzmcp_it_assert( str_contains( implode( ' ', (array) ( $failed['notes'] ?? array() ) ), 'could not be read' ), 'inventory failure: notes say the method list could not be read' );
 	$failed_cod = $by_id( $failed, 'cod' );
 	blzmcp_it_assert( is_array( $failed_cod ) && array_key_exists( 'registered', $failed_cod ) && null === $failed_cod['registered'], 'inventory failure: the observed method is still listed, registration unknown' );
+	blzmcp_it_equals( array( 'checkout_health', 'inventory_only' ), array( $failed_cod['assessment'] ?? null, $by_id( $failed, 'cheque' )['assessment'] ?? null ), 'throwing inventory reader: the fallback keeps checkout methods on their path and outside-only methods inventory only' );
+	blzmcp_it_assert( true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $failed ), true ), $ph->get_output_schema(), 'output' ), 'throwing inventory reader: fallback response validates' );
+	blzmcp_it_equals( 'partial', $failed['inventory']['coverage'] ?? null, 'throwing inventory reader: inventory coverage partial, never complete' );
 	$clear_cache();
 
 	// Empty inventory with the registry unbuilt: no claim that nothing is switched on.
 	$hide( (array) ( $state['cod_ids'] ?? array() ) );
 	$empty = $ph->execute();
-	blzmcp_it_equals( array( array(), 'unknown' ), array( $empty['methods'] ?? null, $empty['overall'] ?? null ), 'unbuilt empty: no methods, overall unknown' );
+	// 1.2.1: no checkout activity is left; both methods are now seen only outside verified checkout.
+	blzmcp_it_equals( array( array( 'inventory_only' ), 'unknown' ), array( array_values( array_unique( array_column( (array) ( $empty['methods'] ?? array() ), 'assessment' ) ) ), $empty['overall'] ?? null ), 'unbuilt, no checkout activity: every listed method is inventory only, overall unknown (no all-clear)' );
 	blzmcp_it_assert( 'complete' !== ( $empty['coverage'] ?? null ), 'unbuilt empty: coverage not complete' );
+	blzmcp_it_assert( true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $empty ), true ), $ph->get_output_schema(), 'output' ), 'unbuilt, inventory only: response validates' );
 	$empty_notes = implode( ' ', (array) ( $empty['notes'] ?? array() ) );
 	blzmcp_it_assert( ! str_contains( $empty_notes, 'No payment method is switched on' ), 'unbuilt empty: no claim that no method is switched on' );
-	blzmcp_it_assert( str_contains( $empty_notes, 'switched on' ) && str_contains( $empty_notes, 'unknown' ), 'unbuilt empty: notes say whether any method is switched on is unknown' );
+	blzmcp_it_assert( str_contains( $empty_notes, 'Listed for inventory, not as checkout counts:' ) && str_contains( $empty_notes, 'cod' ) && in_array( $registry_note, (array) ( $empty['notes'] ?? array() ), true ), 'unbuilt, inventory only: the disclosure note and the registry note' );
+	blzmcp_it_equals( array( true, 'partial' ), array( $empty['inventory']['checked'] ?? null, $empty['inventory']['coverage'] ?? null ), 'unbuilt: inventory checked but partial (registry not loaded)' );
 	blzmcp_it_assert( null === $instance->getValue(), 'unbuilt check: the ability still never built the registry' );
 	blzmcp_it_equals( 0, $http, 'unbuilt check: no HTTP' );
 
@@ -329,7 +340,9 @@ foreach ( array( 'busy', 'quiet', 'stuck', 'off', 'old' ) as $suffix ) {
 $option_names[] = 'woocommerce_blzunk_settle_settings';
 $option_names[] = 'woocommerce_ppcp-gateway_settings';
 $option_names[] = 'woocommerce_woocommerce_payments_settings';
-$ref_gateways   = array( 'blzph_busy', 'blzph_quiet', 'blzph_stuck', 'blzph_off', 'blzph_old', 'stripe', 'blzunk_settle', 'ppcp-gateway', 'woocommerce_payments' );
+$option_names[] = 'woocommerce_blzph_outoff_settings';
+$option_names[] = 'woocommerce_blzph_outunreg_settings';
+$ref_gateways   = array( 'blzph_busy', 'blzph_quiet', 'blzph_stuck', 'blzph_off', 'blzph_old', 'stripe', 'blzunk_settle', 'ppcp-gateway', 'woocommerce_payments', 'blzph_outoff' );
 $saved_options = array();
 foreach ( $option_names as $name ) {
 	$saved_options[ $name ] = get_option( $name, null );
@@ -365,6 +378,8 @@ update_option( 'woocommerce_blzph_stuck_settings', array( 'enabled' => 'yes' ) )
 update_option( 'woocommerce_blzph_off_settings', array( 'enabled' => 'no' ) );
 update_option( 'woocommerce_blzph_old_settings', array( 'enabled' => 'no' ) );
 update_option( 'woocommerce_blzunk_settle_settings', array( 'enabled' => 'yes' ) );
+update_option( 'woocommerce_blzph_outoff_settings', array( 'enabled' => 'no' ) );
+update_option( 'woocommerce_blzph_outunreg_settings', array( 'enabled' => 'yes', 'testmode' => 'yes' ) );
 update_option( 'woocommerce_stripe_settings', array( 'enabled' => 'yes', 'testmode' => 'yes', 'secret_key' => 'sk_test_SYNTHETIC_NEVER_OUTPUT', 'webhook_secret' => 'whsec_SYNTHETIC_NEVER' ) );
 
 $kind_filter = static fn( $kind, $id ) => str_starts_with( (string) $id, 'blzph_' ) ? 'instant' : $kind;
@@ -442,7 +457,18 @@ for ( $k = 0, $t = $now - 2 * $h; $t > $now - 27 * $d; $k++, $t -= 8 * $h ) {
 	$settled      = $t <= $now - 48 * $h;
 	$settle_ids[] = $seed_order( 'blzunk_settle', $settled ? 'completed' : 'pending', $t, $settled ? $t + 48 * $h : null );
 }
-echo 'NOTE  seeded ' . count( $seeded ) . " orders\n";
+// 1.2.1: outside verified checkout activity (literal origins, never classified). blzph_outside is
+// unregistered, blzph_outoff registered but switched off, blzph_outunreg has a retained enabled
+// setting without a registered gateway, stripe_klarna shares the Stripe family's diagnostics;
+// blzph_busy and stripe get an outside order on top of their checkout path (mixed / enabled).
+$outside_seeded = array();
+foreach ( array( 'blzph_outside' => 'admin', 'blzph_outoff' => 'pos-blzpfx', 'blzph_outunreg' => '', 'stripe_klarna' => 'import-blzpfx', 'blzph_busy' => 'admin', 'stripe' => 'admin' ) as $o_method => $o_via ) {
+	for ( $k = 0; $k < 3; $k++ ) {
+		$t                = $now - ( 2 + $k ) * $d;
+		$outside_seeded[] = blzmcp_pf_order( array( 'method' => $o_method, 'via' => $o_via, 'status' => 0 === $k ? 'failed' : 'completed', 'created' => $t, 'paid' => 0 === $k ? null : $t + 60 ) );
+	}
+}
+echo 'NOTE  seeded ' . count( $seeded ) . ' checkout and ' . count( $outside_seeded ) . " outside orders\n";
 
 // ---------------------------------------------------------------- business-state snapshot.
 $snapshot = static function () use ( $wpdb ): array {
@@ -478,6 +504,9 @@ $http_calls = 0;
 $mail_calls = 0;
 $before     = $snapshot();
 $cold       = $ability->execute();
+$probe_prop = new ReflectionProperty( PaymentHealth::class, 'probe' );
+$probe_prop->setAccessible( true );
+$cold_probe = $probe_prop->getValue();
 $warm       = $ability->execute( array( 'since_hours' => 24 ) );
 $after      = $snapshot();
 
@@ -502,7 +531,21 @@ blzmcp_it_equals( $cold['checked_at'], $warm['checked_at'], 'omitted input and e
 blzmcp_it_equals( 24, $cold['since_hours'], 'omitted input uses the default 24 hours' );
 $valid = rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $cold ), true ), $ability->get_output_schema(), 'output' );
 blzmcp_it_assert( true === $valid, 'full response validates against the declared schema' . ( is_wp_error( $valid ) ? ': ' . $valid->get_error_message() : '' ) );
-blzmcp_it_equals( array( 'schema_version', 'checked_at', 'since_hours', 'timezone', 'overall', 'coverage', 'notes', 'store_wide', 'methods', 'findings', 'findings_total', 'findings_truncated' ), array_keys( $cold ), 'top-level keys exactly as the contract' );
+blzmcp_it_equals( array( 'schema_version', 'checked_at', 'since_hours', 'timezone', 'overall', 'coverage', 'notes', 'store_wide', 'inventory', 'methods', 'findings', 'findings_total', 'findings_truncated' ), array_keys( $cold ), 'top-level keys exactly as the contract (schema 2 adds inventory)' );
+blzmcp_it_equals( 2, $cold['schema_version'], 'schema_version is 2' );
+$schema = $ability->get_output_schema();
+blzmcp_it_equals( array( 'checked', 'coverage', 'reason', 'methods_truncated' ), $schema['properties']['inventory']['required'] ?? null, 'schema: inventory has exactly its 4 required keys' );
+blzmcp_it_equals( false, $schema['properties']['inventory']['additionalProperties'] ?? null, 'schema: inventory allows no extra properties' );
+$m_schema = $schema['properties']['methods']['items'] ?? array();
+blzmcp_it_assert( in_array( 'assessment', $m_schema['required'] ?? array(), true ) && in_array( 'activity', $m_schema['required'] ?? array(), true ), 'schema: assessment and activity are required method fields' );
+blzmcp_it_equals( array( 'checkout_health', 'inventory_only' ), $m_schema['properties']['assessment']['enum'] ?? null, 'schema: assessment enum' );
+blzmcp_it_equals( array( 'checkout_observed', 'outside_checkout_observed', 'coverage', 'reason' ), $m_schema['properties']['activity']['required'] ?? null, 'schema: activity required keys' );
+$extra = json_decode( (string) wp_json_encode( $cold ), true );
+$extra['inventory']['raw_origin'] = 'admin';
+blzmcp_it_assert( true !== rest_validate_value_from_schema( $extra, $schema, 'output' ), 'schema: an extra inventory property is rejected' );
+$extra = json_decode( (string) wp_json_encode( $cold ), true );
+unset( $extra['methods'][0]['activity'] );
+blzmcp_it_assert( true !== rest_validate_value_from_schema( $extra, $schema, 'output' ), 'schema: a method without activity is rejected' );
 blzmcp_it_assert( 1 === preg_match( '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/', $cold['checked_at'] ), 'checked_at is ISO-8601 with offset' );
 blzmcp_it_equals( wp_timezone()->getName(), $cold['timezone'], 'timezone is the store timezone' );
 
@@ -633,6 +676,116 @@ foreach ( $cold['findings'] as $f ) {
 	blzmcp_it_assert( in_array( $f['code'], PaymentHealth::FINDING_CODES, true ) && '' !== $f['what'] && '' !== $f['check_next'], "finding {$f['code']} has a fixed code and text" );
 }
 
+// ---------------------------------------------------------------- 1.2.1 items 2 and 4: inventory-only rows.
+$only_text    = PaymentHealth::reason_text( 'outside_checkout_only' );
+$partial_text = PaymentHealth::reason_text( 'outside_checkout_observed_partial' );
+blzmcp_it_equals( 'Observed only outside verified checkout activity; checkout health not assessed.', $only_text, 'C3 complete-scan disclosure, exact source string' );
+blzmcp_it_equals( 'Observed outside verified checkout activity; checkout activity may be missing from this result, so checkout health is not assessed.', $partial_text, 'C3 partial-scan disclosure, exact source string' );
+blzmcp_it_assert( ! str_contains( $partial_text, ' only ' ), 'partial disclosure makes no "only" claim' );
+blzmcp_it_equals( 'Confirm whether this method is intended for checkout and review how those orders were created.', PaymentHealth::outside_next_check(), 'C3 suggested next check, exact source string' );
+$scan_done   = 'complete' === $cold['inventory']['coverage'] || ( 'partial' === $cold['inventory']['coverage'] && str_contains( implode( ' ', $cold['notes'] ), $only_text ) );
+$disclosure  = $scan_done ? $only_text : $partial_text;
+$unassessed  = array( 'blzph_outside', 'blzph_outoff', 'blzph_outunreg', 'stripe_klarna' );
+$not_applied = array(
+	'status'     => 'unknown',
+	'checked'    => false,
+	'applicable' => false,
+	'coverage'   => 'not_applicable',
+);
+foreach ( $unassessed as $uid ) {
+	$u = $by_id( $cold, $uid );
+	blzmcp_it_assert( is_array( $u ), "{$uid}: an outside-only method is listed (not hidden)" );
+	if ( ! is_array( $u ) ) {
+		continue;
+	}
+	blzmcp_it_equals( array( 'inventory_only', 'unknown' ), array( $u['assessment'], $u['status'] ), "{$uid}: assessment inventory_only, status unknown" );
+	blzmcp_it_equals( array( false, true ), array( $u['activity']['checkout_observed'], $u['activity']['outside_checkout_observed'] ), "{$uid}: activity says outside observed, no checkout observed" );
+	blzmcp_it_assert( in_array( $u['reasons'], array( array( $only_text ), array( $partial_text ) ), true ), "{$uid}: the C3 disclosure is its only reason" );
+	foreach ( array( 'quiet' => $u['quiet'], 'stuck' => $u['stuck'], 'logs' => $u['errors']['logs'], 'jobs' => $u['errors']['jobs'], 'webhook' => $u['errors']['webhook'] ) as $part => $c ) {
+		blzmcp_it_equals( $not_applied, array_intersect_key( $c, $not_applied ), "{$uid}: {$part} unknown, not checked, not applicable" );
+		blzmcp_it_assert( in_array( $c['reason'], array( $only_text, $partial_text ), true ), "{$uid}: {$part} carries the disclosure reason" );
+	}
+	blzmcp_it_equals( array( null, null, null, null ), array( $u['quiet']['taken_28d'], $u['quiet']['last_taken_at'], $u['stuck']['pending'], $u['stuck']['taken'] ), "{$uid}: no health quantities (null, never a synthetic zero)" );
+	blzmcp_it_equals( array( array(), false, array(), array() ), array( $u['stuck']['examples'], $u['stuck']['examples_truncated'], $u['errors']['logs']['groups'], $u['errors']['jobs']['hooks'] ), "{$uid}: no examples, groups or hooks" );
+	blzmcp_it_equals( array( null, null ), array( $u['errors']['logs']['count'], $u['errors']['jobs']['failed'] ), "{$uid}: diagnostic counts null" );
+	blzmcp_it_equals( array(), $codes_for( $cold, $uid ), "{$uid}: no finding of any kind (no disabled, not-registered, replacement, test-mode, quiet, unpaid or error alert)" );
+	blzmcp_it_assert( ! in_array( $uid, $cold_probe['rule_ids'], true ), "{$uid}: the quiet/unpaid rules were never called (no synthetic zero cohort)" );
+	blzmcp_it_assert( ! in_array( $uid, $cold_probe['diagnostic_ids'], true ), "{$uid}: the diagnostics reader never received it" );
+}
+blzmcp_it_equals( array( true, false ), array( $by_id( $cold, 'blzph_outoff' )['registered'] ?? null, $by_id( $cold, 'blzph_outoff' )['enabled'] ?? null ), 'registered but switched off: configuration facts shown without severity' );
+blzmcp_it_equals( array( false, null, null ), array( $by_id( $cold, 'blzph_outunreg' )['registered'] ?? null, $by_id( $cold, 'blzph_outunreg' )['enabled'] ?? null, $by_id( $cold, 'blzph_outunreg' )['test_mode'] ?? null ), 'retained enabled setting without a registered gateway: still inventory only, no enabled or test-mode claim' );
+blzmcp_it_assert( in_array( 'stripe', $cold_probe['diagnostic_ids'], true ), 'the Stripe family is still read for the real checkout method' );
+// Mixed and already-enabled methods keep their checkout path, numbers and alerts.
+blzmcp_it_equals( array( 'checkout_health', true, true ), array( $busy['assessment'] ?? null, $busy['activity']['checkout_observed'] ?? null, $busy['activity']['outside_checkout_observed'] ?? null ), 'mixed method: checkout_health with both observations' );
+blzmcp_it_equals( 'green', $busy['status'] ?? null, 'mixed method: still green on checkout evidence only' );
+blzmcp_it_equals( array( 'checkout_health', 'amber' ), array( $strp['assessment'] ?? null, $codes_for( $cold, 'stripe' )['test_mode_enabled'] ?? null ), 'enabled registered method with an outside observation keeps its test-mode warning' );
+blzmcp_it_equals( 'amber', $codes_for( $cold, 'blzph_off' )['method_disabled_with_history'] ?? null, 'a real disabled-with-history sibling finding is not suppressed' );
+$joined = implode( ' ', $cold['notes'] );
+blzmcp_it_assert( str_contains( $joined, 'Listed for inventory, not as checkout counts: ' . $disclosure ) && str_contains( $joined, 'blzph_outside' ) && str_contains( $joined, PaymentHealth::outside_next_check() ), 'top-level note carries the disclosure, the IDs and the manual check (outside the capped findings)' );
+blzmcp_it_equals( array( true, false ), array( $cold['inventory']['checked'], $cold['inventory']['methods_truncated'] ), 'inventory: checked, not truncated' );
+blzmcp_it_assert( 'complete' !== $cold['coverage'], 'unassessed inventory keeps top-level coverage from complete' );
+$all_text = strtolower( (string) wp_json_encode( array( $cold['notes'], $cold['findings'], array_column( $cold['methods'], 'reasons' ) ) ) );
+foreach ( array( 'blzpfx', 'switch it back on', 're-enable', 'money at risk' ) as $bad_word ) {
+	blzmcp_it_assert( ! str_contains( $all_text, $bad_word ), "no '{$bad_word}' in notes, findings or reasons" );
+}
+
+// ---------------------------------------------------------------- fix round (wave 1 pre-review): bounds through the full ability call.
+$limits_prop = new ReflectionProperty( PaymentOrders::class, 'limits_override' );
+$limits_prop->setAccessible( true );
+// Only this call's own entry is dropped; the cold run's entry is kept for the later reuse checks.
+$bound_key   = ( new ReflectionMethod( PaymentHealth::class, 'cache_key' ) )->invoke( null, array( 'since_hours' => 24 ) );
+$cold_entry  = get_transient( $bound_key );
+$run_limited = static function ( ?array $limits ) use ( $limits_prop, $ability, $bound_key ) {
+	$limits_prop->setValue( null, $limits );
+	try {
+		delete_transient( $bound_key );
+		return $ability->execute( array( 'since_hours' => 24 ) );
+	} finally {
+		$limits_prop->setValue( null, null );
+		delete_transient( $bound_key );
+	}
+};
+$disclosure_notes = static fn( $r ): array => array_values( array_filter( (array) ( is_array( $r ) ? $r['notes'] : array() ), static fn( $n ) => str_starts_with( (string) $n, 'Listed for inventory, not as checkout counts:' ) ) );
+$checkout_numbers = static function ( $r ): array {
+	$out = array( 'store_wide' => is_array( $r ) ? $r['store_wide'] : null );
+	foreach ( (array) ( is_array( $r ) ? $r['methods'] : array() ) as $m ) {
+		if ( 'checkout_health' === $m['assessment'] ) {
+			$out[ $m['id'] ] = array( $m['status'], $m['quiet'], $m['stuck'], $m['errors'], $m['activity']['checkout_observed'] );
+		}
+	}
+	return $out;
+};
+// (a) order_scan_budget: the scan stops one candidate before the end, after the outside orders of
+// blzph_outside (seeded before the last outside orders) were folded.
+$full_scan  = PaymentOrders::read( time(), 24, wp_timezone() );
+$budget_cap = (int) $full_scan['work']['candidates'] - 1;
+blzmcp_it_assert( $budget_cap > 0 && in_array( 'blzph_outside', $full_scan['outside']['ids'], true ), 'budget case: the unbounded scan observed blzph_outside' );
+$budget_r = $run_limited( array( 'candidates' => $budget_cap ) );
+blzmcp_it_assert( is_array( $budget_r ) && true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $budget_r ), true ), $ability->get_output_schema(), 'output' ), 'budget case: the full ability response validates' );
+$b_out = $by_id( $budget_r, 'blzph_outside' );
+blzmcp_it_equals( array( 'inventory_only', true, 'partial' ), array( $b_out['assessment'] ?? null, $b_out['activity']['outside_checkout_observed'] ?? null, $b_out['activity']['coverage'] ?? null ), 'budget case: positive outside observation kept on a partial scan' );
+blzmcp_it_equals( array( $partial_text ), $b_out['reasons'] ?? null, 'budget case: the method row uses the "checkout activity may be missing" sentence' );
+blzmcp_it_equals( $partial_text, $b_out['quiet']['reason'] ?? null, 'budget case: its checks carry the partial sentence too' );
+blzmcp_it_assert( ! str_contains( (string) wp_json_encode( $b_out ), 'Observed only' ), 'budget case: the method row never says "Observed only"' );
+$b_notes = $disclosure_notes( $budget_r );
+blzmcp_it_assert( array() !== $b_notes && str_contains( implode( ' ', $b_notes ), $partial_text ), 'budget case: the top-level disclosure note uses the partial sentence' );
+blzmcp_it_assert( ! preg_match( '/\bonly\b/i', implode( ' ', $b_notes ) ), 'budget case: the top-level disclosure note does not say "only"' );
+blzmcp_it_equals( array( true, 'partial', PaymentHealth::reason_text( 'order_scan_budget' ), false ), array( $budget_r['inventory']['checked'] ?? null, $budget_r['inventory']['coverage'] ?? null, $budget_r['inventory']['reason'] ?? null, $budget_r['inventory']['methods_truncated'] ?? null ), 'budget case: inventory partial with the scan-budget reason, not truncated' );
+blzmcp_it_assert( 'complete' !== ( $budget_r['coverage'] ?? null ), 'budget case: top-level coverage never complete' );
+// (b) identity cap forced to 2: truncated, the cap note, checkout numbers identical to the uncapped run.
+$uncapped = $run_limited( null );
+$capped_r = $run_limited( array( 'outside_ids' => 2 ) );
+blzmcp_it_assert( is_array( $capped_r ) && true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $capped_r ), true ), $ability->get_output_schema(), 'output' ), 'cap case: the full ability response validates' );
+blzmcp_it_equals( array( true, false ), array( $capped_r['inventory']['methods_truncated'] ?? null, $uncapped['inventory']['methods_truncated'] ?? null ), 'cap case: methods_truncated true only when capped' );
+blzmcp_it_equals( PaymentHealth::reason_text( 'outside_checkout_method_cap' ), $capped_r['inventory']['reason'] ?? null, 'cap case: inventory reason is the cap text' );
+blzmcp_it_assert( str_contains( implode( ' ', (array) $capped_r['notes'] ), 'more payment methods may exist than are listed here' ), 'cap case: the "more payment methods may exist" note' );
+blzmcp_it_assert( ! str_contains( implode( ' ', (array) $uncapped['notes'] ), 'more payment methods may exist than are listed here' ), 'cap case: no cap note without the cap' );
+blzmcp_it_equals( $checkout_numbers( $uncapped ), $checkout_numbers( $capped_r ), 'cap case: store-wide and checkout-method numbers, checks and statuses unchanged versus the uncapped run' );
+blzmcp_it_equals( $codes_for( $uncapped, 'blzph_quiet' ) + $codes_for( $uncapped, 'blzph_stuck' ), $codes_for( $capped_r, 'blzph_quiet' ) + $codes_for( $capped_r, 'blzph_stuck' ), 'cap case: real checkout findings unchanged' );
+if ( is_array( $cold_entry ) ) {
+	set_transient( $bound_key, $cold_entry, 300 );
+}
+
 // ---------------------------------------------------------------- permission split and cache context.
 $suffix = wp_generate_password( 6, false );
 $users  = array();
@@ -670,12 +823,13 @@ $set_diag( false );
 wp_set_current_user( $users['shop_manager'] );
 $sm = $ability->execute();
 blzmcp_it_assert( is_array( $sm ), 'shop manager can run payment health (order and config checks)' );
-blzmcp_it_assert( is_array( $sm ) && '' !== $sm['checked_at'] && array( $role_text ) === array_values( array_diff( $log_reasons( $sm ), array( PaymentHealth::reason_text( 'manual_method' ), PaymentHealth::reason_text( 'no_verified_mapping' ) ) ) ), 'shop manager without diagnostics: logs not checked, role reason' );
+blzmcp_it_assert( is_array( $sm ) && '' !== $sm['checked_at'] && array( $role_text ) === array_values( array_diff( $log_reasons( $sm ), array( PaymentHealth::reason_text( 'manual_method' ), PaymentHealth::reason_text( 'no_verified_mapping' ), $only_text, $partial_text ) ) ), 'shop manager without diagnostics: logs not checked, role reason' );
 $sm_m = $by_id( $sm, 'blzph_busy' );
 blzmcp_it_equals( array( false, null, false, null ), array( $sm_m['errors']['logs']['checked'] ?? null, $sm_m['errors']['logs']['count'] ?? null, $sm_m['errors']['jobs']['checked'] ?? null, $sm_m['errors']['jobs']['failed'] ?? null ), 'unchecked diagnostics give null counts, not zero' );
 blzmcp_it_assert( is_array( $sm ) && str_contains( implode( ' ', $sm['notes'] ), 'not allowed to see store diagnostics' ), 'shop manager: notes explain the role gap once' );
 blzmcp_it_assert( is_array( $sm ) && ! in_array( 'gateway_errors_logged', array_column( $sm['findings'], 'code' ), true ) && ! in_array( 'gateway_jobs_failed', array_column( $sm['findings'], 'code' ), true ), 'shop manager: no log- or job-derived finding' );
 blzmcp_it_equals( 'red', $sm['overall'] ?? null, 'shop manager still sees the order-based red' );
+blzmcp_it_equals( 'inventory_only', $by_id( $sm, 'blzph_outside' )['assessment'] ?? null, 'shop manager with diagnostics off still sees outside-checkout inventory (same order authority)' );
 
 // Diagnostics off to on without a flush, then back off: each state gets its own entry.
 $set_diag( true );
@@ -685,6 +839,61 @@ $set_diag( false );
 $sm_off = $ability->execute();
 blzmcp_it_assert( is_array( $sm_off ) && in_array( $role_text, $log_reasons( $sm_off ), true ), 'diagnostics on to off: the privileged result is not reused' );
 blzmcp_it_equals( $sm['checked_at'], $sm_off['checked_at'] ?? null, 'diagnostics off again reuses the earlier off entry' );
+
+// Fix round (wave 1 pre-review), item 3: two shop managers, same role. A has the diagnostics
+// capability granted directly; B does not (shop-manager diagnostics stay off). Through the real
+// cache path, B never gets A's entry or diagnostics, and B's entry never serves A.
+foreach ( array( 'sm_a', 'sm_b' ) as $who ) {
+	$users[ $who ] = wp_insert_user(
+		array(
+			'user_login' => "blzph_{$who}_{$suffix}",
+			'user_pass'  => wp_generate_password(),
+			'role'       => 'shop_manager',
+		)
+	);
+}
+$set_diag( false );
+( new WP_User( $users['sm_a'] ) )->add_cap( \Blaze\McpToolkit\Installer::CAPABILITY );
+// A and B are new users, so neither has an entry yet; the admin's cold entry is left alone.
+$diag_rows = static function ( $result ): array {
+	$out = array();
+	foreach ( (array) ( is_array( $result ) ? $result['methods'] : array() ) as $m ) {
+		foreach ( array( 'logs' => 'count', 'jobs' => 'failed' ) as $part => $qty ) {
+			if ( ! empty( $m['errors'][ $part ]['checked'] ) || null !== ( $m['errors'][ $part ][ $qty ] ?? null ) ) {
+				$out[] = $m['id'] . ':' . $part;
+			}
+		}
+	}
+	return $out;
+};
+wp_set_current_user( $users['sm_a'] );
+blzmcp_it_assert( Settings::can_view_diagnostics(), 'same-role: A can view diagnostics through the direct grant' );
+$a1 = $ability->execute();
+wp_set_current_user( $users['sm_b'] );
+blzmcp_it_assert( ! Settings::can_view_diagnostics(), 'same-role: B cannot view diagnostics' );
+$b1 = $ability->execute();
+wp_set_current_user( $users['sm_a'] );
+$a2 = $ability->execute();
+wp_set_current_user( $users['sm_b'] );
+$b2 = $ability->execute();
+blzmcp_it_assert( is_array( $a1 ) && is_array( $b1 ) && is_array( $a2 ) && is_array( $b2 ), 'same-role: all four calls return results' );
+blzmcp_it_assert( ! in_array( $role_text, $log_reasons( $a1 ), true ) && array() !== $diag_rows( $a1 ), 'same-role: A (granted) gets diagnostics' );
+blzmcp_it_assert( $a1 !== $b1, 'same-role: B did not receive A\'s cached payload' );
+blzmcp_it_assert( in_array( $role_text, $log_reasons( $b1 ), true ) && array() === $diag_rows( $b1 ), 'same-role: B gets no diagnostic data (role reason, null counts)' );
+blzmcp_it_equals( $a1, $a2, 'same-role: A\'s next call is served from A\'s own entry (identical, including checked_at), not B\'s' );
+blzmcp_it_equals( $b1, $b2, 'same-role: B\'s next call is served from B\'s own entry' );
+blzmcp_it_assert( array() === $diag_rows( $b2 ) && array() !== $diag_rows( $a2 ), 'same-role: diagnostics stay with A on the warm calls' );
+$key_for = static function ( int $uid ): string {
+	wp_set_current_user( $uid );
+	return ( new ReflectionMethod( PaymentHealth::class, 'cache_key' ) )->invoke( null, array( 'since_hours' => 24 ) );
+};
+blzmcp_it_assert( $key_for( $users['sm_a'] ) !== $key_for( $users['sm_b'] ), 'same-role: the two users have different cache keys' );
+blzmcp_it_assert( false !== get_transient( $key_for( $users['sm_a'] ) ) && false !== get_transient( $key_for( $users['sm_b'] ) ), 'same-role: both entries exist in the real result cache' );
+( new WP_User( $users['sm_a'] ) )->remove_cap( \Blaze\McpToolkit\Installer::CAPABILITY );
+wp_set_current_user( 0 );
+wp_set_current_user( $users['sm_a'] );
+blzmcp_it_assert( array() === $diag_rows( $ability->execute() ), 'same-role: revoking A\'s direct grant hides diagnostics at once (warm cache not served)' );
+wp_set_current_user( $users['shop_manager'] );
 
 // Revoked WooCommerce access: denied, never served from cache, audited once.
 $audit_table = $wpdb->prefix . 'blzmcp_audit';
@@ -703,12 +912,26 @@ $revoked  = $ability->execute();
 blzmcp_it_assert( is_wp_error( $revoked ), 'revoked manage_woocommerce: denied even with a warm cache' );
 blzmcp_it_equals( $before_d + 1, $denied_q(), 'revoked call audited once as denied' );
 
+$order_sql = array();
+$order_spy = static function ( $q ) use ( &$order_sql ) {
+	if ( str_contains( (string) $q, 'shop_order' ) ) {
+		$order_sql[] = (string) $q;
+	}
+	return $q;
+};
+add_filter( 'query', $order_spy );
 foreach ( array( 'subscriber', 'customer' ) as $who ) {
 	wp_set_current_user( $users[ $who ] );
-	blzmcp_it_assert( is_wp_error( $ability->execute() ), "{$who} is denied" );
+	$denied_r = $ability->execute();
+	blzmcp_it_assert( is_wp_error( $denied_r ), "{$who} is denied" );
+	blzmcp_it_assert( ! str_contains( (string) wp_json_encode( is_wp_error( $denied_r ) ? $denied_r->get_error_data() : $denied_r ), 'blzph_out' ) && ! str_contains( is_wp_error( $denied_r ) ? $denied_r->get_error_message() : '', 'blzph_out' ), "{$who}: no inventory data in the error" );
 }
 wp_set_current_user( 0 );
 blzmcp_it_assert( is_wp_error( $ability->execute() ), 'anonymous is denied' );
+remove_filter( 'query', $order_spy );
+blzmcp_it_equals( array(), $order_sql, 'denied calls never read orders (no shop_order query, so no outside observation source)' );
+$audit_rows = (string) wp_json_encode( $wpdb->get_results( $wpdb->prepare( 'SELECT * FROM %i WHERE ability = %s ORDER BY id DESC LIMIT 50', $audit_table, PaymentHealth::NAME ), ARRAY_A ) );
+blzmcp_it_assert( ! str_contains( $audit_rows, 'blzph_out' ) && ! str_contains( $audit_rows, 'blzpfx' ) && ! str_contains( $audit_rows, 'Janelle' ), 'audit rows hold no method observations, raw origins or customer data' );
 
 // Context fields: site, storage, timezone and gateway mode/config change the key.
 wp_set_current_user( $admins[0]->ID );
@@ -754,6 +977,59 @@ sleep( 1 );
 $fresh = $ability->execute();
 blzmcp_it_assert( is_array( $fresh ) && $fresh['checked_at'] !== $cold['checked_at'], 'absent cache regenerates with a new checked_at' );
 
+// 1.2.1 item 3: context 3, schema-1 entries rejected, no order reads while building the key.
+blzmcp_it_equals( 3, $context['v'], 'cache context version 3' );
+$key_sql = array();
+$key_spy = static function ( $q ) use ( &$key_sql ) {
+	if ( str_contains( (string) $q, 'shop_order' ) ) {
+		$key_sql[] = (string) $q;
+	}
+	return $q;
+};
+add_filter( 'query', $key_spy );
+$k_now = $key_of();
+remove_filter( 'query', $key_spy );
+blzmcp_it_equals( array(), $key_sql, 'building the cache key reads no orders' );
+$fresh_c = $ability->execute();
+$legacy  = $fresh_c;
+$legacy['schema_version'] = 1;
+$legacy['checked_at']     = '2000-01-01T00:00:00+00:00';
+unset( $legacy['inventory'] );
+set_transient( $k_now, $legacy, 300 );
+$upgraded = $ability->execute();
+blzmcp_it_equals( array( 2, true ), array( $upgraded['schema_version'] ?? null, '2000-01-01T00:00:00+00:00' !== ( $upgraded['checked_at'] ?? null ) ), 'a schema-1 entry under the current key is never served; a schema-2 result is computed' );
+blzmcp_it_assert( true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $upgraded ), true ), $ability->get_output_schema(), 'output' ), 'the recomputed result validates' );
+blzmcp_it_equals( $upgraded['checked_at'], $ability->execute()['checked_at'] ?? null, 'repeated equivalent call keeps checked_at' );
+// Fallback-only IDs take part in fact revalidation: a kind change, a registration with the method
+// switched on, and back.
+$out_kind = static fn( $kind, $id ) => 'blzph_outside' === $id ? 'manual' : $kind;
+add_filter( 'blaze_mcp_toolkit_payment_method_kind', $out_kind, 20, 2 );
+$out_k = $ability->execute();
+remove_filter( 'blaze_mcp_toolkit_payment_method_kind', $out_kind, 20 );
+blzmcp_it_equals( array( 'manual', 'inventory_only' ), array( $by_id( $out_k, 'blzph_outside' )['kind'] ?? null, $by_id( $out_k, 'blzph_outside' )['assessment'] ?? null ), 'fallback-only warm: a kind change is shown at once, still inventory only' );
+blzmcp_it_equals( 'instant', $by_id( $ability->execute(), 'blzph_outside' )['kind'] ?? null, 'fallback-only warm: the kind change back is shown at once' );
+update_option( 'woocommerce_blzph_outoff_settings', array( 'enabled' => 'yes' ) );
+$on_r = $ability->execute();
+blzmcp_it_equals( array( 'checkout_health', true ), array( $by_id( $on_r, 'blzph_outoff' )['assessment'] ?? null, $by_id( $on_r, 'blzph_outoff' )['enabled'] ?? null ), 'fallback-only warm: switching the registered method on moves it to the checkout path at once' );
+update_option( 'woocommerce_blzph_outoff_settings', array( 'enabled' => 'no' ) );
+blzmcp_it_equals( 'inventory_only', $by_id( $ability->execute(), 'blzph_outoff' )['assessment'] ?? null, 'fallback-only warm: switching it off again is shown at once' );
+$registry->payment_gateways[9199] = new Blzph_Test_Gateway( 'blzph_outside' );
+update_option( 'woocommerce_blzph_outside_settings', array( 'enabled' => 'yes' ) );
+blzmcp_it_cleanup( static fn() => delete_option( 'woocommerce_blzph_outside_settings' ) );
+$reg_r = $ability->execute();
+blzmcp_it_equals( array( true, 'checkout_health' ), array( $by_id( $reg_r, 'blzph_outside' )['registered'] ?? null, $by_id( $reg_r, 'blzph_outside' )['assessment'] ?? null ), 'fallback-only warm: registration plus enabled changes the row at once' );
+unset( $registry->payment_gateways[9199] );
+delete_option( 'woocommerce_blzph_outside_settings' );
+blzmcp_it_equals( array( false, 'inventory_only' ), array( $by_id( $ability->execute(), 'blzph_outside' )['registered'] ?? null, $by_id( $ability->execute(), 'blzph_outside' )['assessment'] ?? null ), 'fallback-only warm: deregistration is shown at once' );
+$out_rep = static function ( $map ) {
+	$map['blzph_outside'] = array( 'blzph_busy' );
+	return $map;
+};
+add_filter( 'blaze_mcp_toolkit_payment_method_replacements', $out_rep );
+$rep_r = $ability->execute();
+remove_filter( 'blaze_mcp_toolkit_payment_method_replacements', $out_rep );
+blzmcp_it_equals( array( 'inventory_only', array() ), array( $by_id( $rep_r, 'blzph_outside' )['assessment'] ?? null, $codes_for( $rep_r, 'blzph_outside' ) ), 'a replacement mapping change gives a fresh result and still no replacement finding for an inventory-only row' );
+
 // Item 6: warm cache, then the kind of a method known only from history (not registered) changes.
 blzmcp_it_equals( array( false, 'instant' ), array( $by_id( $fresh, 'blzph_gone' )['registered'] ?? null, $by_id( $fresh, 'blzph_gone' )['kind'] ?? null ), 'history-only method: not registered, instant by the test filter' );
 blzmcp_it_equals( $fresh['checked_at'], $ability->execute()['checked_at'] ?? null, 'history-only warm: an identical call is served from the cache' );
@@ -797,6 +1073,35 @@ if ( $clean_site ) {
 	echo "NOTE  other checkout orders exist on this site: store-wide outage assertions skipped\n";
 }
 blzmcp_it_equals( 'red', $by_id( $outage, 'blzph_busy' )['quiet']['status'] ?? null, 'store-wide outage: the busy method is now red too' );
+
+// ---------------------------------------------------------------- 1.2.1 scenario: green checkout plus an inventory-only method.
+if ( $clean_site ) {
+	foreach ( array_merge( array_keys( $seeded ), $outside_seeded ) as $gone_id ) {
+		blzmcp_it_delete_order( (int) $gone_id );
+	}
+	$registry->payment_gateways = array( new Blzph_Test_Gateway( 'blzph_green' ) );
+	update_option( 'woocommerce_blzph_green_settings', array( 'enabled' => 'yes' ) );
+	blzmcp_it_cleanup( static fn() => delete_option( 'woocommerce_blzph_green_settings' ) );
+	for ( $t = $now - 2 * $h; $t > $now - 27 * $d; $t -= 7 * $h ) {
+		blzmcp_pf_order( array( 'method' => 'blzph_green', 'via' => 'checkout', 'status' => 'completed', 'created' => $t, 'paid' => $t + 60 ) );
+	}
+	blzmcp_pf_order( array( 'method' => 'blzph_out_g', 'via' => 'admin', 'status' => 'completed', 'created' => $now - 3 * $d, 'paid' => $now - 3 * $d ) );
+	$clear_cache();
+	$g = $ability->execute();
+	blzmcp_it_equals( array( 'green', 'green', 'checkout_health' ), array( $g['overall'] ?? null, $by_id( $g, 'blzph_green' )['status'] ?? null, $by_id( $g, 'blzph_green' )['assessment'] ?? null ), 'green scenario: assessed checkout checks green' );
+	blzmcp_it_equals( array( 'inventory_only', 'unknown', array( $only_text ) ), array( $by_id( $g, 'blzph_out_g' )['assessment'] ?? null, $by_id( $g, 'blzph_out_g' )['status'] ?? null, $by_id( $g, 'blzph_out_g' )['reasons'] ?? null ), 'green scenario: the outside-only method is inventory only with the complete-scan disclosure' );
+	blzmcp_it_equals( array( 'partial', 'complete' ), array( $g['coverage'] ?? null, $g['inventory']['coverage'] ?? null ), 'green scenario: top-level coverage partial (unassessed method), inventory itself complete' );
+	$gn = implode( ' ', (array) ( $g['notes'] ?? array() ) );
+	blzmcp_it_assert( str_contains( $gn, 'Green covers only the checks that were assessed' ) && str_contains( $gn, 'blzph_out_g' ), 'green scenario: notes limit green to assessed checks and name the unassessed method' );
+	blzmcp_it_equals( array(), $codes_for( $g, 'blzph_out_g' ), 'green scenario: no finding for the inventory-only method' );
+	blzmcp_it_assert( true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $g ), true ), $ability->get_output_schema(), 'output' ), 'green scenario: validates' );
+	$registry->payment_gateways = $original;
+	foreach ( $ref_gateways as $i => $gid ) {
+		$registry->payment_gateways[ 9100 + $i ] = new Blzph_Test_Gateway( $gid );
+	}
+} else {
+	echo "NOTE  other checkout orders exist on this site: green inventory-only scenario skipped\n";
+}
 
 // ---------------------------------------------------------------- scenario 4: completely unobservable store.
 $bad_store = static fn() => 'Blzph_No_Such_Order_Store';
