@@ -267,8 +267,9 @@ else
 	printf '%s\n' "$rec_out" | awk '/^FAIL|unbound variable|invalid option|syntax error/ && n++ < 20'
 	fail=1
 fi
-# The performance gate's own self-tests and the release-zip exclusion canaries (host-side, no wp-env).
-for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh"; do
+# The performance gate's own self-tests, the release-zip exclusion canaries and the build-once
+# promotion tooling (artifact checker, release-candidate.sh, deploy.yml checks; offline stubs).
+for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh" "$host_bash tests/release/test-promotion.sh"; do
 	if t_out=$($t 2>&1); then
 		echo "PASS  $t ($(printf '%s\n' "$t_out" | tail -1))"
 	else
