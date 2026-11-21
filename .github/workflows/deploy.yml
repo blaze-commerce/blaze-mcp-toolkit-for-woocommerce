@@ -1,16 +1,54 @@
 name: Deploy to WordPress.org
 
+# Build once, promote: this workflow never builds the plugin. It ships the candidate zip that was
+# built by scripts/release-candidate.sh, tested, signed and staged as the asset of the draft GitHub
+# release for the tag. The tag must be annotated with the approved digest and source commit:
+#
+#   candidate-sha256: <64 hex>
+#   source-sha: <40 hex>
+#
+# Every check below fails closed; there is no rebuild fallback.
+
 on:
   push:
     tags:
       - 'v*'
       - '!v*-*' # Pre-release tags (v1.0.0-rc5) never deploy.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to (re)check, e.g. v1.2.1
+        required: true
+      sha256:
+        description: Approved candidate sha256 (used instead of the tag annotation)
+        required: true
+      dry_run:
+        description: Check everything and run the SVN deploy as a dry run (no commit)
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # read draft releases and publish the release after deploy
+
+concurrency:
+  group: deploy-wporg
+  cancel-in-progress: false
+
+env:
+  SLUG: blaze-mcp-toolkit-for-woocommerce
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      # Source checks on the tagged commit. These do not touch the shipped artifact.
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -18,16 +56,81 @@ jobs:
       - run: composer install --prefer-dist --no-interaction
       - run: composer phpcs
       - run: composer test
-      - run: composer install --no-dev --prefer-dist --no-interaction --classmap-authoritative
-      - name: Check version matches tag
+
+      - name: Read the approved digest and source commit
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          grep -qE "^Stable tag: ${TAG}$" readme.txt
-          grep -qE "^ \* Version:[[:space:]]+${TAG}$" blaze-mcp-toolkit-for-woocommerce.php
-      - name: WordPress.org plugin deploy
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          COMMIT="$(git rev-parse HEAD)"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            WANT_SHA="${{ inputs.sha256 }}"
+            WANT_SOURCE="$COMMIT"
+          else
+            REF_JSON="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")"
+            [ "$(echo "$REF_JSON" | jq -r .object.type)" = "tag" ] || { echo "::error::$TAG is a lightweight tag; it must be annotated with candidate-sha256 and source-sha"; exit 1; }
+            MESSAGE="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(echo "$REF_JSON" | jq -r .object.sha)" --jq .message)"
+            WANT_SHA="$(echo "$MESSAGE" | sed -n 's/^candidate-sha256:[[:space:]]*\([0-9a-f]\{64\}\)[[:space:]]*$/\1/p')"
+            WANT_SOURCE="$(echo "$MESSAGE" | sed -n 's/^source-sha:[[:space:]]*\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p')"
+          fi
+          [[ "$WANT_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::No candidate-sha256 for $TAG"; exit 1; }
+          [ "$WANT_SOURCE" = "$COMMIT" ] || { echo "::error::$TAG is at $COMMIT, approved source-sha is '${WANT_SOURCE}'"; exit 1; }
+          { echo "VERSION=$VERSION"; echo "WANT_SHA=$WANT_SHA"; echo "COMMIT=$COMMIT"; } >> "$GITHUB_ENV"
+          echo "Approved: $SLUG $VERSION, sha256 $WANT_SHA, source $COMMIT"
+
+      - name: Download the staged candidate and check its digest
+        run: |
+          set -euo pipefail
+          ASSET="$SLUG-$VERSION.zip"
+          RELEASES="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$TAG\")]")"
+          [ "$(echo "$RELEASES" | jq length)" = 1 ] || { echo "::error::Need exactly one GitHub release for $TAG"; exit 1; }
+          TARGET="$(echo "$RELEASES" | jq -r '.[0].target_commitish')"
+          [ "$TARGET" = "$COMMIT" ] || { echo "::error::Release $TAG targets $TARGET, not $COMMIT"; exit 1; }
+          [ "$(echo "$RELEASES" | jq '[.[0].assets[] | select(.name | endswith(".zip"))] | length')" = 1 ] || { echo "::error::Release $TAG must hold exactly one zip"; exit 1; }
+          ASSET_ID="$(echo "$RELEASES" | jq -r --arg n "$ASSET" '.[0].assets[] | select(.name == $n) | .id')"
+          [ -n "$ASSET_ID" ] || { echo "::error::Release $TAG has no $ASSET"; exit 1; }
+          echo "RELEASE_ID=$(echo "$RELEASES" | jq -r '.[0].id')" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/promote"
+          gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" > "$RUNNER_TEMP/promote/$ASSET"
+          GOT="$(sha256sum "$RUNNER_TEMP/promote/$ASSET" | cut -d' ' -f1)"
+          [ "$GOT" = "$WANT_SHA" ] || { echo "::error::$ASSET sha256 $GOT, approved $WANT_SHA"; exit 1; }
+          echo "$ASSET sha256 $GOT matches the approved digest"
+          unzip -q "$RUNNER_TEMP/promote/$ASSET" -d "$RUNNER_TEMP/promote/unzipped"
+          BUILD="$RUNNER_TEMP/promote/unzipped/$SLUG"
+          [ -f "$BUILD/$SLUG.php" ] || { echo "::error::$ASSET has no $SLUG/$SLUG.php"; exit 1; }
+          echo "BUILD_DIR=$BUILD" >> "$GITHUB_ENV"
+
+      - name: Check the candidate against the tagged source
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          grep -qE "^Stable tag: ${VERSION}$" readme.txt
+          grep -qE "^ \* Version:[[:space:]]+${VERSION}$" "$SLUG.php"
+          # Every non-vendor file shipped must be the tagged commit's file, byte for byte.
+          # vendor/ is the reviewed Composer output and is covered by the digest.
+          BAD=0
+          while IFS= read -r -d '' f; do
+            f="${f#./}"
+            case "$f" in vendor/*) continue ;; esac
+            if ! git -C "$GITHUB_WORKSPACE" cat-file -e "HEAD:$f" 2>/dev/null; then
+              echo "::error::$f is in the candidate but not in $TAG"; BAD=1
+            elif ! cmp -s "$f" <(git -C "$GITHUB_WORKSPACE" show "HEAD:$f"); then
+              echo "::error::$f differs from $TAG"; BAD=1
+            fi
+          done < <(find . -type f -print0)
+          [ "$BAD" = 0 ]
+          echo "$(find . -type f | wc -l) files; non-vendor files match $TAG"
+
+      - name: WordPress.org plugin deploy (the candidate, unchanged)
         uses: 10up/action-wordpress-plugin-deploy@stable
+        with:
+          dry-run: ${{ env.DRY_RUN }}
         env:
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
-          SLUG: blaze-mcp-toolkit-for-woocommerce
+          SLUG: ${{ env.SLUG }}
           ASSETS_DIR: .wordpress-org
+          BUILD_DIR: ${{ env.BUILD_DIR }}
+
+      - name: Publish the GitHub release
+        if: env.DRY_RUN != 'true'
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true >/dev/null
