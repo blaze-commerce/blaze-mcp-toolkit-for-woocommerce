@@ -117,19 +117,22 @@ function blzmcp_pf_expected( int $now, int $since_hours ): array {
 		'outside_invalid' => 0,
 	);
 	// The exact C4 horizon predicate for one outside-checkout order, from CRUD facts. Returns
-	// false for a valid order outside the horizon (neither an exclusion nor an observation).
+	// false for a valid order outside the horizon (neither an exclusion nor an observation) and,
+	// REVIEW-pass4 R3, for a future or malformed date: not recent activity, so never in the exact
+	// recent-origin totals; a real method ID is tallied as an invalid observation instead.
 	$observe = static function ( array $f ) use ( $now, $w, &$exp ): bool {
 		$bad = null === $f['created'] || $f['created'] >= $now || ( null !== $f['paid'] && $f['paid'] >= $now );
 		if ( ! $bad && $f['created'] < $w['baseline_start'] && ( null === $f['paid'] || $f['paid'] < $w['baseline_start'] ) ) {
 			return false;
 		}
 		$m = PaymentRules::safe_method_id( $f['method'] );
-		if ( '' === $m ) {
-			return true;
-		}
 		if ( $bad ) {
-			++$exp['outside_invalid'];
-		} else {
+			if ( '' !== $m ) {
+				++$exp['outside_invalid'];
+			}
+			return false;
+		}
+		if ( '' !== $m ) {
 			$exp['outside'][ $m ] = true;
 		}
 		return true;

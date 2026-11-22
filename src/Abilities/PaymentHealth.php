@@ -568,19 +568,31 @@ final class PaymentHealth extends AbstractAbility {
 			$notes[] = __( 'Some orders outside verified checkout activity have a future or malformed date, so payment methods seen only on those orders may be missing from this result.', 'blaze-mcp-toolkit-for-woocommerce' );
 		}
 
+		// Eligible checkout activity (C3, REVIEW-pass4 R1): only a scope with a positive valid
+		// observation in the 28-day horizon. The reader also opens a scope for a row it then rejects
+		// (a future or malformed date) or for a superset candidate outside the horizon; such a scope
+		// keeps its incomplete-coverage state for the activity block, but it is not checkout
+		// activity, so it neither lifts inventory-only isolation nor counts as history.
+		$checkout_ids = array();
+		foreach ( $scopes as $id => $scope ) {
+			if ( (int) ( $scope['observed'] ?? 0 ) > 0 ) {
+				$checkout_ids[ (string) $id ] = true;
+			}
+		}
+
 		// Methods: passive inventory, never constructing a gateway.
 		$registry_known  = false;
 		$registry_reason = null;
 		$inventory_ok    = true;
 		try {
-			$inventory       = PaymentMethods::inventory( array_map( 'strval', array_keys( $scopes ) ), $outside_ids );
+			$inventory       = PaymentMethods::inventory( array_map( 'strval', array_keys( $checkout_ids ) ), $outside_ids );
 			$registry_known  = (bool) $inventory['registry_known'];
 			$registry_reason = isset( $inventory['registry_reason'] ) && is_string( $inventory['registry_reason'] ) ? $inventory['registry_reason'] : null;
 			$methods         = (array) $inventory['methods'];
 			$families        = (array) $inventory['families'];
 		} catch ( \Throwable $e ) {
 			$inventory_ok = false;
-			$methods      = self::fallback_inventory( array_keys( $scopes ), $outside_ids );
+			$methods      = self::fallback_inventory( array_map( 'strval', array_keys( $checkout_ids ) ), $outside_ids );
 			$families     = array();
 		}
 		$inventory_only = array();
@@ -747,7 +759,7 @@ final class PaymentHealth extends AbstractAbility {
 					);
 				}
 			}
-			$inv_findings = PaymentRules::inventory_findings( $m, isset( $scopes[ $id ] ), $registry_known, self::checked_status( $store_quiet ), $siblings );
+			$inv_findings = PaymentRules::inventory_findings( $m, isset( $checkout_ids[ $id ] ), $registry_known, self::checked_status( $store_quiet ), $siblings );
 
 			$err   = $errors[ $id ] ?? self::errors_unavailable( 'manual' === ( $m['kind'] ?? null ) );
 			$stuck = self::stuck_public( $row['stuck'], $row['scope'], $windows, $hold, $orders['authority'] ?? null, $tz );
@@ -855,7 +867,15 @@ final class PaymentHealth extends AbstractAbility {
 		}
 		if ( array() === $out_methods ) {
 			// Only the facts actually read support this sentence; nothing is claimed about the rest.
-			if ( $registry_known && $orders_ok && 'complete' !== $outside_cov ) {
+			// REVIEW-pass4 R2: a checkout scan that did not cover every order (a work or metadata
+			// bound, the row cap, or rejected dates) supports only "none observed in the portion
+			// read", never a statement about the whole 28 days.
+			$checkout_read_all = $orders_ok && 'complete' === ( $orders['coverage'] ?? null );
+			if ( $registry_known && $orders_ok && ! $checkout_read_all ) {
+				$notes[] = __( 'No payment method is recorded as switched on, and none was observed taking checkout orders in the portion of orders that was read. Not every order from the last 28 days could be read, so payment methods that took checkout orders, and payment methods seen only on orders outside verified checkout activity, may be missing from this result. There are no listed methods to check.', 'blaze-mcp-toolkit-for-woocommerce' );
+			} elseif ( ! $registry_known && $orders_ok && ! $checkout_read_all ) {
+				$notes[] = __( 'No payment method was observed taking checkout orders in the portion of orders that was read, and the list of payment methods could not be read, so whether any method is switched on is unknown. Not every order from the last 28 days could be read, so payment methods that took checkout orders, and payment methods seen only on orders outside verified checkout activity, may be missing from this result. There are no listed methods to check.', 'blaze-mcp-toolkit-for-woocommerce' );
+			} elseif ( $registry_known && $orders_ok && 'complete' !== $outside_cov ) {
 				$notes[] = __( 'No payment method is recorded as switched on and none took checkout orders in the last 28 days. Orders outside verified checkout activity could not all be read, so methods seen only on those orders may be missing. There are no methods to check.', 'blaze-mcp-toolkit-for-woocommerce' );
 			} elseif ( $registry_known && $orders_ok ) {
 				$notes[] = __( 'No payment method is recorded as switched on and none took checkout orders in the last 28 days, so there are no methods to check.', 'blaze-mcp-toolkit-for-woocommerce' );

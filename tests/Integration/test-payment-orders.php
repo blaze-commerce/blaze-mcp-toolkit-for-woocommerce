@@ -163,6 +163,48 @@ if ( ! $hpos ) {
 blzmcp_it_assert( 0 === $got['methods']['stripe']['observed'] || $got['methods']['stripe']['observed'] > 0, 'checkout scopes carry an observed count' );
 blzmcp_it_assert( $got['work']['candidates'] >= $got['rows_read'] && false === $got['work']['budget'], 'work accounting: candidates examined at least rows selected, no budget hit' );
 
+// ---------------------------------------------------------------- wave 2 fix round (REVIEW-pass4 R3): invalid dates and the exact recent-origin totals.
+// The SQL selection is a superset: a future-created order passes the lower-bound predicate, and an
+// old-created order with a future paid date passes the paid-date one. Neither is recent activity, so
+// neither may enter the exact missing/other-origin totals the ability calls "in the last 28 days";
+// both are tallied as invalid observations instead (observation coverage partial). Expected deltas
+// are written out here, independent of the CRUD oracle, which is checked as well.
+wp_cache_flush();
+$r3_base = PaymentOrders::read( $now, 24, $tz );
+$r3_ids  = array(
+	'future_created'  => blzmcp_pf_order( array( 'method' => 'blzpf_r3_future_created', 'via' => '', 'status' => 'pending', 'created' => $now + DAY_IN_SECONDS ) ),
+	'at_now'          => blzmcp_pf_order( array( 'method' => 'blzpf_r3_at_now', 'via' => '', 'status' => 'pending', 'created' => $now ) ),
+	'old_future_paid' => blzmcp_pf_order( array( 'method' => 'blzpf_r3_old_future_paid', 'via' => '', 'status' => 'completed', 'created' => $now - 40 * DAY_IN_SECONDS, 'paid' => $now + DAY_IN_SECONDS ) ),
+	'other_future'    => blzmcp_pf_order( array( 'method' => 'blzpf_r3_other_future', 'via' => 'admin', 'status' => 'pending', 'created' => $now + DAY_IN_SECONDS ) ),
+	'start_edge'      => blzmcp_pf_order( array( 'method' => 'blzpf_r3_start_edge', 'via' => '', 'status' => 'pending', 'created' => $now - 28 * DAY_IN_SECONDS ) ),
+	'end_edge'        => blzmcp_pf_order( array( 'method' => 'blzpf_r3_end_edge', 'via' => '', 'status' => 'pending', 'created' => $now - 1 ) ),
+	'before_start'    => blzmcp_pf_order( array( 'method' => 'blzpf_r3_before_start', 'via' => '', 'status' => 'pending', 'created' => $now - 28 * DAY_IN_SECONDS - 1 ) ),
+);
+wp_cache_flush();
+$r3     = PaymentOrders::read( $now, 24, $tz );
+$r3_exp = blzmcp_pf_expected( $now, 24 );
+blzmcp_it_equals( $r3_base['excluded']['unknown_origin'] + 2, $r3['excluded']['unknown_origin'], 'R3: only the valid start-boundary and end-boundary missing-origin controls join the exact missing-origin total' );
+blzmcp_it_equals( $r3_base['excluded']['other_origin'], $r3['excluded']['other_origin'], 'R3: a future-created other-origin order is not added to the exact other-origin total' );
+blzmcp_it_equals( $r3_base['outside']['invalid'] + 4, $r3['outside']['invalid'], 'R3: future-created, created-at-now, old-created/future-paid and future other-origin orders are tallied as invalid observations' );
+foreach ( array( 'blzpf_r3_start_edge', 'blzpf_r3_end_edge' ) as $r3_want ) {
+	blzmcp_it_assert( in_array( $r3_want, $r3['outside']['ids'], true ), "R3: valid boundary control {$r3_want} is an observation" );
+}
+foreach ( array( 'blzpf_r3_future_created', 'blzpf_r3_at_now', 'blzpf_r3_old_future_paid', 'blzpf_r3_other_future', 'blzpf_r3_before_start' ) as $r3_never ) {
+	blzmcp_it_assert( ! in_array( $r3_never, $r3['outside']['ids'], true ), "R3: {$r3_never} is not an observation" );
+}
+blzmcp_it_equals( array( 'partial', 'invalid_timestamps' ), array( $r3['outside']['coverage'], $r3['outside']['reason'] ), 'R3: the invalid-date exclusions keep observation coverage partial' );
+// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- exact structural comparison.
+blzmcp_it_assert( serialize( array( $r3_base['store'], $r3_base['methods'], $r3_base['excluded']['invalid_timestamps'] ) ) === serialize( array( $r3['store'], $r3['methods'], $r3['excluded']['invalid_timestamps'] ) ), 'R3: checkout aggregates and the checkout invalid-timestamp count unchanged' );
+foreach ( array( 'unknown_origin', 'other_origin' ) as $k ) {
+	blzmcp_it_equals( $r3_exp['excluded'][ $k ], $r3['excluded'][ $k ], "R3: excluded {$k} matches the corrected CRUD oracle" );
+}
+blzmcp_it_equals( $r3_exp['outside_invalid'], $r3['outside']['invalid'], 'R3: invalid outside tally matches the corrected CRUD oracle' );
+blzmcp_it_equals( $r3_exp['outside'], $r3['outside']['ids'], 'R3: outside IDs match the corrected CRUD oracle' );
+foreach ( $r3_ids as $r3_id ) {
+	blzmcp_it_delete_order( $r3_id );
+}
+wp_cache_flush();
+
 // Specific semantics.
 $stripe = $got['methods']['stripe'] ?? null;
 blzmcp_it_assert( is_array( $stripe ), 'stripe aggregate present' );
