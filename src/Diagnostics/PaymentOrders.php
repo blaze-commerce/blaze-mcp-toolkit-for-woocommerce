@@ -374,7 +374,11 @@ final class PaymentOrders {
 	 * @param int                 $now     Now.
 	 * @param array<string,int>   $w       Windows.
 	 * @param array<string,mixed> $outside Observation map (by reference).
-	 * @return bool False only for a valid order outside the horizon (a superset candidate).
+	 * @return bool True only for a valid order in the horizon, the orders the exact recent-origin
+	 *              exclusion totals count. False for a valid order outside the horizon (a superset
+	 *              candidate) and for a future or malformed date (REVIEW-pass4 R3): such an order is
+	 *              not activity "in the last 28 days", so it is tallied in the separate invalid count
+	 *              (observation coverage partial) and never in those totals.
 	 */
 	private static function observe_outside( array $row, int $now, array $w, array &$outside ): bool {
 		$created = $row['created'];
@@ -385,11 +389,14 @@ final class PaymentOrders {
 			return false;
 		}
 		$id = PaymentRules::safe_method_id( (string) $row['method'] );
-		if ( '' === $id ) {
-			return true;
-		}
 		if ( $invalid ) {
-			++$outside['invalid'];
+			// An empty method ID cannot hide a method, so only a real ID makes coverage partial.
+			if ( '' !== $id ) {
+				++$outside['invalid'];
+			}
+			return false;
+		}
+		if ( '' === $id ) {
 			return true;
 		}
 		if ( isset( $outside['ids'][ $id ] ) ) {
@@ -442,7 +449,8 @@ final class PaymentOrders {
 		}
 		if ( null === $row['via'] || '' === $row['via'] || ! in_array( $row['via'], self::ORIGINS, true ) ) {
 			// C4: a superset candidate outside the horizon is neither an exclusion of recent
-			// activity nor an observation (the legacy paid-date widening selects such rows).
+			// activity nor an observation (the legacy paid-date widening selects such rows); nor
+			// is a future or malformed date, which is tallied as invalid instead (R3).
 			if ( self::observe_outside( $row, $now, $w, $outside ) ) {
 				++$excluded[ null === $row['via'] || '' === $row['via'] ? 'unknown_origin' : 'other_origin' ];
 			}

@@ -238,6 +238,42 @@ if ( '' !== $ph_step ) {
 	blzmcp_it_assert( ! str_contains( $empty_notes, 'No payment method is switched on' ), 'unbuilt empty: no claim that no method is switched on' );
 	blzmcp_it_assert( str_contains( $empty_notes, 'Listed for inventory, not as checkout counts:' ) && str_contains( $empty_notes, 'cod' ) && in_array( $registry_note, (array) ( $empty['notes'] ?? array() ), true ), 'unbuilt, inventory only: the disclosure note and the registry note' );
 	blzmcp_it_equals( array( true, 'partial' ), array( $empty['inventory']['checked'] ?? null, $empty['inventory']['coverage'] ?? null ), 'unbuilt: inventory checked but partial (registry not loaded)' );
+	// Wave 2 fix round (REVIEW-pass4 R2), unbuilt registry: the work bound stops the scan after one
+	// candidate, the lowest-ID order, whose method is blanked here so nothing becomes a method row.
+	// An empty result from an unfinished scan must not say no method took checkout orders.
+	$first_id   = min( array_map( 'intval', (array) ( $state['ids'] ?? array( 0 ) ) ) );
+	$set_method = static function ( int $oid, string $method ) use ( $wpdb, $clear_cache ): void {
+		$orders_t = $wpdb->prefix . 'wc_orders';
+		if ( $orders_t === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $orders_t ) ) ) ) {
+			$wpdb->query( $wpdb->prepare( 'UPDATE %i SET payment_method = %s WHERE id = %d', $orders_t, $method, $oid ) );
+		}
+		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET meta_value = %s WHERE meta_key = %s AND post_id = %d', $wpdb->postmeta, $method, '_payment_method', $oid ) );
+		$clear_cache();
+	};
+	$set_method( $first_id, '' );
+	$u_limits = new ReflectionProperty( PaymentOrders::class, 'limits_override' );
+	$u_limits->setAccessible( true );
+	$u_limits->setValue(
+		null,
+		array(
+			'candidates' => 1,
+			'chunk'      => 1,
+		)
+	);
+	try {
+		$u_partial = $ph->execute();
+	} finally {
+		$u_limits->setValue( null, null );
+		$set_method( $first_id, 'cheque' );
+	}
+	$u_notes = implode( ' ', (array) ( is_array( $u_partial ) ? $u_partial['notes'] : array() ) );
+	blzmcp_it_equals( array(), is_array( $u_partial ) ? $u_partial['methods'] : null, 'R2 unbuilt partial: the stopped scan leaves no method row (precondition)' );
+	blzmcp_it_assert( is_array( $u_partial ) && true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $u_partial ), true ), $ph->get_output_schema(), 'output' ), 'R2 unbuilt partial: response validates' );
+	blzmcp_it_equals( array( 'partial', PaymentHealth::reason_text( 'order_scan_budget' ) ), array( $u_partial['inventory']['coverage'] ?? null, $u_partial['inventory']['reason'] ?? null ), 'R2 unbuilt partial: inventory partial with the scan-budget reason' );
+	blzmcp_it_assert( ! str_contains( $u_notes, 'No payment method took checkout orders in the last 28 days' ) && ! str_contains( $u_notes, 'none took checkout orders in the last 28 days' ), 'R2 unbuilt partial: no categorical claim that no method took checkout orders' );
+	blzmcp_it_assert( str_contains( $u_notes, 'in the portion of orders that was read' ) && str_contains( $u_notes, 'outside verified checkout activity, may be missing' ), 'R2 unbuilt partial: "none observed in the portion read", with omitted checkout and outside methods named as possible' );
+	blzmcp_it_assert( str_contains( $u_notes, 'whether any method is switched on is unknown' ), 'R2 unbuilt partial: switched-on state stays unknown' );
+	blzmcp_it_equals( 'unknown', $u_partial['overall'] ?? null, 'R2 unbuilt partial: overall unknown, never green' );
 	blzmcp_it_assert( null === $instance->getValue(), 'unbuilt check: the ability still never built the registry' );
 	blzmcp_it_equals( 0, $http, 'unbuilt check: no HTTP' );
 
@@ -782,6 +818,128 @@ blzmcp_it_assert( str_contains( implode( ' ', (array) $capped_r['notes'] ), 'mor
 blzmcp_it_assert( ! str_contains( implode( ' ', (array) $uncapped['notes'] ), 'more payment methods may exist than are listed here' ), 'cap case: no cap note without the cap' );
 blzmcp_it_equals( $checkout_numbers( $uncapped ), $checkout_numbers( $capped_r ), 'cap case: store-wide and checkout-method numbers, checks and statuses unchanged versus the uncapped run' );
 blzmcp_it_equals( $codes_for( $uncapped, 'blzph_quiet' ) + $codes_for( $uncapped, 'blzph_stuck' ), $codes_for( $capped_r, 'blzph_quiet' ) + $codes_for( $capped_r, 'blzph_stuck' ), 'cap case: real checkout findings unchanged' );
+
+// ---------------------------------------------------------------- wave 2 fix round (REVIEW-pass4 R1): invalid checkout evidence keeps inventory-only isolation.
+// blzph_r1off (registered, switched off) and blzph_r1gone (not registered) each have one valid recent
+// admin order (a positive outside observation) and one checkout-origin order whose paid date is in
+// the future: the reader selects and rejects it, so a checkout scope exists with no valid observation.
+// Neither method has eligible checkout activity, so both stay inventory only: no rule, no diagnostics
+// read, no disabled/not-registered alert. blzph_r1mix (registered, switched off, a valid checkout
+// order plus an outside order) is the mixed control that keeps its real alert.
+$r1_t     = time();
+$r1_saved = array();
+foreach ( array( 'blzph_r1off', 'blzph_r1mix' ) as $i => $r1_gw ) {
+	$registry->payment_gateways[ 9300 + $i ] = new Blzph_Test_Gateway( $r1_gw );
+	$r1_saved[ $r1_gw ]                      = get_option( "woocommerce_{$r1_gw}_settings", null );
+	update_option( "woocommerce_{$r1_gw}_settings", array( 'enabled' => 'no' ) );
+}
+$r1_restore = static function () use ( $registry, $r1_saved ): void {
+	unset( $registry->payment_gateways[9300], $registry->payment_gateways[9301] );
+	foreach ( $r1_saved as $r1_gw => $r1_v ) {
+		null === $r1_v ? delete_option( "woocommerce_{$r1_gw}_settings" ) : update_option( "woocommerce_{$r1_gw}_settings", $r1_v );
+	}
+};
+blzmcp_it_cleanup( $r1_restore );
+$r1_orders = array();
+foreach ( array( 'blzph_r1off', 'blzph_r1gone' ) as $r1_m ) {
+	$r1_orders[] = blzmcp_pf_order( array( 'method' => $r1_m, 'via' => 'admin', 'status' => 'completed', 'created' => $r1_t - 2 * $d, 'paid' => $r1_t - 2 * $d + 60 ) );
+	$r1_orders[] = blzmcp_pf_order( array( 'method' => $r1_m, 'via' => 'checkout', 'status' => 'processing', 'created' => $r1_t - $d, 'paid' => $r1_t + $d ) );
+}
+$r1_orders[] = blzmcp_pf_order( array( 'method' => 'blzph_r1mix', 'via' => 'checkout', 'status' => 'completed', 'created' => $r1_t - 3 * $d, 'paid' => $r1_t - 3 * $d + 60 ) );
+$r1_orders[] = blzmcp_pf_order( array( 'method' => 'blzph_r1mix', 'via' => 'admin', 'status' => 'completed', 'created' => $r1_t - 2 * $d, 'paid' => $r1_t - 2 * $d + 60 ) );
+$r1_check    = static function ( $r, array $probe, string $label ) use ( $by_id, $codes_for, $partial_text, $not_applied, $ability ): void {
+	foreach ( array( 'blzph_r1off', 'blzph_r1gone' ) as $uid ) {
+		$u = $by_id( $r, $uid );
+		blzmcp_it_equals( array( 'inventory_only', 'unknown' ), array( $u['assessment'] ?? null, $u['status'] ?? null ), "R1 {$label}: {$uid} with only an invalid checkout row stays inventory only" );
+		blzmcp_it_equals( array( null, true, 'partial' ), array( is_array( $u['activity'] ?? null ) && array_key_exists( 'checkout_observed', $u['activity'] ) ? $u['activity']['checkout_observed'] : 'missing', $u['activity']['outside_checkout_observed'] ?? null, $u['activity']['coverage'] ?? null ), "R1 {$label}: {$uid} checkout observation unknown (incomplete, never false), outside positive, partial" );
+		blzmcp_it_equals( array( $partial_text ), $u['reasons'] ?? null, "R1 {$label}: {$uid} carries the partial-scan disclosure" );
+		foreach ( array( 'quiet' => $u['quiet'] ?? array(), 'stuck' => $u['stuck'] ?? array(), 'logs' => $u['errors']['logs'] ?? array(), 'jobs' => $u['errors']['jobs'] ?? array(), 'webhook' => $u['errors']['webhook'] ?? array() ) as $part => $c ) {
+			blzmcp_it_equals( $not_applied, array_intersect_key( $c, $not_applied ), "R1 {$label}: {$uid} {$part} unknown, not checked, not applicable" );
+		}
+		blzmcp_it_equals( array(), $codes_for( $r, $uid ), "R1 {$label}: {$uid} has no finding (no method_disabled_with_history, method_not_registered or any other)" );
+		blzmcp_it_assert( ! in_array( $uid, $probe['rule_ids'], true ), "R1 {$label}: {$uid} never reached the quiet/unpaid rules" );
+		blzmcp_it_assert( ! in_array( $uid, $probe['diagnostic_ids'], true ), "R1 {$label}: {$uid} never reached the diagnostics reader" );
+	}
+	$mix = $by_id( $r, 'blzph_r1mix' );
+	blzmcp_it_equals( array( 'checkout_health', true, true ), array( $mix['assessment'] ?? null, $mix['activity']['checkout_observed'] ?? null, $mix['activity']['outside_checkout_observed'] ?? null ), "R1 {$label}: the valid mixed control keeps the checkout path" );
+	blzmcp_it_assert( in_array( 'blzph_r1mix', $probe['rule_ids'], true ) && in_array( 'blzph_r1mix', $probe['diagnostic_ids'], true ), "R1 {$label}: the mixed control is still assessed (rules and diagnostics)" );
+	blzmcp_it_assert( is_array( $r ) && true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $r ), true ), $ability->get_output_schema(), 'output' ), "R1 {$label}: response validates" );
+};
+$r1 = $run_limited( null );
+$r1_check( $r1, $probe_prop->getValue(), 'registry built' );
+blzmcp_it_equals( array( true, false ), array( $by_id( $r1, 'blzph_r1off' )['registered'] ?? null, $by_id( $r1, 'blzph_r1off' )['enabled'] ?? null ), 'R1 registry built: registered-disabled facts shown without severity' );
+blzmcp_it_equals( false, $by_id( $r1, 'blzph_r1gone' )['registered'] ?? null, 'R1 registry built: the unregistered variant is known absent, still no finding' );
+blzmcp_it_equals( 'amber', $codes_for( $r1, 'blzph_r1mix' )['method_disabled_with_history'] ?? null, 'R1 registry built: the valid mixed control keeps its disabled-with-history alert' );
+blzmcp_it_equals( 'amber', $codes_for( $r1, 'blzph_off' )['method_disabled_with_history'] ?? null, 'R1 registry built: the real disabled-with-history sibling is not suppressed' );
+blzmcp_it_equals( $by_id( $uncapped, 'stripe' )['errors'] ?? 'missing', $by_id( $r1, 'stripe' )['errors'] ?? null, 'R1 registry built: the Stripe family diagnostics are unchanged (no shared budget taken by the unassessed rows)' );
+blzmcp_it_equals( $codes_for( $uncapped, 'blzph_quiet' ) + $codes_for( $uncapped, 'blzph_stuck' ) + $codes_for( $uncapped, 'stripe' ), $codes_for( $r1, 'blzph_quiet' ) + $codes_for( $r1, 'blzph_stuck' ) + $codes_for( $r1, 'stripe' ), 'R1 registry built: sibling checkout findings unchanged' );
+// The throwing inventory reader: the fallback uses the same positive checkout evidence.
+$r1_boom = static function ( $map ) {
+	foreach ( debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS ) as $frame ) { // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_debug_backtrace
+		if ( 'inventory' === ( $frame['function'] ?? '' ) && \Blaze\McpToolkit\Diagnostics\PaymentMethods::class === ( $frame['class'] ?? '' ) ) {
+			throw new RuntimeException( 'synthetic inventory failure' );
+		}
+	}
+	return $map;
+};
+add_filter( 'blaze_mcp_toolkit_payment_gateway_tokens', $r1_boom );
+try {
+	$r1_fallback = $run_limited( null );
+	$r1_fprobe   = $probe_prop->getValue();
+} finally {
+	remove_filter( 'blaze_mcp_toolkit_payment_gateway_tokens', $r1_boom );
+}
+$r1_check( $r1_fallback, $r1_fprobe, 'throwing inventory reader' );
+$r1_reg = static fn( ?array $row ) => is_array( $row ) && array_key_exists( 'registered', $row ) ? $row['registered'] : 'missing';
+blzmcp_it_equals( array( null, null ), array( $r1_reg( $by_id( $r1_fallback, 'blzph_r1off' ) ), $r1_reg( $by_id( $r1_fallback, 'blzph_r1gone' ) ) ),'R1 throwing inventory reader: registration unknown on the fallback rows' );
+blzmcp_it_equals( 'partial', $r1_fallback['inventory']['coverage'] ?? null, 'R1 throwing inventory reader: inventory coverage partial' );
+foreach ( $r1_orders as $r1_id ) {
+	blzmcp_it_delete_order( $r1_id );
+}
+$r1_restore();
+
+// ---------------------------------------------------------------- wave 2 fix round (REVIEW-pass4 R3): invalid dates stay out of the exact recent-origin note.
+// Missing-origin orders created in the future, or created long ago with a future paid date, are
+// selected by the SQL superset but are not orders "in the last 28 days": the exact count in the
+// missing-origin note counts only the valid boundary controls, and the invalid dates are disclosed
+// separately as a coverage gap.
+$r3_count = static function ( $r ): int {
+	foreach ( (array) ( is_array( $r ) ? $r['notes'] : array() ) as $n ) {
+		if ( preg_match( '/^(\d+) orders? in the last 28 days ha(?:s|ve) no recorded origin/', (string) $n, $mm ) ) {
+			return (int) $mm[1];
+		}
+	}
+	return 0;
+};
+$r3_base   = $run_limited( null );
+$r3_t      = time();
+$r3_orders = array(
+	blzmcp_pf_order( array( 'method' => 'blzph_r3_future', 'via' => '', 'status' => 'pending', 'created' => $r3_t + $d ) ),
+	blzmcp_pf_order( array( 'method' => 'blzph_r3_futpaid', 'via' => '', 'status' => 'completed', 'created' => $r3_t - 40 * $d, 'paid' => $r3_t + $d ) ),
+	blzmcp_pf_order( array( 'method' => 'blzph_r3_start', 'via' => '', 'status' => 'pending', 'created' => $r3_t - 28 * $d + 600 ) ),
+	blzmcp_pf_order( array( 'method' => 'blzph_r3_end', 'via' => '', 'status' => 'pending', 'created' => $r3_t - 120 ) ),
+);
+$r3 = $run_limited( null );
+blzmcp_it_assert( is_array( $r3 ) && true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $r3 ), true ), $ability->get_output_schema(), 'output' ), 'R3: response validates' );
+blzmcp_it_equals( $r3_count( $r3_base ) + 2, $r3_count( $r3 ), 'R3: the "in the last 28 days" missing-origin count adds only the two valid boundary controls' );
+blzmcp_it_equals( array( 'inventory_only', 'inventory_only', null, null ), array( $by_id( $r3, 'blzph_r3_start' )['assessment'] ?? null, $by_id( $r3, 'blzph_r3_end' )['assessment'] ?? null, $by_id( $r3, 'blzph_r3_future' ), $by_id( $r3, 'blzph_r3_futpaid' ) ), 'R3: valid controls are listed inventory only; invalid-dated orders establish no method row' );
+$r3_notes = implode( ' ', (array) $r3['notes'] );
+blzmcp_it_assert( str_contains( $r3_notes, 'Some orders outside verified checkout activity have a future or malformed date' ) || str_contains( $r3_notes, 'Some orders could not be read completely' ), 'R3: the invalid-date exclusions are still disclosed as a coverage gap' );
+blzmcp_it_equals( 'partial', $r3['inventory']['coverage'] ?? null, 'R3: inventory coverage stays partial' );
+// Counts and statuses only: two calls seconds apart can differ in elapsed-time fields.
+$r3_counts = static function ( $r ): array {
+	$out = array( 'store' => array( $r['store_wide']['status'] ?? null, $r['store_wide']['taken_28d'] ?? null ) );
+	foreach ( (array) ( is_array( $r ) ? $r['methods'] : array() ) as $m ) {
+		if ( 'checkout_health' === $m['assessment'] ) {
+			$out[ $m['id'] ] = array( $m['quiet']['taken_28d'], $m['stuck']['pending'], $m['stuck']['cancelled_unpaid'], $m['stuck']['taken'], $m['stuck']['failed'], $m['stuck']['status'] );
+		}
+	}
+	return $out;
+};
+blzmcp_it_equals( $r3_counts( $r3_base ), $r3_counts( $r3 ), 'R3: checkout counts unchanged' );
+foreach ( $r3_orders as $r3_id ) {
+	blzmcp_it_delete_order( $r3_id );
+}
 if ( is_array( $cold_entry ) ) {
 	set_transient( $bound_key, $cold_entry, 300 );
 }
@@ -1085,10 +1243,11 @@ if ( $clean_site ) {
 	$registry->payment_gateways = array( new Blzph_Test_Gateway( 'blzph_green' ) );
 	update_option( 'woocommerce_blzph_green_settings', array( 'enabled' => 'yes' ) );
 	blzmcp_it_cleanup( static fn() => delete_option( 'woocommerce_blzph_green_settings' ) );
+	$green_ids = array();
 	for ( $t = $now - 2 * $h; $t > $now - 27 * $d; $t -= 7 * $h ) {
-		blzmcp_pf_order( array( 'method' => 'blzph_green', 'via' => 'checkout', 'status' => 'completed', 'created' => $t, 'paid' => $t + 60 ) );
+		$green_ids[] = blzmcp_pf_order( array( 'method' => 'blzph_green', 'via' => 'checkout', 'status' => 'completed', 'created' => $t, 'paid' => $t + 60 ) );
 	}
-	blzmcp_pf_order( array( 'method' => 'blzph_out_g', 'via' => 'admin', 'status' => 'completed', 'created' => $now - 3 * $d, 'paid' => $now - 3 * $d ) );
+	$green_ids[] = blzmcp_pf_order( array( 'method' => 'blzph_out_g', 'via' => 'admin', 'status' => 'completed', 'created' => $now - 3 * $d, 'paid' => $now - 3 * $d ) );
 	$clear_cache();
 	$g = $ability->execute();
 	blzmcp_it_equals( array( 'green', 'green', 'checkout_health' ), array( $g['overall'] ?? null, $by_id( $g, 'blzph_green' )['status'] ?? null, $by_id( $g, 'blzph_green' )['assessment'] ?? null ), 'green scenario: assessed checkout checks green' );
@@ -1098,6 +1257,71 @@ if ( $clean_site ) {
 	blzmcp_it_assert( str_contains( $gn, 'Green covers only the checks that were assessed' ) && str_contains( $gn, 'blzph_out_g' ), 'green scenario: notes limit green to assessed checks and name the unassessed method' );
 	blzmcp_it_equals( array(), $codes_for( $g, 'blzph_out_g' ), 'green scenario: no finding for the inventory-only method' );
 	blzmcp_it_assert( true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $g ), true ), $ability->get_output_schema(), 'output' ), 'green scenario: validates' );
+
+	// ------------------------------------------------------------ wave 2 fix round (REVIEW-pass4 R2): an unfinished empty scan never claims checkout absence.
+	// Only two in-horizon orders remain: A (lowest ID, checkout, no payment method) and, for the
+	// partial runs, B (checkout, method blzph_r2_unseen). A complete scan of A alone is a genuine
+	// empty result and may say no method took checkout orders. A scan stopped by the work bound
+	// after A (or, on legacy storage, by the metadata bound before any batch is folded) also
+	// returns no methods, but must say only that none was observed in the portion read.
+	foreach ( $green_ids as $gone_id ) {
+		blzmcp_it_delete_order( (int) $gone_id );
+	}
+	$r2_t   = time();
+	$r2_ids = array( blzmcp_pf_order( array( 'method' => '', 'via' => 'checkout', 'status' => 'completed', 'created' => $r2_t - 2 * $d, 'paid' => $r2_t - 2 * $d + 60 ) ) );
+	$r2_run = static function ( ?array $limits ) use ( $limits_prop, $ability, $clear_cache ) {
+		$limits_prop->setValue( null, $limits );
+		try {
+			$clear_cache();
+			return $ability->execute( array( 'since_hours' => 24 ) );
+		} finally {
+			$limits_prop->setValue( null, null );
+			$clear_cache();
+		}
+	};
+	$r2_known_done  = 'No payment method is recorded as switched on and none took checkout orders in the last 28 days, so there are no methods to check.';
+	$r2_unread_done = 'No payment method took checkout orders in the last 28 days, and the list of payment methods could not be read';
+	$r2_portion     = 'in the portion of orders that was read';
+	$r2_generic     = 'Some orders could not be read completely';
+	$r2_assert      = static function ( $r, bool $done, bool $known, string $label ) use ( $ability, $r2_known_done, $r2_unread_done, $r2_portion, $r2_generic ): void {
+		$n = implode( ' ', (array) ( is_array( $r ) ? $r['notes'] : array() ) );
+		blzmcp_it_equals( array(), is_array( $r ) ? $r['methods'] : null, "R2 {$label}: no method row (precondition)" );
+		blzmcp_it_assert( is_array( $r ) && true === rest_validate_value_from_schema( json_decode( (string) wp_json_encode( $r ), true ), $ability->get_output_schema(), 'output' ), "R2 {$label}: response validates" );
+		blzmcp_it_assert( 'green' !== ( $r['overall'] ?? null ), "R2 {$label}: never green" );
+		$categorical = str_contains( $n, 'none took checkout orders in the last 28 days' ) || str_contains( $n, 'No payment method took checkout orders in the last 28 days' );
+		if ( $done ) {
+			blzmcp_it_assert( str_contains( $n, $known ? $r2_known_done : $r2_unread_done ), "R2 {$label}: a genuinely complete empty scan keeps its categorical sentence" );
+			blzmcp_it_assert( ! str_contains( $n, $r2_portion ) && ! str_contains( $n, $r2_generic ), "R2 {$label}: no partial wording on a complete scan" );
+			return;
+		}
+		blzmcp_it_assert( ! $categorical, "R2 {$label}: no categorical claim that no method took checkout orders" );
+		blzmcp_it_assert( str_contains( $n, $r2_portion ) && str_contains( $n, 'outside verified checkout activity, may be missing' ), "R2 {$label}: none observed in the portion read, with omitted checkout and outside methods named as possible" );
+		blzmcp_it_assert( str_contains( $n, $r2_generic ), "R2 {$label}: the generic partial-read note is present, without a categorical claim beside it" );
+		blzmcp_it_equals( 'partial', $r['inventory']['coverage'] ?? null, "R2 {$label}: inventory coverage partial" );
+		if ( ! $known ) {
+			blzmcp_it_assert( str_contains( $n, 'whether any method is switched on is unknown' ), "R2 {$label}: switched-on state stays unknown" );
+		}
+	};
+	$registry->payment_gateways = array(); // Built, known empty.
+	$r2_assert( $r2_run( null ), true, true, 'built-empty registry, complete scan' );
+	$registry->payment_gateways = null; // Unreadable: registration unknown.
+	$r2_assert( $r2_run( null ), true, false, 'unreadable registry, complete scan' );
+	$r2_ids[]  = blzmcp_pf_order( array( 'method' => 'blzph_r2_unseen', 'via' => 'checkout', 'status' => 'completed', 'created' => $r2_t - $d, 'paid' => $r2_t - $d + 60 ) );
+	$r2_budget = array(
+		'candidates' => 1,
+		'chunk'      => 1,
+	);
+	$registry->payment_gateways = array();
+	$r2_assert( $r2_run( $r2_budget ), false, true, 'built-empty registry, candidate budget' );
+	$registry->payment_gateways = null;
+	$r2_assert( $r2_run( $r2_budget ), false, false, 'unreadable registry, candidate budget' );
+	if ( 'hpos' !== ( $auth['authority'] ?? '' ) ) {
+		$registry->payment_gateways = array();
+		$r2_assert( $r2_run( array( 'meta_batch' => 1 ) ), false, true, 'built-empty registry, legacy metadata budget before any batch is folded' );
+	}
+	foreach ( $r2_ids as $r2_id ) {
+		blzmcp_it_delete_order( (int) $r2_id );
+	}
 	$registry->payment_gateways = $original;
 	foreach ( $ref_gateways as $i => $gid ) {
 		$registry->payment_gateways[ 9100 + $i ] = new Blzph_Test_Gateway( $gid );
