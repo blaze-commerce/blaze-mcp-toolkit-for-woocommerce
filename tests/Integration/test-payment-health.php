@@ -1032,7 +1032,10 @@ blzmcp_it_equals( array( 'inventory_only', array() ), array( $by_id( $rep_r, 'bl
 
 // Item 6: warm cache, then the kind of a method known only from history (not registered) changes.
 blzmcp_it_equals( array( false, 'instant' ), array( $by_id( $fresh, 'blzph_gone' )['registered'] ?? null, $by_id( $fresh, 'blzph_gone' )['kind'] ?? null ), 'history-only method: not registered, instant by the test filter' );
-blzmcp_it_equals( $fresh['checked_at'], $ability->execute()['checked_at'] ?? null, 'history-only warm: an identical call is served from the cache' );
+// Re-warm first: the fallback-only block above deliberately produces fresh results, so $fresh is no
+// longer the cached entry and comparing against it only passed when every call landed in one second.
+$warm = $ability->execute();
+blzmcp_it_equals( $warm['checked_at'] ?? null, $ability->execute()['checked_at'] ?? null, 'history-only warm: an identical call is served from the cache' );
 $gone_manual = static fn( $kind, $id ) => 'blzph_gone' === $id ? 'manual' : $kind;
 add_filter( 'blaze_mcp_toolkit_payment_method_kind', $gone_manual, 20, 2 );
 $gone_r = $ability->execute();
