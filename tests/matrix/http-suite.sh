@@ -650,8 +650,8 @@ pay_call() { # session [clear] -> payment health with since_hours 24; clear=1 em
 	call_ability "$1" "$PAY" '{"since_hours":24}'
 }
 role_note() { jq -r --arg n "$ROLE_NOTE" '[.ok.notes[]? | contains($n)] | any' "$CALL_OUT"; }
-# Method facts of the fixture that a denied caller must never receive, in a body or an error.
-leaks() { grep -qE 'blzmcp_phone|blzmcp_gone|taken_28d|outside_checkout_observed|inventory_only|gateway_jobs_failed|gateway_job_failed' "$1"; }
+# The method-fact check (blzmcp_leaks, expect_no_facts) lives in http-checks.sh, sourced at the top,
+# so the none branch and the Easy override above use the same fail-closed check (REVIEW-pass4b R4).
 set_sm_diag() { wpc eval "Blaze\\McpToolkit\\Settings::update( array( 'shop_manager_diagnostics' => $1 ) );" >/dev/null; }
 pf_switch() { # authority sync: switched in one process (the integration suite's own switch), asserted in the next
 	"$WPE" run cli env BLZMCP_PF_SET="$1" BLZMCP_PF_SYNC="$2" wp eval-file wp-content/blzmcp-tests/Integration/test-payment-orders.php 2>&1 | grep -qE '^[0-9]+ passed, 0 failed'
@@ -769,7 +769,7 @@ deny_case() { # route principal
 	fi
 	pay_call "$sname" # no flush: a privileged result is warm in the cache
 	expect_call_refusal "$1: $2 is denied payment health with the known permission refusal" "$1" "$PAY" perm
-	if leaks "$RPC_BODY"; then no "$1: $2 receives no method facts"; else ok "$1: $2 receives no method facts"; fi
+	expect_no_facts "$1: $2 receives no method facts"
 }
 
 save_option blzmcp_settings
@@ -866,7 +866,7 @@ for auth in $PAY_AUTHORITIES; do
 			helper credentials.php user ensure blzmcp_matrix_sm customer >/dev/null
 			pay_call "$sm"
 			expect_call_refusal "$s [$auth]: after the downgrade to customer the warm result is refused with the known permission refusal" "${S_KIND[$sm]}" "$PAY" perm
-			if leaks "$RPC_BODY"; then no "$s [$auth]: the downgraded user receives no method facts"; else ok "$s [$auth]: the downgraded user receives no method facts"; fi
+			expect_no_facts "$s [$auth]: the downgraded user receives no method facts"
 			helper credentials.php user ensure blzmcp_matrix_sm shop_manager >/dev/null
 			set_sm_diag false
 		fi

@@ -99,26 +99,78 @@ call_refusal() {
 	fi
 }
 
+# Method facts of the payment fixture that a denied caller must never receive, in a body or an error.
+BLZMCP_METHOD_FACTS='blzmcp_phone|blzmcp_gone|taken_28d|outside_checkout_observed|inventory_only|gateway_jobs_failed|gateway_job_failed'
+
+# blzmcp_leaks file: the method-fact check (REVIEW-pass4b R4). Defined here, in the helper the suite
+# sources before any case runs, so the none branch and the Easy override reach it too; the
+# blzmcp_ prefix keeps it clear of system commands (macOS ships an unrelated /usr/bin/leaks).
+# Returns 0 when the file carries a method fact, 1 when it was read and carries none, and 2 when it
+# could not be checked (no path, a missing or unreadable file, a grep error). Never negate it:
+# callers go through blzmcp_leak_state, where 2 is "error", never "clean".
+blzmcp_leaks() {
+	[ -n "${1:-}" ] && [ -f "$1" ] && [ -r "$1" ] || return 2
+	grep -qE -e "$BLZMCP_METHOD_FACTS" -- "$1"
+	case $? in
+	0) return 0 ;;
+	1) return 1 ;;
+	*) return 2 ;;
+	esac
+}
+
+# blzmcp_leak_state file: prints leak, clean or error.
+blzmcp_leak_state() {
+	blzmcp_leaks "$1"
+	case $? in
+	0) echo leak ;;
+	1) echo clean ;;
+	*) echo error ;;
+	esac
+}
+
+# leak_why state: the failure note for a leak state other than clean.
+leak_why() {
+	case "$1" in
+	clean) ;;
+	leak) echo ', method facts in the body' ;;
+	*) echo ', the method-fact check could not read the body' ;;
+	esac
+}
+
+# expect_no_facts label [file]: one check that the reply (default $RPC_BODY) was read and carries no
+# method facts. A checker error fails the check.
+expect_no_facts() {
+	local st
+	st=$(blzmcp_leak_state "${2:-$RPC_BODY}")
+	if [ "$st" == clean ]; then
+		ok "$1"
+	else
+		no "$1 (got $st$(leak_why "$st"))"
+	fi
+}
+
 # expect_init_refusal label want(auth|no_route): one check on a refused initialize, passed only for
-# the known answer and no method facts in the body. Uses the suite's ok, no and leaks.
+# the known answer and a body that was read and carries no method facts. Uses the suite's ok and no.
 expect_init_refusal() {
-	local cls
+	local cls st
 	cls=$(init_refusal)
-	if [ "$cls" == "$2" ] && ! leaks "$RPC_BODY"; then
+	st=$(blzmcp_leak_state "$RPC_BODY")
+	if [ "$cls" == "$2" ] && [ "$st" == clean ]; then
 		ok "$1 (http $RPC_CODE)"
 	else
-		no "$1 (expected $2 without method facts, got $cls$(leaks "$RPC_BODY" && echo ', method facts in the body'))"
+		no "$1 (expected $2 without method facts, got $cls$(leak_why "$st"))"
 	fi
 }
 
 # expect_call_refusal label route slug want(perm|tool_off): one check on the last tools/call reply.
 expect_call_refusal() {
-	local cls
+	local cls st
 	cls=$(call_refusal "$2" "$3")
-	if [ "$cls" == "$4" ] && ! leaks "$RPC_BODY"; then
+	st=$(blzmcp_leak_state "$RPC_BODY")
+	if [ "$cls" == "$4" ] && [ "$st" == clean ]; then
 		ok "$1 ($(call_err | head -c 80))"
 	else
-		no "$1 (expected $4 without method facts, got $cls$(leaks "$RPC_BODY" && echo ', method facts in the body'))"
+		no "$1 (expected $4 without method facts, got $cls$(leak_why "$st"))"
 	fi
 }
 

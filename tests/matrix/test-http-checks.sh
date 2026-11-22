@@ -9,7 +9,13 @@
 #    (the lead's pass4a probe method: the original functions with only their I/O boundary stubbed).
 #    HTTP 000, 500 and a failed HTTP-200 initialise, a credential helper failure, a 5xx, malformed,
 #    unrelated or unknown-text call reply and a successful result must each produce a FAILED row;
-#    the known refusals must produce a PASSED row.
+#    the known refusals must produce a PASSED row. Only http-checks.sh is loaded beside them, as in
+#    the suite: no helper is predefined for the extracted functions.
+# 2b. Early paths in their real order (REVIEW-pass4b R4): the suite's none branch and its Easy MCP
+#    AI override block run as written, after http-checks.sh and the suite functions defined above
+#    them, with only the WordPress/HTTP boundary stubbed. Known refusals carrying method facts and
+#    a method-fact checker error must fail; clean known refusals must pass; no checker may print
+#    an execution error.
 # 3. Diagnostics: a payload with the expected role note but leaked diagnostics fails; a vacuous
 #    payload (no applicable check) fails; the on phase must show the applicable failed job.
 # 4. Structure: every safety case in http-suite.sh goes through the fail-closed helpers.
@@ -29,7 +35,9 @@ fi
 command -v jq >/dev/null || { echo "FAIL  jq is required"; echo "0 passed, 1 failed"; exit 1; }
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-SUITE=${BLZMCP_TEST_HTTP_SUITE:-$REPO/tests/matrix/http-suite.sh} # override: run the full-path cases against another copy
+SUITE=${BLZMCP_TEST_HTTP_SUITE:-$REPO/tests/matrix/http-suite.sh} # override: run every case against another copy
+# The helper the suite sources is the one beside it (http-suite.sh sources its own directory's copy).
+CHECKS=$(cd "$(dirname "$SUITE")" && pwd)/http-checks.sh
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-test-http.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 T_PASS=0
@@ -39,7 +47,7 @@ t_no() { T_FAIL=$((T_FAIL + 1)); echo "FAIL  $*"; }
 t_eq() { if [ "$2" == "$3" ]; then t_ok "$1"; else t_no "$1 (expected $2, got $3)"; fi; }
 
 # shellcheck source=tests/matrix/http-checks.sh
-. "$REPO/tests/matrix/http-checks.sh"
+. "$CHECKS"
 RPC_BODY="$WORK/body.json"
 PAY=blaze-mcp-toolkit/payment-health
 reply() { # code body [id]: inject the last reply
@@ -114,6 +122,27 @@ t_eq 'call rec: a successful result is a result' result "$(call_refusal rec "$PA
 reply 200 '{"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":"{\"overall\":\"red\"}"}]}}'
 t_eq 'call easy: a successful result is a result' result "$(call_refusal easy "$PAY")"
 
+# The method-fact checker (REVIEW-pass4b R4): a match is a leak, a clean read is clean, and anything
+# that stops the check from reading the body is an error, never clean.
+printf '%s' '{"code":"rest_no_route","message":"inventory_only blzmcp_phone"}' >"$WORK/leak.json"
+printf '%s' '{"code":"rest_no_route","message":"No route was found matching the URL and request method."}' >"$WORK/clean.json"
+: >"$WORK/empty.json"
+mkdir -p "$WORK/a-directory"
+t_eq 'checker: a body carrying method facts is a leak' leak "$(blzmcp_leak_state "$WORK/leak.json")"
+t_eq 'checker: a body without method facts is clean' clean "$(blzmcp_leak_state "$WORK/clean.json")"
+t_eq 'checker: an empty body that was read is clean' clean "$(blzmcp_leak_state "$WORK/empty.json")"
+t_eq 'checker: a missing body is a checker error' error "$(blzmcp_leak_state "$WORK/missing.json")"
+t_eq 'checker: a directory instead of a body is a checker error' error "$(blzmcp_leak_state "$WORK/a-directory")"
+t_eq 'checker: no path at all is a checker error' error "$(blzmcp_leak_state '')"
+t_eq 'checker: a grep failure is a checker error' error "$(grep() { return 2; }; blzmcp_leak_state "$WORK/clean.json")"
+t_eq 'checker: blzmcp_leaks returns 2 on a checker error' 2 "$(blzmcp_leaks "$WORK/missing.json"; echo $?)"
+nf_run() { # file -> "pass fail" from expect_no_facts with counting ok/no
+	(pass=0 fail=0; ok() { pass=$((pass + 1)); }; no() { fail=$((fail + 1)); }; expect_no_facts probe "$1"; echo "$pass $fail")
+}
+t_eq 'expect_no_facts: a clean body passes' '1 0' "$(nf_run "$WORK/clean.json")"
+t_eq 'expect_no_facts: a leaking body fails' '0 1' "$(nf_run "$WORK/leak.json")"
+t_eq 'expect_no_facts: a checker error fails' '0 1' "$(nf_run "$WORK/missing.json")"
+
 # --- 2. full path through the suite's own functions ---------------------------------------------
 extract() { # function name -> its definition from http-suite.sh
 	awk -v n="$1" '!p && $0 ~ "^" n "\\(\\) \\{" {p=1; print; if ($0 ~ /\}[[:space:]]*$/) exit; next} p {print} p && /^}/ {exit}' "$SUITE"
@@ -121,8 +150,6 @@ extract() { # function name -> its definition from http-suite.sh
 for f in row_begin row_end deny_case diag_checks; do
 	[ -n "$(extract "$f")" ] && t_ok "http-suite.sh defines $f" || t_no "http-suite.sh defines $f"
 done
-leaks_def=$(grep -m1 '^leaks() ' "$SUITE")
-[ -n "$leaks_def" ] && t_ok 'http-suite.sh defines leaks' || t_no 'http-suite.sh defines leaks'
 
 # One scenario in a child bash: the original functions, a stubbed I/O boundary, one row printed.
 # INIT_CODE/INIT_BODY: the initialise reply (INIT_CODE=ok: initialise succeeds); CALL_CODE/CALL_BODY:
@@ -135,8 +162,7 @@ scenario() { # label expected-row route principal
 		ok() { pass=$((pass + 1)); }
 		no() { fail=$((fail + 1)); echo "  no: $*" >&2; }
 		RPC_BODY='"'$WORK'"'/s-body.json; CALL_OUT='"'$WORK'"'/s-call.json; RPC_ID=7; PAY='"'$PAY'"'
-		. '"'$REPO/tests/matrix/http-checks.sh'"'
-		'"$leaks_def"'
+		. '"'$CHECKS'"'
 		'"$(extract row_begin)"'
 		'"$(extract row_end)"'
 		'"$(extract deny_case)"'
@@ -181,6 +207,121 @@ run_s 'deny control: anonymous refused at initialise, HTTP 401 rest_forbidden' P
 run_s 'deny control: customer, rec permission refusal' PASSED rec customer customer_rec ok '' 200 "$(err_result 'Permission denied' | sed 's/"id":42/"id":7/')"
 run_s 'deny control: subscriber, easy permission refusal' PASSED easy subscriber subscriber_easy ok '' 200 "$(err_result 'Error: Permission denied for ability: blaze-mcp-toolkit/payment-health' | sed 's/"id":42/"id":7/')"
 
+# --- 2b. early paths in their real order (REVIEW-pass4b R4) -------------------------------------
+# The none branch and the Easy MCP AI override block run before the payment health section, so
+# they see only http-checks.sh and the suite functions defined above them. Each is run as written,
+# preceded by exactly that: the sourced helper, then every suite function defined above the block,
+# then stubs for the WordPress/HTTP boundary. A stub only replaces a suite function that already
+# exists at that point (or curl / grep, the system commands at the boundary), so nothing the real
+# suite lacks there is predefined.
+NONE_AT=$(grep -nE '^if \[ "\$STATE" == none \]; then$' "$SUITE" | head -1 | cut -d: -f1)
+OVR_AT=$(grep -nE '^if has_transport easy; then$' "$SUITE" | while IFS=: read -r n _; do
+	sed -n "$n,\$p" "$SUITE" | awk '/^fi$/ {exit} {print}' | grep -q 'EASY_MCP_AI_TOOLS override refuses' && { echo "$n"; break; }
+done)
+[ -n "$NONE_AT" ] && t_ok "http-suite.sh has the none branch (line $NONE_AT)" || t_no 'http-suite.sh has the none branch'
+[ -n "$OVR_AT" ] && t_ok "http-suite.sh has the Easy MCP AI override block (line $OVR_AT)" || t_no 'http-suite.sh has the Easy MCP AI override block'
+block_text() { sed -n "${1:-1},\$p" "$SUITE" | awk 'NR > 1 && /^fi$/ {print; exit} {print}'; }
+defs_before() { # line -> names of the suite's top-level functions defined above it, in order
+	grep -nE '^[a-z_]+\(\) \{' "$SUITE" | awk -F: -v l="$1" '$1 < l {sub(/\(\).*/, "", $2); print $2}'
+}
+STUBS='wpc setup_row make_cred open_session list_names call_tool option_json save_option'
+for at in "$NONE_AT" "$OVR_AT"; do
+	[ -n "$at" ] || continue
+	before=" $(defs_before "$at" | tr '\n' ' ') "
+	missing=''
+	for s in $STUBS; do [[ "$before" == *" $s "* ]] || missing+=" $s"; done
+	t_eq "every stub before line $at replaces a suite function already defined there" '' "$missing"
+done
+early() { # label state(none|easy-*) at-line -> the child's stdout; stderr in $WORK/e-err
+	local prelude n
+	prelude=". '$CHECKS'"$'\n' # http-suite.sh sources it before any case
+	for n in $(defs_before "$3"); do prelude+="$(extract "$n")"$'\n'; done
+	env STATE="$2" "$BASH" -c '
+		set -u
+		pass=0; fail=0; ROW_F0=0; PREFLIGHT=0; FRESH_SEED="[]"; UNDO=()
+		WORK='"'$WORK'"'; RPC_BODY=$WORK/e-body.json; CALL_OUT=$WORK/e-call.json; RPC_ID=7; RPC_CODE=""
+		PAY='"'$PAY'"'; REC_URL=http://probe.invalid/rec; EASY_URL=http://probe.invalid/easy
+		case "$STATE" in none) TRANSPORTS=() ;; *) TRANSPORTS=(easy) ;; esac
+		declare -A S_URL S_CRED S_SID S_KIND
+		'"$prelude"'
+		# The WordPress/HTTP boundary.
+		wpc() {
+			case "$*" in
+			"plugin get "*) echo active ;;
+			*Connectors::state*) echo none ;;
+			*preg_match_all*) echo 0 ;;
+			esac
+		}
+		setup_row() {
+			if [ "$1" == connection ]; then echo "{\"status\":\"fail\",\"label\":\"Connect\",\"fix\":\"MCP Adapter with Enable Abilities, or Easy MCP AI\"}"
+			else echo "{\"status\":\"warn\",\"label\":\"Tick\",\"fix\":\"tick totals\"}"; fi
+		}
+		make_cred() { return 0; }
+		save_option() { :; }
+		option_json() { echo "[]"; }
+		curl() { echo 404; }
+		open_session() { # the injected initialise reply
+			S_KIND[$1]=$2
+			[ "$INIT_CODE" == ok ] && return 0
+			RPC_CODE=$INIT_CODE; printf "%s" "$INIT_BODY" >"$RPC_BODY"; return 1
+		}
+		list_names() { :; }
+		call_tool() { # the injected tools/call reply; workflows answer a plain result
+			local v="CALL_BODY_${S_KIND[$1]}"
+			case "$2" in
+			*weekly?store?review)
+				RPC_CODE=200; echo "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}" >"$RPC_BODY"
+				echo "{\"ok\":{\"steps\":[{\"ability\":\"blaze-mcp-toolkit/health-summary\"}],\"instructions\":\"switched off by the site configuration\"}}" >"$CALL_OUT" ;;
+			*) RPC_CODE=$CALL_CODE; printf "%s" "${!v}" >"$RPC_BODY"; echo "{\"err\":\"stub\"}" >"$CALL_OUT" ;;
+			esac
+		}
+		if [ "$GREP_FAIL" == 1 ]; then # a checker that cannot run: grep fails on the method-fact pattern
+			grep() { case "$*" in *blzmcp_phone*) return 2 ;; esac; command grep "$@"; }
+		fi
+		'"$(block_text "$3")"'
+	' 2>"$WORK/e-err"
+}
+export GREP_FAIL CALL_BODY_rec CALL_BODY_easy
+REST_NO_ROUTE='{"code":"rest_no_route","message":"No route was found matching the URL and request method.","data":{"status":404}}'
+REST_NO_ROUTE_FACTS='{"code":"rest_no_route","message":"No route was found. inventory_only blzmcp_phone taken_28d","data":{"status":404}}'
+REC_OFF="$(err_result "Ability 'blaze-mcp-toolkit/payment-health' not found on this WordPress site." | sed 's/"id":42/"id":7/')"
+REC_OFF_FACTS="$(err_result "Ability 'blaze-mcp-toolkit/payment-health' not found on this WordPress site. inventory_only blzmcp_phone" | sed 's/"id":42/"id":7/')"
+EASY_OFF='{"jsonrpc":"2.0","id":7,"error":{"code":-32007,"message":"This tool is switched off on this site."}}'
+EASY_OFF_FACTS='{"jsonrpc":"2.0","id":7,"error":{"code":-32007,"message":"This tool is switched off on this site. inventory_only blzmcp_phone taken_28d"}}'
+# Any stderr line is an execution error (command not found, macOS /usr/bin/leaks, unbound variable).
+exec_errors() { grep -c . "$WORK/e-err"; }
+none_case() { # label expected(PASSED|FAILED) grep_fail init_code init_body call_rec call_easy
+	local out rows
+	GREP_FAIL=$3 INIT_CODE=$4 INIT_BODY=$5 CALL_CODE=200 CALL_BODY_rec=$6 CALL_BODY_easy=$7
+	export INIT_CODE INIT_BODY CALL_CODE
+	out=$(early "$1" none "$NONE_AT")
+	rows=$(grep '^TRANSPORT_ROW=none|' <<<"$out" | sed 's/^TRANSPORT_ROW=none|\([a-z]*\)|.*|\([A-Z]*\)$/\1:\2/' | paste -sd, -)
+	t_eq "$1 (rows)" "rec:$2,easy:$2" "$rows"
+	t_eq "$1 (no checker execution error)" 0 "$(exec_errors)"
+}
+[ -n "$NONE_AT" ] && {
+	none_case 'none early control: absent route, clean rest_no_route' PASSED 0 404 "$REST_NO_ROUTE" '' ''
+	none_case 'none early: absent route whose rest_no_route body carries method facts' FAILED 0 404 "$REST_NO_ROUTE_FACTS" '' ''
+	none_case 'none early: absent route, the method-fact check cannot run' FAILED 1 404 "$REST_NO_ROUTE" '' ''
+	none_case 'none early control: a reachable server answers the known tool-off refusals' PASSED 0 ok '' "$REC_OFF" "$EASY_OFF"
+	none_case 'none early: a reachable server tool-off refusal carries method facts' FAILED 0 ok '' "$REC_OFF_FACTS" "$EASY_OFF_FACTS"
+	none_case 'none early: reachable server, the method-fact check cannot run' FAILED 1 ok '' "$REC_OFF" "$EASY_OFF"
+}
+ovr_case() { # label expected(PASS|FAIL) grep_fail call_easy
+	local out line
+	GREP_FAIL=$3 INIT_CODE=ok INIT_BODY='' CALL_CODE=200 CALL_BODY_rec='' CALL_BODY_easy=$4
+	export INIT_CODE INIT_BODY CALL_CODE
+	out=$(early "$1" easy-2.5.0 "$OVR_AT")
+	line=$(grep 'EASY_MCP_AI_TOOLS override refuses' <<<"$out" | head -1 | cut -c1-4)
+	t_eq "$1 (override refusal check)" "$2" "${line:-none}"
+	t_eq "$1 (no checker execution error)" 0 "$(exec_errors)"
+}
+[ -n "$OVR_AT" ] && {
+	ovr_case 'Easy override control: the known switched-off answer' PASS 0 "$EASY_OFF"
+	ovr_case 'Easy override: the switched-off answer carries method facts' FAIL 0 "$EASY_OFF_FACTS"
+	ovr_case 'Easy override: the method-fact check cannot run' FAIL 1 "$EASY_OFF"
+}
+
 # --- 3. diagnostics withheld / exposed ---------------------------------------------------------
 NOTE='not allowed to see store diagnostics'
 DENIED='Not checked: your role is not allowed to see store diagnostics.'
@@ -202,7 +343,7 @@ diag_run() { # label expected(all_true|some_false) mode file
 		pass=0; fail=0; STATE=probe
 		ok() { pass=$((pass + 1)); }
 		no() { fail=$((fail + 1)); echo "  no: $*" >&2; }
-		. '"'$REPO/tests/matrix/http-checks.sh'"'
+		. '"'$CHECKS'"'
 		ROLE_NOTE='"'$NOTE'"'; DIAG_DENIED_TEXT='"'$DENIED'"'; CALL_OUT=$FILE
 		'"$(extract diag_checks)"'
 		diag_checks probe "$MODE"
@@ -246,6 +387,11 @@ t_eq 'tool off needs the tool-off answer on both routes' 2 "$(grep -cE 'expect_c
 t_eq 'diagnostics: manager off phases withheld, on phase and administrator exposed, warm-up exposed' 4 "$(grep -cE 'diag_checks ".*" (withheld|exposed)$' "$SUITE")"
 t_eq 'no safety case passes on a bare unsuccessful call (call_ok || / call_ok && no)' 0 "$(grep -cE 'if call_ok \|\| leaks|call_ok && no ' "$SUITE")"
 t_eq 'no denial passes when the credential helper refused' 0 "$(grep -cE 'could not obtain a credential' "$SUITE")"
+# REVIEW-pass4b R4: one method-fact checker, in the sourced helper, never negated, never shadowed.
+t_eq 'http-checks.sh defines blzmcp_leaks' 1 "$(grep -cE '^blzmcp_leaks\(\) \{' "$CHECKS")"
+t_eq 'http-suite.sh defines no method-fact checker of its own' 0 "$(grep -cE '^[[:space:]]*(blzmcp_)?leaks\(\)' "$SUITE")"
+t_eq 'nothing calls a bare leaks command' 0 "$(grep -hE '(^|[^_[:alnum:]])leaks "' "$SUITE" "$CHECKS" | grep -cv '^[[:space:]]*#')"
+t_eq 'no caller negates the method-fact check' 0 "$(grep -hE '![[:space:]]*(blzmcp_)?leaks[[:space:]]' "$SUITE" "$CHECKS" | grep -cv '^[[:space:]]*#')"
 
 echo "$T_PASS passed, $T_FAIL failed"
 [ "$T_FAIL" -eq 0 ]
