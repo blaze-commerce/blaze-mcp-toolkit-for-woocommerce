@@ -5,8 +5,8 @@
 	"testsPort": 8891,
 	"plugins": [
 		"https://downloads.wordpress.org/plugin/woocommerce.11.3.1.zip",
-		"https://downloads.wordpress.org/plugin/mcp-adapter.0.7.1.zip",
-		"https://downloads.wordpress.org/plugin/enable-abilities-for-mcp.2.15.0.zip",
+		"https://downloads.wordpress.org/plugin/mcp-adapter.0.7.2.zip",
+		"https://downloads.wordpress.org/plugin/enable-abilities-for-mcp.2.17.1.zip",
 		"https://downloads.wordpress.org/plugin/plugin-check.2.2.0.zip",
 		"./blaze-mcp-toolkit-for-woocommerce"
 	],

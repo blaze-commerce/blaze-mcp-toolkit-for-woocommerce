@@ -43,6 +43,13 @@ set -uo pipefail
 # timing and a query plan, and the 1,000 and 1,001 distinct-ID cap cases passed per storage. The
 # transport receipt (BLZMCP_TRANSPORT_OUT, default <record>-transport.md) lists every row.
 #
+# Wave 3 (REVIEW-pass4a R4, ruling Q3), also exit 5 / FAILED: the release matrix is 6 states
+# (Easy MCP AI 2.5.0 added); the required set must come to exactly 40 storage rows (5 connected
+# states x 4 authority/sync combinations x 2 suites) and 164 transport rows (27 per connected route
+# x 6 routes + 2 for none), so narrowing BLZMCP_REQUIRED_STATES can never shrink the gate into a
+# pass; and the HTTP suite's offline fail-closed self-test (tests/matrix/test-http-checks.sh) must
+# have run in this matrix with 0 failures (HTTP_CHECKS line).
+#
 # Privacy: absolute local paths in copied log lines are replaced with <path>; the finished record
 # is then scanned for home directories, host paths, auth headers, secrets and e-mail addresses
 # (other than the fixtures' example.invalid ones). Any hit refuses the record (exit 5, nothing
@@ -52,7 +59,10 @@ SUMMARY=${1:?summary file}
 VERDICT=${2:?PASSED or FAILED}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT_DIR=${BLZMCP_REPORTS_DIR:-$REPO/../reports}
-REQUIRED_STATES=${BLZMCP_REQUIRED_STATES:-recommended easy-2.3.1 easy-2.4.0 both none}
+REQUIRED_STATES=${BLZMCP_REQUIRED_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none}
+# The release gate's partition counts (wave 3, ruling Q3). Not overridable.
+GATE_STORAGE_ROWS=40
+GATE_TRANSPORT_ROWS=164
 STORAGE_COMBOS="hpos:no hpos:yes legacy:yes legacy:no"
 STORAGE_SUITES="test-payment-orders.php test-payment-health.php"
 PKG=blaze-mcp-toolkit-for-woocommerce
@@ -64,6 +74,7 @@ window_file=$(sed -n 's/^WINDOW_FILE=//p' "$SUMMARY")
 run_sha=$(sed -n 's/^ZIP_SHA256=//p' "$SUMMARY")
 run_version=$(sed -n 's/^VERSION=//p' "$SUMMARY")
 perf_file=$(sed -n 's/^PERF_FILE=//p' "$SUMMARY")
+http_checks=$(sed -n 's/^HTTP_CHECKS=//p' "$SUMMARY" | head -1)
 zip_sha=$(shasum -a 256 "$zip" 2>/dev/null | awk '{print $1}')
 zip_version=$(unzip -p "$zip" "$PKG/$PKG.php" 2>/dev/null | sed -n 's/^ \* Version:[[:space:]]*//p' | head -1 | tr -d '\r')
 zip_constant=$(unzip -p "$zip" "$PKG/$PKG.php" 2>/dev/null | sed -n "s/.*define( *'BLZMCP_VERSION', *'\([^']*\)'.*/\1/p" | head -1)
@@ -198,6 +209,26 @@ rm -rf "$tdir"
 [ -z "$t_dup" ] || incomplete+=("transport rows duplicated: $t_dup")
 [ -z "$t_unknown" ] || incomplete+=("transport rows not in the required set: $t_unknown")
 [ -z "$t_failed" ] && [ -n "$(grep -m1 '^TRANSPORT=' "$SUMMARY")" ] || VERDICT=FAILED
+[ "$t_required" == "$GATE_TRANSPORT_ROWS" ] || incomplete+=("required transport partitions come to $t_required, the release matrix needs $GATE_TRANSPORT_ROWS (states: $REQUIRED_STATES)")
+# Storage rows: every connected state x combination x suite, and that set must be the gate's 40.
+s_required=0
+s_rows=0
+for s in $REQUIRED_STATES; do
+	[ "$s" == none ] && continue
+	for c in $STORAGE_COMBOS; do
+		for f in $STORAGE_SUITES; do
+			s_required=$((s_required + 1))
+			case "$(grep -F "STORAGE=$s|$c|$f|" "$SUMMARY" | head -1 | cut -d'|' -f4)" in PASSED | FAILED) s_rows=$((s_rows + 1)) ;; esac
+		done
+	done
+done
+[ "$s_required" == "$GATE_STORAGE_ROWS" ] || incomplete+=("required storage partitions come to $s_required, the release matrix needs $GATE_STORAGE_ROWS (states: $REQUIRED_STATES)")
+# The HTTP suite's fail-closed safety checks proved themselves offline in this run.
+if [ -z "$http_checks" ]; then
+	incomplete+=("the HTTP safety-check self-test (test-http-checks.sh) did not run (no HTTP_CHECKS line)")
+elif ! [[ "$http_checks" =~ ^[1-9][0-9]*\ passed,\ 0\ failed$ ]]; then
+	incomplete+=("the HTTP safety-check self-test (test-http-checks.sh) did not pass: $http_checks")
+fi
 for s in $REQUIRED_STATES; do
 	r=$(grep "^STATE=$s|" "$SUMMARY" | head -1 | cut -d'|' -f2)
 	case "$r" in
@@ -337,6 +368,8 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 	echo
 	echo "## Payment health order storage"
 	echo
+	echo "- Storage rows: required $s_required (gate $GATE_STORAGE_ROWS), received $s_rows"
+	echo
 	echo "| State | Authority:sync | Suite | Result | Passed | Failed |"
 	echo "|---|---|---|---|---|---|"
 	grep '^STORAGE=' "$SUMMARY" | sed 's/^STORAGE=//' | while IFS='|' read -r state combo suite result p f; do
@@ -345,7 +378,8 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 	echo
 	echo "## Transport receipt rows (route x order authority x principal x case)"
 	echo
-	echo "- Required $t_required, received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
+	echo "- HTTP safety-check self-test (tests/matrix/test-http-checks.sh, offline injected replies): ${http_checks:-not run}"
+	echo "- Required $t_required (gate $GATE_TRANSPORT_ROWS), received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
 	echo "- Every row is the HTTP suite's own pass/fail for that case on the real transport (no CLI parity); the full list is in \`$(basename "$TRANSPORT_OUT")\`"
 	echo
 	echo "| State | Route | Authority | Rows | Passed |"
@@ -410,15 +444,16 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 TMP_TRANS=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-trans.XXXXXX")
 {
 	t_ok=PASSED
-	[ "$t_missing" == 0 ] && [ -z "$t_dup" ] && [ -z "$t_unknown" ] && [ -z "$t_failed" ] && [ "$t_rows" -gt 0 ] || t_ok=FAILED
+	[ "$t_missing" == 0 ] && [ -z "$t_dup" ] && [ -z "$t_unknown" ] && [ -z "$t_failed" ] && [ "$t_rows" -gt 0 ] && [ "$t_required" == "$GATE_TRANSPORT_ROWS" ] && [[ "$http_checks" =~ ^[1-9][0-9]*\ passed,\ 0\ failed$ ]] || t_ok=FAILED
 	echo "# Blaze MCP Toolkit $label - origin disclosure transport receipt"
 	echo
 	echo "- Result: **TRANSPORT $t_ok** (passed only when every required row is present exactly once and PASSED)"
 	echo "- Candidate: \`$(basename "$zip")\`, SHA-256 \`${zip_sha:-unreadable}\`, version ${zip_version:-none}"
 	echo "- Git commit: \`$commit\`"
 	echo "- Matrix record: \`$(basename "$OUT")\`"
-	echo "- Rows: required $t_required, received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
-	echo "- A row is one case of tests/matrix/http-suite.sh over the state's real transport (rec = MCP Adapter with Enable Abilities, easy = Easy MCP AI), under the order authority it names (switched in its own process and read back before the case; any = the case does not depend on the order store), for that principal. PASSED means every check in the case passed. disclosure: the administrator sees schema 2, the mixed, registered-disabled and unregistered inventory-only methods kept apart from checkout counts, and a warm repeat from the cache. diag_off / diag_on / diag_off_again: the shop-manager diagnostics setting off, on, then off after a warm result, for the administrator and the manager (the manager keeps the outside-checkout facts with diagnostics off). denied: a customer, a subscriber or an anonymous caller gets no result and no method facts with a privileged result warm. warm_downgrade: a manager's warm privileged result is refused after the role loses manage_woocommerce. no_tool: in none, neither route lists or runs payment health."
+	echo "- HTTP safety-check self-test (tests/matrix/test-http-checks.sh): ${http_checks:-not run}"
+	echo "- Rows: required $t_required (gate $GATE_TRANSPORT_ROWS), received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
+	echo "- A row is one case of tests/matrix/http-suite.sh over the state's real transport (rec = MCP Adapter with Enable Abilities, easy = Easy MCP AI), under the order authority it names (switched in its own process and read back before the case; any = the case does not depend on the order store), for that principal. PASSED means every check in the case passed. disclosure: the administrator sees schema 2, the mixed, registered-disabled and unregistered inventory-only methods kept apart from checkout counts, and a warm repeat from the cache. diag_off / diag_on / diag_off_again: the shop-manager diagnostics setting off, on, then off after a warm result, for the administrator and the manager (the manager keeps the outside-checkout facts with diagnostics off). denied: a customer, a subscriber or an anonymous caller gets the route's known authentication refusal (HTTP 401/403) or permission refusal and no method facts, with a privileged result warm; no reply, 5xx, a malformed reply, an unknown error and a missing credential fail the row. diag_off / diag_off_again for the manager: every applicable log and job check is not checked, unavailable, with the role reason, null counts, no groups or hooks and no diagnostic finding; diag_on and the administrator: the fixture's failed Stripe payment job is reported with its finding. warm_downgrade: a manager's warm privileged result gets the known permission refusal after the role loses manage_woocommerce. tool_off: the known not-found (rec) or switched-off (easy) answer. no_tool: in none, an absent route answers HTTP 404 rest_no_route, and a route that answers neither lists nor runs payment health."
 	echo
 	echo "| State | Route | Authority | Principal | Case | Result |"
 	echo "|---|---|---|---|---|---|"

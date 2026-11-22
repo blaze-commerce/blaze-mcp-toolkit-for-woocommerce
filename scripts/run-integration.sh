@@ -294,7 +294,7 @@ else
 fi
 # The performance gate's own self-tests, the release-zip exclusion canaries and the build-once
 # promotion tooling (artifact checker, release-candidate.sh, deploy.yml checks; offline stubs).
-for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh" "$host_bash tests/release/test-promotion.sh"; do
+for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh" "$host_bash tests/matrix/test-http-checks.sh" "$host_bash tests/release/test-promotion.sh"; do
 	if t_out=$($t 2>&1); then
 		echo "PASS  $t ($(printf '%s\n' "$t_out" | tail -1))"
 	else
