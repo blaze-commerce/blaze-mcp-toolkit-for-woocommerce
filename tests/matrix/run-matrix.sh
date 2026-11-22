@@ -23,7 +23,8 @@
 # Every state runs inside one site-local reporting date (tests/matrix/.window). If a state seeds
 # on a different date than the first one, the whole matrix is reseeded once from the start.
 #
-# Env: BLZMCP_MATRIX_STATES  space-separated subset (default: all five, in order)
+# Env: BLZMCP_MATRIX_STATES  space-separated subset (default: all six, in order; record.sh fails a
+#                            subset as incomplete evidence)
 #      BLZMCP_MATRIX_KEEP=1  leave the environments running afterwards (default: wp-env stop)
 #      BLZMCP_MATRIX_TZ      site timezone for every state (default Australia/Melbourne)
 set -uo pipefail
@@ -35,7 +36,7 @@ case "$ZIP" in /*) ;; *) ZIP="$REPO/$ZIP" ;; esac
 WPE="$REPO/node_modules/.bin/wp-env"
 [ -x "$WPE" ] || { echo "MATRIX FAILED: $WPE missing (npm install)"; exit 1; }
 MATRIX_DIR=${BLZMCP_MATRIX_DIR:-$HOME/.blzmcp-matrix}
-STATES=${BLZMCP_MATRIX_STATES:-recommended easy-2.3.1 easy-2.4.0 both none}
+STATES=${BLZMCP_MATRIX_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none}
 TZ_NAME=${BLZMCP_MATRIX_TZ:-Australia/Melbourne}
 SLUG=blaze-mcp-toolkit-for-woocommerce
 T=wp-content/blzmcp-tests
@@ -87,6 +88,19 @@ for f in $STORAGE_SUITES; do
 done
 fail=0
 FIRST_DATE=''
+# The HTTP suite's fail-closed safety checks prove themselves first, offline (REVIEW-pass4a R4):
+# injected HTTP 000/5xx/malformed replies, helper failures and leaked diagnostics must each fail.
+# Its summary goes into the evidence (HTTP_CHECKS); record.sh refuses a run without a clean one.
+HTTP_CHECKS_LOG="$LOG_DIR/test-http-checks.log"
+"$BASH" "$REPO/tests/matrix/test-http-checks.sh" >"$HTTP_CHECKS_LOG" 2>&1
+HTTP_CHECKS=$(grep -E '^[0-9]+ passed, [0-9]+ failed$' "$HTTP_CHECKS_LOG" | tail -1)
+if [[ "$HTTP_CHECKS" =~ ^[1-9][0-9]*\ passed,\ 0\ failed$ ]]; then
+	echo "PASS  test-http-checks.sh ($HTTP_CHECKS)"
+else
+	echo "FAIL  test-http-checks.sh (${HTTP_CHECKS:-no summary})"
+	grep '^FAIL' "$HTTP_CHECKS_LOG" | head -10
+	fail=1
+fi
 
 run_state() {
 	local state=$1 w="$MATRIX_DIR/$1" port suites f out status summary p q versions phpv wpv
@@ -388,6 +402,7 @@ done
 	echo "COMMIT=$(git -C "$REPO" rev-parse HEAD)"
 	echo "WINDOW_FILE=$(ls "$LOG_DIR"/*.window 2>/dev/null | head -1)"
 	echo "PERF_FILE=$PERF_FILE"
+	echo "HTTP_CHECKS=$HTTP_CHECKS"
 	for state in $STATES; do
 		echo "STATE=$state|$(sget RESULT "$state" 'NOT RUN')|$(sget PASSES "$state" 0)|$(sget FAILS "$state" 1)|$(sget WPV "$state")|$(sget PHPV "$state")|$(sget VERSIONS "$state" '[]')"
 	done

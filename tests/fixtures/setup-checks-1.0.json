@@ -11,8 +11,8 @@
         "analytics_reason": null,
         "wordpress": "7.1.5",
         "plugins": {
-            "enable-abilities-for-mcp/enable-abilities-for-mcp.php": "2.15.0",
-            "mcp-adapter/mcp-adapter.php": "0.7.1",
+            "enable-abilities-for-mcp/enable-abilities-for-mcp.php": "2.17.1",
+            "mcp-adapter/mcp-adapter.php": "0.7.2",
             "plugin-check/plugin.php": "2.2.0",
             "woocommerce/woocommerce.php": "11.3.1"
         },

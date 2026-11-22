@@ -40,6 +40,9 @@ REC_URL="$BASE/wp-json/mcp/mcp-adapter-default-server"
 EASY_URL="$BASE/wp-json/easy-mcp-ai/v1/mcp"
 PROTO='2025-06-18'
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-http.XXXXXX")
+# Reply classifiers and payload checks (fail closed; self-tested by tests/matrix/test-http-checks.sh).
+# shellcheck source=tests/matrix/http-checks.sh
+. "$(dirname "${BASH_SOURCE[0]}")/http-checks.sh"
 
 pass=0
 fail=0
@@ -300,9 +303,10 @@ if [ "$STATE" == none ]; then
 				names=$(list_names "none_$r")
 				grep -qxF "$(tool_of "none_$r" "$PAY")" <<<"$names" && no "$r route answers in none but lists payment health" || ok "$r route answers in none (http 200) and does not list payment health"
 				call_ability "none_$r" "$PAY" '{"since_hours":24}'
-				call_ok && no "$r route runs payment health in none" || ok "$r route refuses payment health in none ($(call_err | head -c 80))"
+				expect_call_refusal "$r route refuses payment health in none with the known tool-off answer, no method facts" "$r" "$PAY" tool_off
 			else
-				ok "$r route has no MCP server in none (http $RPC_CODE)"
+				# Fail closed (REVIEW-pass4a R4): only the absent-route answer proves there is no server.
+				expect_init_refusal "$r route has no MCP server in none (http 404 rest_no_route)" no_route
 			fi
 			row_end "$r" any admin no_tool
 		done
@@ -542,7 +546,8 @@ for s in "${sm_sessions[@]}"; do
 		*) want=allow ;;
 		esac
 		call_ability "$s" "$a" "$(args_for "$a")"
-		if call_ok; then got=allow; else got=deny; fi
+		# A deny counts only as the route's known permission refusal (REVIEW-pass4a R4).
+		if call_ok; then got=allow; else got=$(call_refusal "${S_KIND[$s]}" "$a"); [ "$got" == perm ] && got=deny; fi
 		eq "$s: shop manager $want $(tool_of "$s" "$a")" "$want" "$got"
 	done
 	call_ability "$s" wc-analytics/totals "{\"subject\":\"revenue\",\"date_start\":\"$WINDOW_CURRENT_START\",\"date_end\":\"$WINDOW_CURRENT_END\"}"
@@ -582,7 +587,7 @@ if has_transport easy; then
 	names=$(list_names easy_ovr)
 	grep -qxF "$off_tool" <<<"$names" && no "EASY_MCP_AI_TOOLS override hides $off_tool from tools/list" || ok "EASY_MCP_AI_TOOLS override hides $off_tool from tools/list"
 	call_tool easy_ovr "$off_tool" '{"days":7}'
-	call_ok && no "EASY_MCP_AI_TOOLS override refuses $off_tool" || ok "EASY_MCP_AI_TOOLS override refuses $off_tool ($(call_err | head -c 80))"
+	expect_call_refusal "EASY_MCP_AI_TOOLS override refuses $off_tool with the known switched-off answer" easy blaze-mcp-toolkit/update-history tool_off
 	call_ability easy_ovr blaze-mcp-toolkit/weekly-store-review '{"period":"last_7_days"}'
 	truthy "override: weekly review leaves out the update-history step" "$(call_get '[.steps[].ability] | index("blaze-mcp-toolkit/update-history") == null')"
 	truthy "override: weekly review says the site's configuration switched it off" "$(call_get '.instructions | test("configuration")')"
@@ -638,13 +643,15 @@ PAY_AUTHORITIES=${BLZMCP_HTTP_AUTHORITIES:-hpos legacy}
 # The fixed public disclosure text, read from the plugin (not copied here, so wording stays the plugin's).
 OUTSIDE_TEXT=$(wpc eval 'echo Blaze\McpToolkit\Abilities\PaymentHealth::reason_text( "outside_checkout_only" );' | tr -d '\r' | tail -1)
 [ -n "$OUTSIDE_TEXT" ] && ok "the outside-checkout disclosure text is read from the plugin" || no "the outside-checkout disclosure text is read from the plugin"
+DIAG_DENIED_TEXT=$(wpc eval 'echo Blaze\McpToolkit\Abilities\PaymentHealth::reason_text( "diagnostics_not_permitted" );' | tr -d '\r' | tail -1)
+[ -n "$DIAG_DENIED_TEXT" ] && ok "the diagnostics role reason text is read from the plugin" || no "the diagnostics role reason text is read from the plugin"
 pay_call() { # session [clear] -> payment health with since_hours 24; clear=1 empties the toolkit result cache first
 	[ "${2:-0}" == 1 ] && helper payment-fixture.php clear-cache >/dev/null
 	call_ability "$1" "$PAY" '{"since_hours":24}'
 }
 role_note() { jq -r --arg n "$ROLE_NOTE" '[.ok.notes[]? | contains($n)] | any' "$CALL_OUT"; }
 # Method facts of the fixture that a denied caller must never receive, in a body or an error.
-leaks() { grep -qE 'blzmcp_phone|blzmcp_gone|taken_28d|outside_checkout_observed|inventory_only' "$1"; }
+leaks() { grep -qE 'blzmcp_phone|blzmcp_gone|taken_28d|outside_checkout_observed|inventory_only|gateway_jobs_failed|gateway_job_failed' "$1"; }
 set_sm_diag() { wpc eval "Blaze\\McpToolkit\\Settings::update( array( 'shop_manager_diagnostics' => $1 ) );" >/dev/null; }
 pf_switch() { # authority sync: switched in one process (the integration suite's own switch), asserted in the next
 	"$WPE" run cli env BLZMCP_PF_SET="$1" BLZMCP_PF_SYNC="$2" wp eval-file wp-content/blzmcp-tests/Integration/test-payment-orders.php 2>&1 | grep -qE '^[0-9]+ passed, 0 failed'
@@ -657,17 +664,18 @@ pay_seed() { # -> PAY_SEEDED PAY_CHECKOUT PAY_COD PAY_OUTSIDE
 	PAY_CHECKOUT=$(sed -n 's/^CHECKOUT=//p' <<<"$out")
 	PAY_COD=$(sed -n 's/^COD_CHECKOUT=//p' <<<"$out")
 	PAY_OUTSIDE=$(sed -n 's/^OUTSIDE=//p' <<<"$out")
-	if [ "${PAY_SEEDED:-0}" -gt 0 ] && [ "${PAY_OUTSIDE:-0}" -gt 0 ] && [ -n "$PAY_CHECKOUT" ] && [ -n "$PAY_COD" ]; then
-		ok "payment fixture seeded on $1 ($PAY_CHECKOUT checkout orders, $PAY_OUTSIDE outside verified checkout activity)"
+	PAY_JOB=$(sed -n 's/^FAILED_JOB=//p' <<<"$out")
+	if [ "${PAY_SEEDED:-0}" -gt 0 ] && [ "${PAY_OUTSIDE:-0}" -gt 0 ] && [ -n "$PAY_CHECKOUT" ] && [ -n "$PAY_COD" ] && [ "${PAY_JOB:-0}" == 1 ]; then
+		ok "payment fixture seeded on $1 ($PAY_CHECKOUT checkout orders, $PAY_OUTSIDE outside verified checkout activity, 1 failed Stripe payment job)"
 	else
 		no "payment fixture seeded on $1 ($(head -c 200 <<<"$out"))"
 		PAY_CHECKOUT=${PAY_CHECKOUT:-0} PAY_COD=${PAY_COD:-0} PAY_SEEDED=${PAY_SEEDED:-0}
 	fi
 }
 pay_unseed() {
-	local removed
-	removed=$(helper payment-fixture.php cleanup | sed -n 's/^REMOVED=//p')
-	eq "payment fixture removed on $1 (only its own orders)" "${PAY_SEEDED:-0}" "${removed:-0}"
+	local out
+	out=$(helper payment-fixture.php cleanup)
+	eq "payment fixture removed on $1 (only its own orders and its failed job)" "${PAY_SEEDED:-0} 1" "$(sed -n 's/^REMOVED=//p' <<<"$out" | head -1) $(sed -n 's/^JOBS_REMOVED=//p' <<<"$out" | head -1)"
 }
 # The full disclosure contract on the last call's result (an administrator's, or a manager's).
 # kind (rec|easy) is the route: Easy MCP AI 2.3.1 and 2.4.0 deliver the integer schema_version
@@ -716,6 +724,19 @@ manager_facts() { # label
 	truthy "$1: inventory-only rows present, cod checkout count unchanged ($PAY_COD)" "$(jq -r --argjson cod "${PAY_COD:-0}" '.ok as $r | ($r.methods // []) | map({key: .id, value: .}) | from_entries
 		| (.bacs.assessment == "inventory_only" and .blzmcp_phone.assessment == "inventory_only" and .bacs.activity.outside_checkout_observed == true and .cod.quiet.taken_28d == $cod)' "$CALL_OUT" 2>/dev/null)"
 }
+# Diagnostics withheld or exposed (REVIEW-pass4a R4), on the last call's result: withheld = every
+# applicable log/job check not checked, unavailable, role reason, null quantities, empty groups and
+# hooks, no diagnostic finding (and at least one applicable check, so it is never vacuous); exposed
+# = the fixture's failed Stripe payment job is reported with its finding.
+diag_checks() { # label withheld|exposed
+	local okv lbl n=0
+	while IFS=$'\t' read -r lbl okv; do
+		[ -n "$lbl" ] || continue
+		n=$((n + 1))
+		if [ "$okv" == true ]; then ok "$1: $lbl"; else no "$1: $lbl"; fi
+	done < <(if [ "$2" == withheld ]; then diag_withheld_checks "$CALL_OUT" "$ROLE_NOTE" "$DIAG_DENIED_TEXT"; else diag_exposed_checks "$CALL_OUT" "$ROLE_NOTE"; fi)
+	[ "$n" -gt 0 ] || no "$1: diagnostics $2 checks could not be evaluated"
+}
 # Low-privileged principals: a customer and a subscriber with their own credential per route, and
 # an anonymous caller with none.
 helper credentials.php user ensure blzmcp_matrix_cu customer >/dev/null
@@ -728,22 +749,26 @@ for r in "${TRANSPORTS[@]}"; do
 	for p in customer:blzmcp_matrix_cu subscriber:blzmcp_matrix_sub; do
 		kind=app
 		[ "$r" == easy ] && kind=easy
-		if make_cred "${p%%:*}_$r" "$kind" "${p##*:}" quiet; then DENY_CRED[${p%%:*}_$r]=${p%%:*}_$r; else DENY_CRED[${p%%:*}_$r]=refused; fi
+		# A credential the helper could not make is a failure, never a denial (REVIEW-pass4a R4).
+		if make_cred "${p%%:*}_$r" "$kind" "${p##*:}"; then DENY_CRED[${p%%:*}_$r]=${p%%:*}_$r; else DENY_CRED[${p%%:*}_$r]=refused; fi
 	done
 	DENY_CRED[anonymous_$r]=anon
 done
+# Fail closed (REVIEW-pass4a R4): a denial passes only on the route's known authentication refusal
+# at initialize or its known permission refusal of the call. No reply (HTTP 000), 5xx, a malformed
+# or unrelated reply, an unknown error text and a missing credential all fail the case.
 deny_case() { # route principal
 	local cred=${DENY_CRED[$2_$1]:-} sname="deny_$1_$2"
-	if [ "$cred" == refused ]; then
-		ok "$1: $2 could not obtain a credential for this route (denied before any call)"
+	if [ -z "$cred" ] || [ "$cred" == refused ]; then
+		no "$1: $2 has a credential for this route (the credential helper failed, so the denial is unproven)"
 		return
 	fi
 	if ! open_session "$sname" "$1" "$cred" quiet; then
-		if leaks "$RPC_BODY"; then no "$1: $2 refused at initialize without method facts"; else ok "$1: $2 refused at initialize (http $RPC_CODE), no method facts"; fi
+		expect_init_refusal "$1: $2 refused at initialize with the known authentication refusal, no method facts" auth
 		return
 	fi
 	pay_call "$sname" # no flush: a privileged result is warm in the cache
-	if call_ok; then no "$1: $2 is denied payment health (got a result)"; else ok "$1: $2 is denied payment health ($(call_err | head -c 80))"; fi
+	expect_call_refusal "$1: $2 is denied payment health with the known permission refusal" "$1" "$PAY" perm
 	if leaks "$RPC_BODY"; then no "$1: $2 receives no method facts"; else ok "$1: $2 receives no method facts"; fi
 }
 
@@ -786,6 +811,7 @@ for auth in $PAY_AUTHORITIES; do
 			if call_ok; then
 				eq "$s [$auth] $phase: administrator has no diagnostics role note" false "$(role_note)"
 				manager_facts "$s [$auth] $phase: administrator"
+				diag_checks "$s [$auth] $phase: administrator diagnostics" exposed
 			else
 				no "$s [$auth] $phase: administrator runs payment health ($(call_err | head -c 200))"
 			fi
@@ -806,6 +832,11 @@ for auth in $PAY_AUTHORITIES; do
 					esac
 					eq "$s [$auth]: shop manager, $lbl" "$want_note" "$(role_note)"
 					manager_facts "$s [$auth] $phase: shop manager"
+					if [ "$phase" == diag_on ]; then
+						diag_checks "$s [$auth] $phase: shop manager diagnostics" exposed
+					else
+						diag_checks "$s [$auth] $phase: shop manager diagnostics" withheld
+					fi
 				else
 					no "$s [$auth] $phase: shop manager runs payment health (manage_woocommerce) ($(call_err | head -c 200))"
 				fi
@@ -831,9 +862,10 @@ for auth in $PAY_AUTHORITIES; do
 			set_sm_diag true
 			pay_call "$sm" 1
 			if call_ok && [ "$(role_note)" == false ]; then ok "$s [$auth]: shop manager with diagnostics warms a privileged result"; else no "$s [$auth]: shop manager warms a privileged result ($(call_err | head -c 120))"; fi
+			diag_checks "$s [$auth]: the warmed manager result" exposed
 			helper credentials.php user ensure blzmcp_matrix_sm customer >/dev/null
 			pay_call "$sm"
-			if call_ok; then no "$s [$auth]: after the downgrade to customer the warm result is refused (got a result)"; else ok "$s [$auth]: after the downgrade to customer the warm result is refused ($(call_err | head -c 80))"; fi
+			expect_call_refusal "$s [$auth]: after the downgrade to customer the warm result is refused with the known permission refusal" "${S_KIND[$sm]}" "$PAY" perm
 			if leaks "$RPC_BODY"; then no "$s [$auth]: the downgraded user receives no method facts"; else ok "$s [$auth]: the downgraded user receives no method facts"; fi
 			helper credentials.php user ensure blzmcp_matrix_sm shop_manager >/dev/null
 			set_sm_diag false
@@ -876,7 +908,7 @@ if has_transport rec; then
 	open_session pay_off_rec rec admin_app || no "payment off: recommended session"
 	grep -qxF "$PAY" <<<"$(list_names pay_off_rec)" && no "payment off: absent from recommended discovery" || ok "payment off: absent from recommended discovery"
 	call_ability pay_off_rec "$PAY" '{"since_hours":24}'
-	if call_ok || leaks "$RPC_BODY"; then no "payment off (recommended): a direct call is refused without method facts"; else ok "payment off (recommended): a direct call is refused without method facts"; fi
+	expect_call_refusal "payment off (recommended): a direct call gets the known not-found answer without method facts" rec "$PAY" tool_off
 	call_ability pay_off_rec blaze-mcp-toolkit/weekly-store-review '{"period":"last_7_days"}'
 	truthy "payment off (recommended): weekly review leaves the step out and says payments were not checked" "$(jq -r --arg p "$PAY" '(.ok | ([.steps[].ability] | index($p) == null) and (.instructions | contains("The payment health check is not in this plan")))' "$CALL_OUT")"
 	wpc option update ewpa_thirdparty_disabled "${prev:-[]}" --format=json >/dev/null
@@ -890,7 +922,7 @@ if has_transport easy; then
 	open_session pay_off_easy easy admin_easy || no "payment off: Easy MCP AI session"
 	grep -qxF "$(easy_name "$PAY")" <<<"$(list_names pay_off_easy)" && no "payment off: absent from Easy MCP AI tools/list" || ok "payment off: absent from Easy MCP AI tools/list"
 	call_ability pay_off_easy "$PAY" '{"since_hours":24}'
-	if call_ok || leaks "$RPC_BODY"; then no "payment off (Easy MCP AI): a direct call is refused without method facts"; else ok "payment off (Easy MCP AI): a direct call is refused without method facts"; fi
+	expect_call_refusal "payment off (Easy MCP AI): a direct call gets the known switched-off answer without method facts" easy "$PAY" tool_off
 	call_ability pay_off_easy blaze-mcp-toolkit/weekly-store-review '{"period":"last_7_days"}'
 	truthy "payment off (Easy MCP AI): weekly review leaves the step out and says payments were not checked" "$(jq -r --arg p "$PAY" '(.ok | ([.steps[].ability] | index($p) == null) and (.instructions | contains("The payment health check is not in this plan")))' "$CALL_OUT")"
 	row=$(setup_row easy_tools_on)
