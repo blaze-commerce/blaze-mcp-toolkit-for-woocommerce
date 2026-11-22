@@ -30,6 +30,19 @@ set -uo pipefail
 # the zip's header Version, BLZMCP_VERSION and readme Stable tag must agree (exit 3). The record is
 # titled and named after the candidate's version, never a fixed one.
 #
+# 1.2.1 (FEATURE-PLAN item 5), also exit 5 / FAILED: every STATE and STORAGE line appears exactly
+# once (a duplicate is incomplete evidence, never a second pass); the HTTP suite's TRANSPORT rows
+# cover exactly the required partitions (per state and route: discovery, workflows, analytics off,
+# tool off and manager roles; per state, route and authority hpos/legacy: the administrator
+# disclosure, administrator and manager diagnostics off/on/off, customer, subscriber and anonymous
+# denial and the manager's warm downgrade; none: no tool on either route), each exactly once and
+# PASSED (a missing, duplicated or unknown row is incomplete; a FAILED row fails the verdict); the
+# performance receipt is schema 2 with 50,000 recent and 10,000 older checkout orders plus at least
+# 1,000 separately counted excluded-origin orders across 10 methods, verified per storage, every
+# valid trial carries the outside reader, query count, rows examined and selected, peak memory, warm
+# timing and a query plan, and the 1,000 and 1,001 distinct-ID cap cases passed per storage. The
+# transport receipt (BLZMCP_TRANSPORT_OUT, default <record>-transport.md) lists every row.
+#
 # Privacy: absolute local paths in copied log lines are replaced with <path>; the finished record
 # is then scanned for home directories, host paths, auth headers, secrets and e-mail addresses
 # (other than the fixtures' example.invalid ones). Any hit refuses the record (exit 5, nothing
@@ -68,6 +81,12 @@ else
 		n=$((n + 1))
 	done
 fi
+if [ -n "${BLZMCP_TRANSPORT_OUT:-}" ]; then
+	TRANSPORT_OUT=$BLZMCP_TRANSPORT_OUT
+else
+	TRANSPORT_OUT="${OUT%.md}-transport.md"
+fi
+[ ! -e "$TRANSPORT_OUT" ] || { echo "MATRIX RECORD REFUSED: $TRANSPORT_OUT already exists"; exit 4; }
 # Tie the zip to the evidence commit (see the header): byte identity for every shipped file,
 # vendored commerce files against vendor-src/, and an inventory of what must be present.
 PKG=blaze-mcp-toolkit-for-woocommerce
@@ -132,6 +151,53 @@ for m in ${missing[@]+"${missing[@]}"}; do differ+=("$m (missing from zip)"); do
 
 # Evidence completeness: required states ran, storage combinations ran, performance receipt bound.
 incomplete=()
+# Each STATE and STORAGE partition exactly once.
+dup_lines=$(
+	{
+		grep '^STATE=' "$SUMMARY" | cut -d'|' -f1
+		grep '^STORAGE=' "$SUMMARY" | cut -d'|' -f1-3
+	} | sort | uniq -d | sed 's/^/duplicated /' | paste -sd, - | cut -c1-300
+)
+[ -z "$dup_lines" ] || incomplete+=("summary partitions duplicated: $dup_lines")
+# Transport receipt rows: route x authority x principal x case, each required one exactly once.
+TRANSPORT_ANY="admin|discovery admin|workflows admin|analytics_off admin|tool_off manager|roles"
+TRANSPORT_AUTH="admin|disclosure admin|diag_off admin|diag_on admin|diag_off_again manager|diag_off manager|diag_on manager|diag_off_again customer|denied subscriber|denied anonymous|denied manager|warm_downgrade"
+TRANSPORT_AUTHORITIES="hpos legacy"
+routes_for() {
+	case "$1" in
+	recommended) echo rec ;;
+	easy-*) echo easy ;;
+	both | none) echo "rec easy" ;;
+	esac
+}
+tdir=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-record-t.XXXXXX")
+for s in $REQUIRED_STATES; do
+	for r in $(routes_for "$s"); do
+		if [ "$s" == none ]; then
+			echo "$s|$r|any|admin|no_tool"
+			continue
+		fi
+		for c in $TRANSPORT_ANY; do echo "$s|$r|any|$c"; done
+		for a in $TRANSPORT_AUTHORITIES; do
+			for c in $TRANSPORT_AUTH; do echo "$s|$r|$a|$c"; done
+		done
+	done
+done | sort >"$tdir/required"
+grep '^TRANSPORT=' "$SUMMARY" | sed 's/^TRANSPORT=//' >"$tdir/rows"
+cut -d'|' -f1-5 "$tdir/rows" | sort >"$tdir/keys"
+t_missing=$(sort -u "$tdir/keys" | comm -23 "$tdir/required" - | wc -l | tr -d ' ')
+t_missing_list=$(sort -u "$tdir/keys" | comm -23 "$tdir/required" - | head -8 | paste -sd, -)
+t_unknown=$(sort -u "$tdir/keys" | comm -13 "$tdir/required" - | head -8 | paste -sd, -)
+t_dup=$(uniq -d "$tdir/keys" | head -8 | paste -sd, -)
+t_failed=$(awk -F'|' '$6 != "PASSED"' "$tdir/rows" | cut -d'|' -f1-5 | head -8 | paste -sd, -)
+t_required=$(wc -l <"$tdir/required" | tr -d ' ')
+t_rows=$(wc -l <"$tdir/rows" | tr -d ' ')
+t_passed=$(awk -F'|' '$6 == "PASSED"' "$tdir/rows" | wc -l | tr -d ' ')
+rm -rf "$tdir"
+[ "$t_missing" == 0 ] || incomplete+=("transport rows missing: $t_missing of $t_required (first: $t_missing_list)")
+[ -z "$t_dup" ] || incomplete+=("transport rows duplicated: $t_dup")
+[ -z "$t_unknown" ] || incomplete+=("transport rows not in the required set: $t_unknown")
+[ -z "$t_failed" ] && [ -n "$(grep -m1 '^TRANSPORT=' "$SUMMARY")" ] || VERDICT=FAILED
 for s in $REQUIRED_STATES; do
 	r=$(grep "^STATE=$s|" "$SUMMARY" | head -1 | cut -d'|' -f2)
 	case "$r" in
@@ -151,7 +217,7 @@ for s in $REQUIRED_STATES; do
 	done
 done
 perf_ok=0
-if [ -z "$perf_file" ] || [ ! -f "$perf_file" ] || ! jq -e '.schema == "blzmcp-payment-performance/1"' "$perf_file" >/dev/null 2>&1; then
+if [ -z "$perf_file" ] || [ ! -f "$perf_file" ] || ! jq -e '.schema == "blzmcp-payment-performance/2"' "$perf_file" >/dev/null 2>&1; then
 	incomplete+=("no performance receipt (PERF_FILE)")
 elif [ "$(jq -r '.candidate_sha256 // ""' "$perf_file")" != "$zip_sha" ]; then
 	incomplete+=("performance receipt is not bound to this zip (candidate_sha256 $(jq -r '.candidate_sha256 // "none"' "$perf_file"))")
@@ -166,7 +232,7 @@ else
 	# Checked on the trials themselves, not on the partition's own complete flag.
 	tinvalid=$(jq -r '[("legacy", "hpos") as $s | (24, 168) as $w | ("file", "db") as $l | . as $r
 		| (($r.trials // []) | map(select(.storage == $s and .window == $w and .logger == $l))) as $t
-		| ($t | map(select(.ok == true and ((.validation.readers // {}) | (keys == ["inventory", "jobs", "logs", "orders"]) and all(.[]; . == true))))) as $v
+		| ($t | map(select(.ok == true and ((.validation.readers // {}) | (keys == ["inventory", "jobs", "logs", "orders", "outside"]) and all(.[]; . == true))))) as $v
 		| select(($t | length) != 5 or ($v | length) != 5) | "\($s)/\($w)h/\($l) (\($v | length) of \($t | length) trials valid)"] | join(", ")' "$perf_file")
 	fmissing=$(jq -r '[("legacy", "hpos") as $s | ({l:"file", f:"logs"}, {l:"db", f:"logs"}, {l:"db", f:"orders"}, {l:"db", f:"jobs"}) as $p | . as $r
 		| (($r.forced_failures // []) | map(select(.storage == $s and .logger == $p.l and .force == $p.f))) as $f
@@ -175,14 +241,34 @@ else
 	# was removed, and the original order storage was restored. Checked on the cleanup records.
 	cmissing=$(jq -r '. as $r | ($r.cleanup // []) as $c
 		| def good: .ok == true and (.mode != "orders" or .tagged_remaining == 0) and (if has("expected_removed") then .orders_removed == .expected_removed else true end);
-		[ (("legacy", "hpos") as $s | ("before", "diag-file", "diag-db", "after") as $ph
+		[ (("legacy", "hpos") as $s | ("before", "diag-file", "diag-db", "after", "cap") as $ph
 			| ($c | map(select(.storage == $s and .phase == $ph))) as $e
-			| select(($e | length) < 1 or ($e | all(good)) != true or ($ph == "after" and ($e | all(has("expected_removed") and .expected_removed > 0)) != true))
+			| select(($e | length) < 1 or ($e | all(good)) != true or (($ph == "after" or $ph == "cap") and ($e | all(has("expected_removed") and .expected_removed > 0)) != true))
 			| "\($ph) (\($s))"),
 		  (($c | map(select(.phase == "final"))) as $e | select(($e | length) < 1 or ($e | all(good)) != true) | "final"),
 		  (select(($c | all(good)) != true) | "a cleanup record that failed"),
 		  (select(($r.storage_restored.ok // false) != true) | "order storage restore") ] | unique | join(", ")' "$perf_file")
-	if [ -n "$pmissing" ]; then
+	# 1.2.1 item 5: the volume (checkout kept, excluded-origin counted apart), per-trial metrics and caps.
+	smissing=$(jq -r '. as $r | [
+		(select(($r.seed.recent_orders // 0) < 50000) | "recent checkout orders \($r.seed.recent_orders)"),
+		(select(($r.seed.older_orders // 0) < 10000) | "older orders \($r.seed.older_orders)"),
+		(select(($r.seed.outside_orders // 0) < 1000) | "excluded-origin orders \($r.seed.outside_orders)"),
+		(select((($r.seed.outside_methods // []) | unique | length) < 10) | "excluded-origin methods \(($r.seed.outside_methods // []) | length)"),
+		(("legacy", "hpos") as $s | (($r.seed.storages // []) | map(select(.storage == $s))) as $v
+			| select(($v | length) != 1 or ($v[0].verify.ok // false) != true or $v[0].verify.outside != $r.seed.outside_orders or $v[0].verify.checkout != ($r.seed.recent_orders + $r.seed.older_orders))
+			| "verified checkout/excluded counts (\($s))")
+		] | join(", ")' "$perf_file")
+	mmissing=$(jq -r '[(.trials // [])[] | select(.ok == true)
+		| select(((.queries | type) != "number") or ((.rows_examined | type) != "number") or ((.rows_selected | type) != "number")
+			or ((.peak_memory_delta_bytes | type) != "number") or ((.warm_ms | type) != "number")
+			or (((.slowest // []) | map(select((.plan | type) == "array" and (.plan | length) > 0)) | length) < 1))
+		| "\(.storage)/\(.window)h/\(.logger)#\(.trial)"] | unique | .[0:8] | join(", ")' "$perf_file")
+	kmissing=$(jq -r '. as $r | [("legacy", "hpos") as $s | (1000, 1001) as $k
+		| (($r.cap_cases // []) | map(select(.storage == $s and .distinct_ids == $k))) as $c
+		| select(($c | length) != 1 or ($c[0].ok // false) != true) | "\($k) distinct IDs (\($s))"] | join(", ")' "$perf_file")
+	if [ -n "$smissing" ]; then
+		incomplete+=("performance volume incomplete: $smissing")
+	elif [ -n "$pmissing" ]; then
 		incomplete+=("performance partitions incomplete: $pmissing")
 	elif [ -n "$tinvalid" ]; then
 		incomplete+=("performance trials without the seeded workload and valid readers: $tinvalid")
@@ -192,6 +278,10 @@ else
 		incomplete+=("volume fixture cleanup missing or incomplete: $cmissing")
 	elif [ "$(jq -c '[.exact_jobs_required, .jobs_store]' "$perf_file")" != '[true,["ActionScheduler_DBStore"]]' ]; then
 		incomplete+=("background jobs were not timed on the exact database-store path (jobs_store $(jq -c '.jobs_store' "$perf_file"))")
+	elif [ -n "$mmissing" ]; then
+		incomplete+=("performance trials without query count, rows examined/selected, peak memory, warm timing or a query plan: $mmissing")
+	elif [ -n "$kmissing" ]; then
+		incomplete+=("method-cap stress case missing or failed: $kmissing")
 	elif [ -n "$hmissing" ]; then
 		incomplete+=("performance receipt has no HTTP latency figure for: $hmissing")
 	elif [ "$(jq -r '.all_pass and ([.partitions[].max_ms] | all(. < 1500))' "$perf_file")" != true ]; then
@@ -253,15 +343,29 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 		echo "| $state | $combo | $suite | $result | $p | $f |"
 	done
 	echo
+	echo "## Transport receipt rows (route x order authority x principal x case)"
+	echo
+	echo "- Required $t_required, received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
+	echo "- Every row is the HTTP suite's own pass/fail for that case on the real transport (no CLI parity); the full list is in \`$(basename "$TRANSPORT_OUT")\`"
+	echo
+	echo "| State | Route | Authority | Rows | Passed |"
+	echo "|---|---|---|---|---|"
+	grep '^TRANSPORT=' "$SUMMARY" | sed 's/^TRANSPORT=//' | awk -F'|' '{k = $1 "|" $2 "|" $3; n[k]++; if ($6 == "PASSED") p[k]++} END {for (k in n) print k "|" n[k] "|" (p[k] + 0)}' | sort | while IFS='|' read -r state route auth n p; do
+		echo "| $state | $route | $auth | $n | $p |"
+	done
+	echo
 	echo "## Payment health cold performance"
 	echo
 	if [ -n "$perf_file" ] && [ -f "$perf_file" ]; then
 		echo "- Receipt SHA-256: \`$(shasum -a 256 "$perf_file" | awk '{print $1}')\`; budget $(jq -r '.budget_ms' "$perf_file") ms per partition (maximum of the trials); $(jq -r '.meaning' "$perf_file")"
-		echo "- Seed: $(jq -r '"\(.seed.recent_orders) recent checkout orders over \(.seed.horizon_days) days + \(.seed.older_orders) older, methods \(.seed.methods | join(", "))"' "$perf_file")"
+		echo "- Seed: $(jq -r '"\(.seed.recent_orders) recent checkout orders over \(.seed.horizon_days) days + \(.seed.older_orders) older, methods \(.seed.methods | join(", ")); plus \(.seed.outside_orders // 0) excluded-origin orders counted separately across \((.seed.outside_methods // []) | length) methods (\((.seed.outside_methods // []) | join(", ")))"' "$perf_file")"
+		echo "- Verified per storage: $(jq -r '(.seed.storages // []) | map("\(.storage) checkout \(.verify.checkout // "?") + excluded-origin \(.verify.outside // "?"), ok \(.verify.ok // false)") | join("; ")' "$perf_file")"
 		echo
-		echo "| Storage | Window | Logger | Max ms | Trials (ms) | Warm max ms | Pass |"
-		echo "|---|---|---|---|---|---|---|"
-		jq -r '.partitions[] | "| \(.storage) | \(.window)h | \(.logger) | \(.max_ms) | \(.trials_ms | map(tostring) | join(", ")) | \(.warm_ms_max) | \(.pass) |"' "$perf_file"
+		echo "| Storage | Window | Logger | Max ms | Trials (ms) | Warm max ms | Queries | Rows examined max | Rows selected max | Peak memory max (bytes) | Pass |"
+		echo "|---|---|---|---|---|---|---|---|---|---|---|"
+		jq -r '.partitions[] | "| \(.storage) | \(.window)h | \(.logger) | \(.max_ms) | \(.trials_ms | map(tostring) | join(", ")) | \(.warm_ms_max) | \(.queries | map(tostring) | join("/")) | \(.rows_examined_max) | \(.rows_selected_max) | \(.peak_memory_delta_bytes_max) | \(.pass) |"' "$perf_file"
+		echo
+		echo "- Method-cap stress cases (own assertions, not performance trials): $(jq -r '(.cap_cases // []) | map("\(.storage) \(.distinct_ids) IDs: listed \(.listed), methods_truncated \(.methods_truncated), inventory \(.inventory_coverage), \(if .ok then "passed" else "FAILED" end) (\(.elapsed_ms) ms)") | join("; ") | if . == "" then "none" else . end' "$perf_file")"
 		echo
 		echo "- HTTP latency (abilities REST route, ms): $(jq -r '(.http // []) | map("\(.storage)/\(.window)h/\(.kind) \(.total_ms)") | join(", ") | if . == "" then "none" else . end' "$perf_file")"
 		echo "- Background jobs timed on: $(jq -r '.jobs_path // "not recorded"' "$perf_file")"
@@ -302,16 +406,38 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 		echo "- **$state**: \`$(jq -c '.' <<<"${plugins:-[]}" 2>/dev/null)\`"
 	done
 } >"$TMP_OUT"
+# The transport receipt: every row, with the candidate identity.
+TMP_TRANS=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-trans.XXXXXX")
+{
+	t_ok=PASSED
+	[ "$t_missing" == 0 ] && [ -z "$t_dup" ] && [ -z "$t_unknown" ] && [ -z "$t_failed" ] && [ "$t_rows" -gt 0 ] || t_ok=FAILED
+	echo "# Blaze MCP Toolkit $label - origin disclosure transport receipt"
+	echo
+	echo "- Result: **TRANSPORT $t_ok** (passed only when every required row is present exactly once and PASSED)"
+	echo "- Candidate: \`$(basename "$zip")\`, SHA-256 \`${zip_sha:-unreadable}\`, version ${zip_version:-none}"
+	echo "- Git commit: \`$commit\`"
+	echo "- Matrix record: \`$(basename "$OUT")\`"
+	echo "- Rows: required $t_required, received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
+	echo "- A row is one case of tests/matrix/http-suite.sh over the state's real transport (rec = MCP Adapter with Enable Abilities, easy = Easy MCP AI), under the order authority it names (switched in its own process and read back before the case; any = the case does not depend on the order store), for that principal. PASSED means every check in the case passed. disclosure: the administrator sees schema 2, the mixed, registered-disabled and unregistered inventory-only methods kept apart from checkout counts, and a warm repeat from the cache. diag_off / diag_on / diag_off_again: the shop-manager diagnostics setting off, on, then off after a warm result, for the administrator and the manager (the manager keeps the outside-checkout facts with diagnostics off). denied: a customer, a subscriber or an anonymous caller gets no result and no method facts with a privileged result warm. warm_downgrade: a manager's warm privileged result is refused after the role loses manage_woocommerce. no_tool: in none, neither route lists or runs payment health."
+	echo
+	echo "| State | Route | Authority | Principal | Case | Result |"
+	echo "|---|---|---|---|---|---|"
+	grep '^TRANSPORT=' "$SUMMARY" | sed 's/^TRANSPORT=//' | while IFS='|' read -r state route auth who case result; do
+		echo "| $state | $route | $auth | $who | $case | $result |"
+	done
+} >"$TMP_TRANS"
 # Privacy scan of the finished record: nothing local, no auth material, no real e-mail address.
-leaks=$(grep -nE -e "${HOME:-/nonexistent-home}" -e '/(Users|home)/[A-Za-z0-9._-]+' -e 'Authorization:|Bearer [A-Za-z0-9]|SECRET=|password=|app_password|sk_(live|test)_|whsec_' "$TMP_OUT" | cut -c1-80)
-emails=$(grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$TMP_OUT" | grep -vE '@example\.invalid$' | head -3)
+leaks=$(grep -nE -e "${HOME:-/nonexistent-home}" -e '/(Users|home)/[A-Za-z0-9._-]+' -e 'Authorization:|Bearer [A-Za-z0-9]|SECRET=|password=|app_password|sk_(live|test)_|whsec_' "$TMP_OUT" "$TMP_TRANS" | cut -c1-80)
+emails=$(grep -ohE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$TMP_OUT" "$TMP_TRANS" | grep -vE '@example\.invalid$' | head -3)
 if [ -n "$leaks" ] || [ -n "$emails" ]; then
-	rm -f "$TMP_OUT"
+	rm -f "$TMP_OUT" "$TMP_TRANS"
 	echo "MATRIX RECORD REFUSED: the record would contain local or private data (lines: $(printf '%s' "$leaks" | cut -d: -f1 | paste -sd, -)${emails:+; e-mail addresses})"
 	exit 5
 fi
 mv "$TMP_OUT" "$OUT"
+mv "$TMP_TRANS" "$TRANSPORT_OUT"
 echo "Evidence: $OUT"
+echo "Transport receipt: $TRANSPORT_OUT"
 if [ "${#differ[@]}" -ne 0 ]; then
 	echo "CANDIDATE DOES NOT MATCH THE EVIDENCE COMMIT: ${#differ[@]} item(s): ${differ[*]:0:20}"
 	exit 3

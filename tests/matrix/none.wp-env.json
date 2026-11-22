@@ -1,10 +1,10 @@
 {
-	"core": "https://wordpress.org/wordpress-7.1.4.zip",
+	"core": "https://wordpress.org/wordpress-7.1.5.zip",
 	"phpVersion": "8.3",
 	"port": 8898,
 	"testsPort": 8899,
 	"plugins": [
-		"https://downloads.wordpress.org/plugin/woocommerce.11.3.0.zip",
+		"https://downloads.wordpress.org/plugin/woocommerce.11.3.1.zip",
 		"./blaze-mcp-toolkit-for-woocommerce"
 	],
 	"mappings": {

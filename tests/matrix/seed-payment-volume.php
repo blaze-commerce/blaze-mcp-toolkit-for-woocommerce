@@ -5,7 +5,12 @@
  *
  *   wp eval-file .../seed-payment-volume.php orders <offset> <count> <now>   Recent checkout orders (28 days)
  *   wp eval-file .../seed-payment-volume.php old <offset> <count> <now>      Older orders (30-400 days ago)
- *   wp eval-file .../seed-payment-volume.php verify <recent> <old>           Counts in the authoritative store, plus a CRUD sample
+ *   wp eval-file .../seed-payment-volume.php outside <offset> <count> <now> <total>
+ *                                                                            Excluded-origin orders (missing or non-checkout origin, 27 days)
+ *   wp eval-file .../seed-payment-volume.php cap <offset> <count> <now>      Method-cap stress: one distinct outside method ID per order
+ *                                                                            (offset 0 also seeds the cod checkout control orders)
+ *   wp eval-file .../seed-payment-volume.php verify <recent> <old> [outside] Counts in the authoritative store (checkout and excluded
+ *                                                                            origin separately), plus a CRUD sample
  *   wp eval-file .../seed-payment-volume.php diag <file|db> <now>            Near-budget Stripe logs and failed jobs, logger switched
  *   wp eval-file .../seed-payment-volume.php cleanup                         Remove every order, log and job this fixture made
  *   wp eval-file .../seed-payment-volume.php diag-cleanup                    Remove only the logs, jobs and logger settings
@@ -15,7 +20,9 @@
  * Orders go through WooCommerce CRUD (new WC_Order, one save), origin `checkout`, tagged with
  * meta `_blzmcp_perf=1`. Order i of N is created at now - 60 s - i * (28 days / N), so the recent
  * orders cover the whole 28-day history evenly. Methods and statuses come from a fixed cycle of 20
- * (DISTRIBUTION below). Seeding is chunked so each PHP process stays small; seed time is never part
+ * (DISTRIBUTION below). The excluded-origin population (1.2.1) and the method-cap fixture use the
+ * same tag and come from payment-volume-cycle.php (BLZMCP_PERF_OUTSIDE, blzmcp_perf_cap_id()); they
+ * never replace the checkout volume. Seeding is chunked so each PHP process stays small; seed time is never part
  * of a measurement. Analytics import and order emails are switched off in the seeding process only.
  *
  * @package Blaze\McpToolkit
@@ -63,6 +70,28 @@ function blzmcp_perf_order( int $i, int $created ): void {
 	if ( $txn ) {
 		$order->set_transaction_id( 'pi_synthetic_' . $i );
 	}
+	$order->update_meta_data( BLZMCP_PERF_META, '1' );
+	$order->save();
+}
+
+/**
+ * One paid, processing order outside verified checkout activity, through CRUD with a single save.
+ *
+ * @param string $method  Payment method ID.
+ * @param string $via     Recorded origin ('' = empty).
+ * @param int    $created Created time (paid 30 s later).
+ * @param int    $i       Sequence number.
+ */
+function blzmcp_perf_outside_order( string $method, string $via, int $created, int $i ): void {
+	$order = new WC_Order();
+	$order->set_created_via( $via );
+	$order->set_payment_method( $method );
+	$order->set_currency( 'AUD' );
+	$order->set_total( (string) ( 10 + ( $i % 90 ) ) . '.50' );
+	$order->set_billing_email( 'blzmcp-perf-out-' . ( $i % 50 ) . '@example.invalid' );
+	$order->set_date_created( $created );
+	$order->set_status( 'processing' );
+	$order->set_date_paid( $created + BLZMCP_PERF_PAID_AFTER );
 	$order->update_meta_data( BLZMCP_PERF_META, '1' );
 	$order->save();
 }
@@ -261,10 +290,53 @@ switch ( $blzmcp_perf_cmd ) {
 		}
 		echo 'SEEDED=' . $count . "\n";
 		break;
+	case 'outside':
+		blzmcp_perf_quiet();
+		$offset = (int) ( $blzmcp_perf_args[1] ?? 0 );
+		$count  = (int) ( $blzmcp_perf_args[2] ?? 0 );
+		$now    = (int) ( $blzmcp_perf_args[3] ?? time() );
+		$total  = (int) ( $blzmcp_perf_args[4] ?? 1000 );
+		for ( $i = $offset; $i < $offset + $count; $i++ ) {
+			list( $method, $via ) = BLZMCP_PERF_OUTSIDE[ $i % count( BLZMCP_PERF_OUTSIDE ) ];
+			blzmcp_perf_outside_order( $method, $via, blzmcp_perf_outside_created( $i, $now, $total ), $i );
+		}
+		echo 'SEEDED=' . $count . "\n";
+		break;
+	case 'cap':
+		blzmcp_perf_quiet();
+		$offset = (int) ( $blzmcp_perf_args[1] ?? 0 );
+		$count  = (int) ( $blzmcp_perf_args[2] ?? 0 );
+		$now    = (int) ( $blzmcp_perf_args[3] ?? time() );
+		$made   = 0;
+		if ( 0 === $offset ) {
+			// The checkout control: cod checkout orders the cap must never change, 12 hours apart so
+			// they span more than the 7 days the store-wide quiet check needs for complete coverage.
+			for ( $c = 0; $c < BLZMCP_PERF_CAP_CONTROL; $c++ ) {
+				$control = new WC_Order();
+				$control->set_created_via( 'checkout' );
+				$control->set_payment_method( 'cod' );
+				$control->set_currency( 'AUD' );
+				$control->set_total( '20.00' );
+				$control->set_billing_email( 'blzmcp-perf-cap@example.invalid' );
+				$control->set_date_created( $now - 7200 - $c * 43200 );
+				$control->set_status( 'processing' );
+				$control->set_date_paid( $now - 7200 - $c * 43200 + BLZMCP_PERF_PAID_AFTER );
+				$control->update_meta_data( BLZMCP_PERF_META, '1' );
+				$control->save();
+				++$made;
+			}
+		}
+		for ( $n = $offset; $n < $offset + $count; $n++ ) {
+			blzmcp_perf_outside_order( blzmcp_perf_cap_id( $n ), 0 === $n % 2 ? '' : 'admin', $now - 3600 - $n * 300, $n );
+			++$made;
+		}
+		echo 'SEEDED=' . $made . "\n";
+		break;
 	case 'verify':
 		global $wpdb;
 		$want_recent = (int) ( $blzmcp_perf_args[1] ?? 0 );
 		$want_old    = (int) ( $blzmcp_perf_args[2] ?? 0 );
+		$want_out    = (int) ( $blzmcp_perf_args[3] ?? 0 );
 		$hpos        = \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
 		$ids         = $hpos
 			? $wpdb->get_col( $wpdb->prepare( 'SELECT o.id FROM %i o JOIN %i m ON m.order_id = o.id AND m.meta_key = %s WHERE o.type = %s', $wpdb->prefix . 'wc_orders', $wpdb->prefix . 'wc_orders_meta', BLZMCP_PERF_META, 'shop_order' ) )
@@ -273,11 +345,17 @@ switch ( $blzmcp_perf_cmd ) {
 		$untagged    = (int) ( $hpos
 			? $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i o WHERE o.type = %s AND o.status NOT IN ('trash', 'auto-draft', 'wc-checkout-draft', 'checkout-draft') AND NOT EXISTS (SELECT 1 FROM %i m WHERE m.order_id = o.id AND m.meta_key = %s)", $wpdb->prefix . 'wc_orders', 'shop_order', $wpdb->prefix . 'wc_orders_meta', BLZMCP_PERF_META ) )
 			: $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i p WHERE p.post_type = %s AND p.post_status NOT IN ('trash', 'auto-draft', 'wc-checkout-draft', 'checkout-draft') AND NOT EXISTS (SELECT 1 FROM %i m WHERE m.post_id = p.ID AND m.meta_key = %s)", $wpdb->posts, 'shop_order', $wpdb->postmeta, BLZMCP_PERF_META ) ) );
-		$sample      = array_slice( $ids, 0, 25 );
+		// Checkout and excluded-origin orders counted separately, by the recorded origin.
+		$checkout_n  = (int) ( $hpos
+			? $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i o JOIN %i m ON m.order_id = o.id AND m.meta_key = %s JOIN %i d ON d.order_id = o.id WHERE o.type = %s AND d.created_via = %s', $wpdb->prefix . 'wc_orders', $wpdb->prefix . 'wc_orders_meta', BLZMCP_PERF_META, $wpdb->prefix . 'wc_order_operational_data', 'shop_order', 'checkout' ) )
+			: $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i p JOIN %i m ON m.post_id = p.ID AND m.meta_key = %s JOIN %i v ON v.post_id = p.ID AND v.meta_key = %s WHERE p.post_type = %s AND v.meta_value = %s', $wpdb->posts, $wpdb->postmeta, BLZMCP_PERF_META, $wpdb->postmeta, '_created_via', 'shop_order', 'checkout' ) ) );
+		$outside_n   = count( $ids ) - $checkout_n;
+		// A CRUD sample of checkout orders and of excluded-origin orders.
+		$sample      = array_merge( array_slice( $ids, 0, 25 ), array_slice( $ids, -10 ) );
 		$crud_ok     = 0;
 		foreach ( $sample as $id ) {
 			$o = wc_get_order( (int) $id );
-			if ( $o instanceof WC_Order && '1' === (string) $o->get_meta( BLZMCP_PERF_META ) && 'checkout' === $o->get_created_via() ) {
+			if ( $o instanceof WC_Order && '1' === (string) $o->get_meta( BLZMCP_PERF_META ) ) {
 				++$crud_ok;
 			}
 		}
@@ -286,11 +364,13 @@ switch ( $blzmcp_perf_cmd ) {
 				'authority'   => $hpos ? 'hpos' : 'legacy',
 				'sync'        => get_option( 'woocommerce_custom_orders_table_data_sync_enabled', 'no' ),
 				'orders'      => count( $ids ),
-				'expected'    => $want_recent + $want_old,
+				'expected'    => $want_recent + $want_old + $want_out,
+				'checkout'    => $checkout_n,
+				'outside'     => $outside_n,
 				'crud_sample' => count( $sample ),
 				'crud_ok'     => $crud_ok,
 				'untagged'    => $untagged,
-				'ok'          => count( $ids ) === $want_recent + $want_old && count( $sample ) === $crud_ok && 0 === $untagged,
+				'ok'          => count( $ids ) === $want_recent + $want_old + $want_out && $checkout_n === $want_recent + $want_old && $outside_n === $want_out && count( $sample ) === $crud_ok && 0 === $untagged,
 			)
 		) . "\n";
 		break;
@@ -313,9 +393,9 @@ switch ( $blzmcp_perf_cmd ) {
 			$key         = $row[0] . ' ' . $row[1] . ( $row[2] ? ' paid' : ' unpaid' ) . ( $row[3] ? ' with reference' : '' );
 			$per[ $key ] = ( $per[ $key ] ?? 0 ) + 1;
 		}
-		echo 'DISTRIBUTION=' . wp_json_encode( array( 'cycle' => 20, 'per_cycle' => $per ) ) . "\n";
+		echo 'DISTRIBUTION=' . wp_json_encode( array( 'cycle' => 20, 'per_cycle' => $per, 'outside_cycle' => array_map( static fn( $r ) => $r[0] . ' origin ' . ( '' === $r[1] ? '(empty)' : $r[1] ), BLZMCP_PERF_OUTSIDE ) ) ) . "\n";
 		break;
 	default:
-		echo "ERROR=usage: seed-payment-volume.php orders|old|verify|diag|cleanup|distribution\n";
+		echo "ERROR=usage: seed-payment-volume.php orders|old|outside|cap|verify|diag|cleanup|diag-cleanup|distribution\n";
 		exit( 1 );
 }
