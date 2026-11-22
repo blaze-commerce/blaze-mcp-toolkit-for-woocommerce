@@ -8,8 +8,10 @@
 #
 # For each authoritative storage (legacy, then HPOS; sync off, each populated on its own after the
 # other's orders are removed): seed 50,000 recent checkout orders over 28 days across 3 methods
-# plus 10,000 older ones (tests/matrix/seed-payment-volume.php, CRUD, chunked, in parallel
-# processes; seed time is excluded), verify the counts in the authoritative store and a CRUD
+# plus 10,000 older ones and a separately counted excluded-origin population of 1,000 orders
+# across 10 method IDs (missing or non-checkout origin; 8 seen only outside verified checkout
+# activity, cod and stripe mixed; 1.2.1 item 5) (tests/matrix/seed-payment-volume.php, CRUD,
+# chunked, in parallel processes; seed time is excluded), verify the counts in the authoritative store and a CRUD
 # sample, then for the file logger and the database logger (near-budget Stripe logs and 40 failed
 # Stripe jobs) and for since_hours 24 and 168 run 5 uncached calls, each in a fresh PHP request
 # (tests/matrix/measure-payment-health.php). HTTP latency (cold and warm, per storage and window)
@@ -36,9 +38,14 @@
 # the storage restore are recorded in the receipt (cleanup, cleanup_checks, storage_restored,
 # cleanup_ok); a cleanup that leaves fixture orders, logs, jobs or settings behind, removes fewer
 # orders than were seeded, or a failed restore fails the suite.
+# After each storage's normal fixture is removed, the method-cap stress case runs on its own
+# fixture (seed-payment-volume.php cap, measure-outside-cap.php): 1,000 and then 1,001 distinct
+# outside method IDs plus a cod checkout control. Each has its own assertions (cap_cases in the
+# receipt) and never counts as a performance trial; it cannot put the normal fixture into partial
+# coverage. Every trial also records rows examined and rows selected.
 # Ends with "PERF PASSED" or "PERF FAILED".
 #
-# Env: BLZMCP_PERF_RECENT (50000) BLZMCP_PERF_OLD (10000) BLZMCP_PERF_TRIALS (5)
+# Env: BLZMCP_PERF_RECENT (50000) BLZMCP_PERF_OLD (10000) BLZMCP_PERF_OUTSIDE (1000) BLZMCP_PERF_TRIALS (5)
 #      BLZMCP_PERF_JOBS (4 parallel seed processes) BLZMCP_PERF_CHUNK (2500)
 #      BLZMCP_PERF_STORAGES ("legacy hpos") BLZMCP_PERF_CANDIDATE (zip path, hashed into the record)
 #      BLZMCP_PERF_REQUIRE_DBSTORE (0; the matrix sets 1)
@@ -49,6 +56,7 @@ T=${BLZMCP_T:-wp-content/blzmcp-tests}
 OUT=${BLZMCP_PERF_OUT:?BLZMCP_PERF_OUT}
 RECENT=${BLZMCP_PERF_RECENT:-50000}
 OLD=${BLZMCP_PERF_OLD:-10000}
+OUTSIDE=${BLZMCP_PERF_OUTSIDE:-1000}
 TRIALS=${BLZMCP_PERF_TRIALS:-5}
 JOBS=${BLZMCP_PERF_JOBS:-4}
 CHUNK=${BLZMCP_PERF_CHUNK:-2500}
@@ -59,6 +67,7 @@ BUDGET=1500
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-perf.XXXXXX")
 SEED="$T/matrix/seed-payment-volume.php"
 MEASURE="$T/matrix/measure-payment-health.php"
+CAP_MEASURE="$T/matrix/measure-outside-cap.php"
 SWITCH="$T/Integration/test-payment-orders.php"
 
 wpc() { "$WPE" run cli wp "$@" 2>/dev/null; }
@@ -109,6 +118,7 @@ seed_range() { # cmd total now
 : >"$WORK/storage.jsonl"
 : >"$WORK/forced.jsonl"
 : >"$WORK/cleanup.jsonl"
+: >"$WORK/cap.jsonl"
 fail=0
 # cleanup_step <phase> <storage> <cleanup|diag-cleanup> [expected orders removed]: runs one fixture
 # cleanup, keeps its CLEANUP result for the receipt and fails the suite (fail closed) when it is
@@ -132,9 +142,29 @@ cleanup_step() {
 # measure <window> [force]: one measurement line (JSON), or a failed placeholder.
 measure() {
 	local m
-	m=$(wpc eval-file "$MEASURE" "$1" "$now" "$RECENT" "$OLD" "$EXACT_JOBS" ${2:+"$2"} | sed -n 's/^MEASURE=//p')
+	m=$(wpc eval-file "$MEASURE" "$1" "$now" "$RECENT" "$OLD" "$OUTSIDE" "$EXACT_JOBS" ${2:+"$2"} | sed -n 's/^MEASURE=//p')
 	[ -n "$m" ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$m" || m='{"ok":false,"error":"no output"}'
 	printf '%s\n' "$m"
+}
+# cap_case <storage>: the method-cap stress fixture, 1,000 then 1,001 distinct outside IDs.
+cap_case() {
+	local k c s1 s2 cap_now
+	cap_now=$(date +%s)
+	s1=$(wpc eval-file "$SEED" cap 0 1000 "$cap_now" | sed -n 's/^SEEDED=//p' | tail -1)
+	s2=0
+	for k in 1000 1001; do
+		[ "$k" == 1001 ] && s2=$(wpc eval-file "$SEED" cap 1000 1 "$cap_now" | sed -n 's/^SEEDED=//p' | tail -1)
+		c=$(wpc eval-file "$CAP_MEASURE" "$k" | sed -n 's/^CAP=//p' | tail -1)
+		[ -n "$c" ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$c" || c="{\"ok\":false,\"distinct_ids\":$k,\"failures\":[\"no output\"]}"
+		jq -c --arg s "$1" '{storage:$s} + .' <<<"$c" >>"$WORK/cap.jsonl"
+		if [ "$(jq -r '.ok' <<<"$c")" == true ]; then
+			echo "  cap $k distinct outside IDs ($1): $(jq -r '"listed \(.listed), methods_truncated \(.methods_truncated), inventory \(.inventory_coverage), \(.elapsed_ms) ms, \(.queries) queries"' <<<"$c")"
+		else
+			echo "FAIL  cap $k distinct outside IDs ($1): $(jq -c '.failures' <<<"$c")"
+			fail=1
+		fi
+	done
+	cleanup_step cap "$1" cleanup "$((${s1:-0} + ${s2:-0}))"
 }
 for storage in $STORAGES; do
 	cleanup_step before "$storage" cleanup
@@ -147,11 +177,12 @@ for storage in $STORAGES; do
 	t0=$(date +%s)
 	got_recent=$(seed_range orders "$RECENT" "$now")
 	got_old=$(seed_range old "$OLD" "$now")
+	got_outside=$(seed_range outside "$OUTSIDE" "$now")
 	seed_s=$(($(date +%s) - t0))
-	verify=$(wpc eval-file "$SEED" verify "$RECENT" "$OLD" | sed -n 's/^VERIFY=//p')
-	echo "storage $storage: seeded $got_recent recent + $got_old older in ${seed_s}s (excluded); verify $verify"
-	jq -cn --arg s "$storage" --argjson v "${verify:-null}" --argjson secs "$seed_s" --argjson r "${got_recent:-0}" --argjson o "${got_old:-0}" \
-		'{storage:$s, verify:$v, seed_seconds_excluded:$secs, seeded_recent:$r, seeded_old:$o}' >>"$WORK/storage.jsonl"
+	verify=$(wpc eval-file "$SEED" verify "$RECENT" "$OLD" "$OUTSIDE" | sed -n 's/^VERIFY=//p')
+	echo "storage $storage: seeded $got_recent recent + $got_old older + $got_outside outside verified checkout activity in ${seed_s}s (excluded); verify $verify"
+	jq -cn --arg s "$storage" --argjson v "${verify:-null}" --argjson secs "$seed_s" --argjson r "${got_recent:-0}" --argjson o "${got_old:-0}" --argjson x "${got_outside:-0}" \
+		'{storage:$s, verify:$v, seed_seconds_excluded:$secs, seeded_recent:$r, seeded_old:$o, seeded_outside:$x}' >>"$WORK/storage.jsonl"
 	if [ "$(jq -r '.ok // false' <<<"${verify:-null}")" != true ] || [ "$(jq -r '.authority' <<<"$verify")" != "$storage" ]; then
 		echo "FAIL  storage $storage: fixture not verified in the authoritative store"
 		fail=1
@@ -171,7 +202,7 @@ for storage in $STORAGES; do
 				m=$(measure "$window")
 				jq -c --arg s "$storage" --arg l "$logger" --argjson w "$window" --argjson t "$trial" --argjson d "${diag:-null}" \
 					'{storage:$s, logger:$l, window:$w, trial:$t, diag:$d} + .' <<<"$m" >>"$WORK/trials.jsonl"
-				echo "    $storage $logger ${window}h trial $trial: $(jq -r '"\(.elapsed_ms) ms, warm \(.warm_ms) ms, \(.queries) queries, store \(.action_store), ok \(.ok), coverage \(.coverage)"' <<<"$m")"
+				echo "    $storage $logger ${window}h trial $trial: $(jq -r '"\(.elapsed_ms) ms, warm \(.warm_ms) ms, \(.queries) queries, rows examined \(.rows_examined) / selected \(.rows_selected), store \(.action_store), ok \(.ok), coverage \(.coverage)"' <<<"$m")"
 				jq -r '(.validation.failures // [.error // empty])[] | "      invalid: \(.)"' <<<"$m"
 			done
 		done
@@ -204,7 +235,7 @@ for storage in $STORAGES; do
 						-X POST -H 'Content-Type: application/json' --data-binary "{\"input\":{\"since_hours\":$window}}" "$url")
 					method=POST
 				fi
-				valid=$(jq -r '(type == "object" and has("overall") and has("store_wide"))' "$WORK/http.json" 2>/dev/null || echo false)
+				valid=$(jq -r '(type == "object" and .schema_version == 2 and has("overall") and has("store_wide") and has("inventory"))' "$WORK/http.json" 2>/dev/null || echo false)
 				jq -cn --arg s "$storage" --argjson w "$window" --arg k "$kind" --arg r "$ms" --arg m "$method" --arg v "$valid" \
 					'{storage:$s, window:$w, kind:$k, method:$m, http_code:($r | split(" ")[0]), valid_body:($v == "true"), total_ms:(($r | split(" ")[1] | tonumber) * 1000 | round)}' >>"$WORK/http.jsonl"
 				if [ "${ms%% *}" != 200 ] || [ "$valid" != true ]; then
@@ -216,7 +247,8 @@ for storage in $STORAGES; do
 			done
 		done
 	fi
-	cleanup_step after "$storage" cleanup "$((${got_recent:-0} + ${got_old:-0}))"
+	cleanup_step after "$storage" cleanup "$((${got_recent:-0} + ${got_old:-0} + ${got_outside:-0}))"
+	cap_case "$storage"
 done
 
 # Final cleanup and the original order storage restored, both before the receipt so it records them.
@@ -238,7 +270,7 @@ cand_sha=null
 [ -n "${BLZMCP_PERF_CANDIDATE:-}" ] && [ -f "$BLZMCP_PERF_CANDIDATE" ] && cand_sha="\"$(shasum -a 256 "$BLZMCP_PERF_CANDIDATE" | awk '{print $1}')\""
 [ -f "$WORK/http.jsonl" ] || : >"$WORK/http.jsonl"
 jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage.jsonl" --slurpfile http "$WORK/http.jsonl" \
-	--slurpfile forced "$WORK/forced.jsonl" --argjson exact_jobs "$EXACT_JOBS" \
+	--slurpfile forced "$WORK/forced.jsonl" --argjson exact_jobs "$EXACT_JOBS" --slurpfile cap "$WORK/cap.jsonl" --argjson outside "$OUTSIDE" \
 	--slurpfile cleanup "$WORK/cleanup.jsonl" --argjson restore "$restore_json" \
 	--argjson limits "${limits:-null}" --argjson dist "${dist:-null}" --argjson cand "$cand_sha" \
 	--argjson budget "$BUDGET" --argjson trials_n "$TRIALS" --argjson recent "$RECENT" --argjson old "$OLD" --arg storages "$STORAGES" '
@@ -248,7 +280,10 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 	| [ $st[] as $s | ({logger:"file", force:"logs"}, {logger:"db", force:"logs"}, {logger:"db", force:"orders"}, {logger:"db", force:"jobs"}) | . + {storage:$s} ] as $want_forced
 	| ($want_forced | map(. as $p | ($forced | map(select(.storage == $p.storage and .logger == $p.logger and .force == $p.force))) as $f
 		| $p + {probes: ($f | length), detected: (($f | length) == 1 and ($f | all(.ok == false and .detected == true)))})) as $forced_check
-	| ([ $st[] as $s | ("before", "diag-file", "diag-db", "after") as $ph | {storage:$s, phase:$ph} ] + [{phase:"final"}]) as $want_cleanup
+	| ([ $st[] as $s | ("before", "diag-file", "diag-db", "after", "cap") as $ph | {storage:$s, phase:$ph} ] + [{phase:"final"}]) as $want_cleanup
+	| [ $st[] as $s | (1000, 1001) as $k | {storage:$s, distinct_ids:$k} ] as $want_cap
+	| ($want_cap | map(. as $p | ($cap | map(select(.storage == $p.storage and .distinct_ids == $p.distinct_ids))) as $c
+		| $p + {runs: ($c | length), ok: (($c | length) == 1 and ($c | all(.ok == true)))})) as $cap_check
 	| ($want_cleanup | map(. as $p | ($cleanup | map(select(.phase == $p.phase and ($p.phase == "final" or .storage == $p.storage)))) as $c
 		| $p + {runs: ($c | length), passed: (($c | length) >= 1 and ($c | all(.passed == true)))})) as $cleanup_check
 	| (($cleanup_check | all(.passed)) and ($cleanup | all(.passed == true)) and $restore.ok == true) as $cleanup_ok
@@ -260,11 +295,13 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 			max_ms: ($t | map(.elapsed_ms // 1e9) | max),
 			warm_ms_max: ($t | map(.warm_ms // null) | max),
 			queries: ($t | map(.queries) | unique),
+			rows_examined_max: ($t | map(.rows_examined // null) | max),
+			rows_selected_max: ($t | map(.rows_selected // null) | max),
 			peak_memory_delta_bytes_max: ($t | map(.peak_memory_delta_bytes // 0) | max),
 			complete: (($t | length) == $trials_n and ($t | map(select(.ok != true)) | length) == 0)
 		} | . + {pass: (.complete and .max_ms < $budget)})) as $parts
 	| {
-		schema: "blzmcp-payment-performance/1",
+		schema: "blzmcp-payment-performance/2",
 		measured_at_utc: (now | todate),
 		candidate_sha256: $cand,
 		budget_ms: $budget,
@@ -273,7 +310,10 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 		exact_jobs_required: ($exact_jobs == 1),
 		payment_health_cold_ms: ($parts | map({key: "\(.storage)/\(.window)h/\(.logger)", value: .max_ms}) | from_entries),
 		forced_failures_detected: ($forced_check | all(.detected)),
-		all_pass: (($parts | length) == ($want | length) and ($parts | all(.pass)) and ($forced_check | all(.detected)) and $cleanup_ok),
+		all_pass: (($parts | length) == ($want | length) and ($parts | all(.pass)) and ($forced_check | all(.detected)) and $cleanup_ok and ($cap_check | all(.ok))),
+		cap_ok: ($cap_check | all(.ok)),
+		cap_checks: $cap_check,
+		cap_cases: $cap,
 		cleanup_ok: $cleanup_ok,
 		cleanup_checks: $cleanup_check,
 		cleanup: $cleanup,
@@ -281,7 +321,9 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 		partitions: $parts,
 		forced_failure_checks: $forced_check,
 		forced_failures: $forced,
-		seed: {recent_orders: $recent, older_orders: $old, horizon_days: 28, older_span_days: "30-400", methods: ["stripe", "cod", "cheque"], distribution: $dist, storages: $storage},
+		seed: {recent_orders: $recent, older_orders: $old, outside_orders: $outside, horizon_days: 28, older_span_days: "30-400", methods: ["stripe", "cod", "cheque"],
+			outside_methods: ["bacs", "blzmcp_ext_admin", "blzmcp_ext_import", "blzmcp_ext_none", "blzmcp_ext_phone", "blzmcp_ext_pos", "blzmcp_ext_rest", "blzmcp_ext_sub", "cod", "stripe"],
+			outside_meaning: "separately counted excluded-origin orders (missing or non-checkout origin), never part of the checkout volume", distribution: $dist, storages: $storage},
 		environment: {container_limits: $limits, versions: ($trials | map(.versions) | unique)},
 		jobs_store: ($trials | map(.action_store // null) | unique),
 		jobs_path: (($trials | map(.action_store // null) | unique) as $j
@@ -295,6 +337,7 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 verdict=$(jq -r '.all_pass' "$OUT" 2>/dev/null)
 jq -r '.partitions[] | "partition \(.storage) \(.window)h \(.logger): max \(.max_ms) ms over \(.trials_ms | length) trials (\(.trials_ms | map(tostring) | join(", "))), warm max \(.warm_ms_max) ms, invalid trials \(.failed_trials), pass \(.pass)"' "$OUT"
 jq -r '.forced_failure_checks[] | "forced \(.force)-reader failure \(.storage) \(.logger): probes \(.probes), detected \(.detected)"' "$OUT"
+jq -r '.cap_checks[] | "cap \(.distinct_ids) distinct outside IDs \(.storage): runs \(.runs), ok \(.ok)"' "$OUT"
 echo "jobs store: $(jq -r '.jobs_path' "$OUT")"
 echo "cleanup: $(jq -r '"\(if .cleanup_ok then "complete" else "INCOMPLETE" end): \([.cleanup[] | select(.phase == "after") | "\(.storage) removed \(.orders_removed)/\(.expected_removed), \(.tagged_remaining) tagged left"] | join("; ")); order storage restored to \(.storage_restored.storage) sync=\(.storage_restored.sync): \(.storage_restored.ok)"' "$OUT")"
 echo "Receipt: $OUT"

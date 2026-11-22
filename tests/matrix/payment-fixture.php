@@ -14,9 +14,18 @@
  *   rate makes the 8-day silence red (method_quiet).
  * - `blzmcp_gone` (no gateway registers it): 12 accepted orders on days -27 … -16. It gets the
  *   "not currently registered" warning (method_not_registered).
- * The cod and cheque settings options are saved first and put back by `cleanup`; no other option is
- * written. These orders are created after the fixed Analytics comparisons have run, and `cleanup`
- * also removes their Analytics rows, so the fixture.php figures are unaffected.
+ * Outside verified checkout activity (1.2.1, C3/C4), same tag, all paid and inside the 28 days:
+ * - `cod` also gets 6 orders with origin `admin` (days -20 … -15): a mixed method, still
+ *   checkout_health, its checkout counts unchanged.
+ * - `bacs` (registered by WooCommerce, switched off here): 5 orders with no origin (days -10 … -6).
+ *   Inventory only: no disabled-method alert, no diagnostics.
+ * - `blzmcp_phone` (no gateway registers it): 4 orders with origin `phone-order` (days -5 … -2).
+ *   Inventory only: no not-registered alert.
+ * `seed` prints SEEDED (all orders), CHECKOUT (checkout-origin orders, all accepted in the 28 days),
+ * COD_CHECKOUT (cod's checkout-origin orders) and OUTSIDE (outside-checkout orders).
+ * The cod, cheque and bacs settings options are saved first and put back by `cleanup`; no other
+ * option is written. These orders are created after the fixed Analytics comparisons have run, and
+ * `cleanup` also removes their Analytics rows, so the fixture.php figures are unaffected.
  *
  * Customer data is synthetic (example.invalid addresses).
  *
@@ -92,15 +101,16 @@ function blzmcp_payfx_at( int $days_ago, int $hour ): int {
 }
 
 /**
- * One accepted checkout order through CRUD.
+ * One accepted order through CRUD (origin `checkout` unless given; '' leaves the origin empty).
  *
  * @param string $method Payment method ID.
  * @param int    $ts     Created and paid time.
  * @param int    $n      Sequence number.
+ * @param string $via    Recorded origin.
  */
-function blzmcp_payfx_order( string $method, int $ts, int $n ): void {
+function blzmcp_payfx_order( string $method, int $ts, int $n, string $via = 'checkout' ): void {
 	$order = wc_create_order( array( 'status' => 'pending' ) );
-	$order->set_created_via( 'checkout' );
+	$order->set_created_via( $via );
 	$order->set_payment_method( $method );
 	$order->set_billing_email( 'blzmcp-payfx-' . ( $n % 3 ) . '@example.invalid' );
 	$order->set_currency( get_woocommerce_currency() );
@@ -128,23 +138,25 @@ if ( 'seed' !== $blzmcp_payfx_cmd ) {
 
 blzmcp_payfx_cleanup();
 $saved = array();
-foreach ( array( 'woocommerce_cod_settings', 'woocommerce_cheque_settings' ) as $name ) {
+foreach ( array( 'woocommerce_cod_settings', 'woocommerce_cheque_settings', 'woocommerce_bacs_settings' ) as $name ) {
 	$saved[ $name ] = get_option( $name, null );
 }
 update_option( BLZMCP_PAYFX_SAVED, $saved, false );
-foreach ( array( 'woocommerce_cod_settings', 'woocommerce_cheque_settings' ) as $name ) {
+foreach ( array( 'woocommerce_cod_settings' => 'yes', 'woocommerce_cheque_settings' => 'yes', 'woocommerce_bacs_settings' => 'no' ) as $name => $enabled ) {
 	$value            = is_array( $saved[ $name ] ) ? $saved[ $name ] : array();
-	$value['enabled'] = 'yes';
+	$value['enabled'] = $enabled;
 	update_option( $name, $value );
 }
 
 $now = time();
 $n   = 0;
+$cod = 0;
 for ( $d = 27; $d >= 0; $d-- ) {
 	foreach ( array( 9, 12, 15, 18 ) as $hour ) {
 		$ts = blzmcp_payfx_at( $d, $hour );
 		if ( $ts < $now - HOUR_IN_SECONDS ) {
 			blzmcp_payfx_order( 'cod', $ts, ++$n );
+			++$cod;
 		}
 	}
 }
@@ -154,5 +166,19 @@ for ( $d = 27; $d >= 8; $d-- ) {
 for ( $d = 27; $d >= 16; $d-- ) {
 	blzmcp_payfx_order( 'blzmcp_gone', blzmcp_payfx_at( $d, 10 ), ++$n );
 }
+$checkout = $n;
+// Outside verified checkout activity: a mixed method, a registered disabled one and an unregistered one.
+for ( $d = 20; $d >= 15; $d-- ) {
+	blzmcp_payfx_order( 'cod', blzmcp_payfx_at( $d, 13 ), ++$n, 'admin' );
+}
+for ( $d = 10; $d >= 6; $d-- ) {
+	blzmcp_payfx_order( 'bacs', blzmcp_payfx_at( $d, 14 ), ++$n, '' );
+}
+for ( $d = 5; $d >= 2; $d-- ) {
+	blzmcp_payfx_order( 'blzmcp_phone', blzmcp_payfx_at( $d, 16 ), ++$n, 'phone-order' );
+}
 blzmcp_payfx_clear_cache();
 echo 'SEEDED=' . $n . "\n";
+echo 'CHECKOUT=' . $checkout . "\n";
+echo 'COD_CHECKOUT=' . $cod . "\n";
+echo 'OUTSIDE=' . ( $n - $checkout ) . "\n";

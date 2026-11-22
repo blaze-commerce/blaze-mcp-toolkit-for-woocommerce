@@ -12,7 +12,16 @@
  * - logs: the seeded gateway's log check read; complete with the exact observed count, or partial
  *   only for a documented bound (log_row_cap, byte_cap, file_cap) with a lower-bound count in range;
  * - jobs: the seeded gateway's job check read; complete with the exact failed count, or the
- *   sampled lower bound (sampled_store) only when the exact database store is not required.
+ *   sampled lower bound (sampled_store) only when the exact database store is not required;
+ * - outside (1.2.1): the excluded-origin population was observed and kept apart (C3/C4/C7): every
+ *   inventory-only ID has an inventory_only row, status unknown, outside activity true, checkout
+ *   activity false, no quantities, no diagnostics read and no finding; every mixed ID stays
+ *   checkout_health with both activities true (its checkout counts are the orders reader's exact
+ *   ones); the inventory block was read and is not truncated.
+ *
+ * blzmcp_perf_validate_cap() checks one method-cap stress result (1,000 or 1,001 distinct outside
+ * IDs, C4): the identity map is cut at 1,000 with methods_truncated and the cap reason only above
+ * it, rows stay one per safe ID in ID order, and the checkout control is unchanged.
  *
  * The public `reason` is fixed translated text (PaymentHealth::reason_text()), not the code, so a
  * bound is matched by its exact text, read from the plugin in the same process (same locale, can't
@@ -86,6 +95,7 @@ if ( ! function_exists( 'blzmcp_perf_validate' ) ) {
 			'inventory' => true,
 			'logs'      => true,
 			'jobs'      => true,
+			'outside'   => true,
 		);
 		$failures = array();
 		$fail     = static function ( string $reader, string $why ) use ( &$readers, &$failures ): void {
@@ -194,10 +204,147 @@ if ( ! function_exists( 'blzmcp_perf_validate' ) ) {
 			}
 		}
 
+		// Outside verified checkout activity (1.2.1): observed, listed, never assessed or counted.
+		$out = (array) ( $expect['outside'] ?? array() );
+		$io  = array_values( (array) ( $out['inventory_only'] ?? array() ) );
+		$mx  = array_values( (array) ( $out['mixed'] ?? array() ) );
+		if ( (int) ( $out['orders'] ?? 0 ) <= 0 || count( $io ) + count( $mx ) < 10 ) {
+			$fail( 'outside', 'the fixture expects no excluded-origin population across 10 methods (workload not seeded)' );
+		} else {
+			$inv = (array) ( $result['inventory'] ?? array() );
+			if ( true !== ( $inv['checked'] ?? null ) || false !== ( $inv['methods_truncated'] ?? null ) ) {
+				$fail( 'outside', 'inventory checked ' . $show( $inv['checked'] ?? null ) . ', methods_truncated ' . $show( $inv['methods_truncated'] ?? null ) );
+			}
+			$finding_ids = array();
+			foreach ( (array) ( $result['findings'] ?? array() ) as $f ) {
+				if ( is_array( $f ) && is_string( $f['method_id'] ?? null ) ) {
+					$finding_ids[ $f['method_id'] ] = true;
+				}
+			}
+			foreach ( $io as $id ) {
+				$m = $rows[ $id ] ?? null;
+				if ( null === $m ) {
+					$fail( 'outside', "inventory-only method $id missing" );
+					continue;
+				}
+				$act    = (array) ( $m['activity'] ?? array() );
+				$checks = array( $m['quiet'] ?? array(), $m['stuck'] ?? array(), $m['errors']['logs'] ?? array(), $m['errors']['jobs'] ?? array(), $m['errors']['webhook'] ?? array() );
+				$read   = array_filter( $checks, static fn( $c ) => false !== ( $c['checked'] ?? null ) );
+				if ( 'inventory_only' !== ( $m['assessment'] ?? null ) || 'unknown' !== ( $m['status'] ?? null ) ) {
+					$fail( 'outside', "method $id assessment " . $show( $m['assessment'] ?? null ) . ', status ' . $show( $m['status'] ?? null ) );
+				} elseif ( true !== ( $act['outside_checkout_observed'] ?? null ) || false !== ( $act['checkout_observed'] ?? null ) ) {
+					$fail( 'outside', "method $id activity checkout " . $show( $act['checkout_observed'] ?? null ) . ', outside ' . $show( $act['outside_checkout_observed'] ?? null ) );
+				} elseif ( null !== ( $m['quiet']['taken_28d'] ?? null ) || array() !== $read || array() !== (array) ( $m['stuck']['examples'] ?? array() ) ) {
+					$fail( 'outside', "method $id has a quantity, an example or a check that was read" );
+				} elseif ( isset( $finding_ids[ $id ] ) ) {
+					$fail( 'outside', "method $id has a finding" );
+				}
+			}
+			foreach ( $mx as $id ) {
+				$m   = $rows[ $id ] ?? null;
+				$act = (array) ( $m['activity'] ?? array() );
+				if ( null === $m || 'checkout_health' !== ( $m['assessment'] ?? null ) || true !== ( $act['checkout_observed'] ?? null ) || true !== ( $act['outside_checkout_observed'] ?? null ) ) {
+					$fail( 'outside', "mixed method $id assessment " . $show( $m['assessment'] ?? null ) . ', activity checkout ' . $show( $act['checkout_observed'] ?? null ) . ', outside ' . $show( $act['outside_checkout_observed'] ?? null ) );
+				}
+			}
+		}
+
 		return array(
 			'ok'       => array() === $failures,
 			'readers'  => $readers,
 			'failures' => $failures,
+		);
+	}
+
+	/**
+	 * Validate one method-cap stress result (C4: at most 1,000 distinct outside IDs are kept).
+	 *
+	 * @param mixed               $result   The ability's result.
+	 * @param int                 $k        Distinct outside IDs seeded (blzmcp_perf_cap_id( 0 .. k-1 )).
+	 * @param array<string,mixed> $control  {method: string, taken_28d: int} checkout control.
+	 * @param string|null         $cap_text Public reason text of outside_checkout_method_cap (null: read from the plugin).
+	 * @param int                 $cap      The identity-map cap.
+	 * @return array{ok:bool,failures:string[],listed:int,methods_truncated:mixed,inventory_coverage:mixed}
+	 */
+	function blzmcp_perf_validate_cap( $result, int $k, array $control, ?string $cap_text = null, int $cap = 1000 ): array {
+		$failures = array();
+		if ( null === $cap_text ) {
+			$cls      = '\\Blaze\\McpToolkit\\Abilities\\PaymentHealth';
+			$cap_text = class_exists( $cls ) && method_exists( $cls, 'reason_text' ) ? (string) $cls::reason_text( 'outside_checkout_method_cap' ) : '';
+		}
+		if ( ! is_array( $result ) ) {
+			return array(
+				'ok'                 => false,
+				'failures'           => array( 'no response' ),
+				'listed'             => 0,
+				'methods_truncated'  => null,
+				'inventory_coverage' => null,
+			);
+		}
+		$methods = array_values( array_filter( (array) ( $result['methods'] ?? array() ), 'is_array' ) );
+		$ids     = array_map( static fn( $m ) => (string) ( $m['id'] ?? '' ), $methods );
+		$sorted  = $ids;
+		sort( $sorted, SORT_STRING );
+		if ( $ids !== $sorted || count( $ids ) !== count( array_unique( $ids ) ) ) {
+			$failures[] = 'rows are not one per ID in ID order';
+		}
+		foreach ( $ids as $id ) {
+			if ( ! preg_match( '/^[A-Za-z0-9][A-Za-z0-9_\-]{0,63}$/', $id ) ) {
+				$failures[] = 'unsafe method ID in output';
+				break;
+			}
+		}
+		$cap_rows = array_values( array_filter( $methods, static fn( $m ) => str_starts_with( (string) ( $m['id'] ?? '' ), 'blzmcp_cap_' ) ) );
+		$listed   = count( $cap_rows );
+		$want     = min( $k, $cap );
+		if ( $listed !== $want ) {
+			$failures[] = "listed $listed cap IDs, expected $want";
+		}
+		foreach ( $cap_rows as $m ) {
+			if ( 'inventory_only' !== ( $m['assessment'] ?? null ) || 'unknown' !== ( $m['status'] ?? null ) || true !== ( $m['activity']['outside_checkout_observed'] ?? null ) ) {
+				$failures[] = 'cap ID ' . (string) $m['id'] . ' is not an unassessed inventory-only row';
+				break;
+			}
+		}
+		foreach ( (array) ( $result['findings'] ?? array() ) as $f ) {
+			if ( str_starts_with( (string) ( $f['method_id'] ?? '' ), 'blzmcp_cap_' ) ) {
+				$failures[] = 'a cap ID has a finding';
+				break;
+			}
+		}
+		$inv       = (array) ( $result['inventory'] ?? array() );
+		$truncated  = $inv['methods_truncated'] ?? null;
+		$inv_reason = $inv['reason'] ?? null;
+		$cap_shown  = '' !== $cap_text && $inv_reason === $cap_text;
+		if ( $k > $cap ) {
+			if ( true !== $truncated || 'partial' !== ( $inv['coverage'] ?? null ) || ! $cap_shown ) {
+				$failures[] = 'above the cap: methods_truncated ' . var_export( $truncated, true ) . ', coverage ' . var_export( $inv['coverage'] ?? null, true ) . ', cap reason ' . ( $cap_shown ? 'yes' : 'no' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions
+			}
+		} elseif ( false !== $truncated || $cap_shown ) {
+			$failures[] = 'at or below the cap: methods_truncated ' . var_export( $truncated, true ) . ' or the cap reason is shown'; // phpcs:ignore WordPress.PHP.DevelopmentFunctions
+		}
+		if ( 'complete' === ( $result['coverage'] ?? null ) ) {
+			$failures[] = 'top-level coverage is complete while inventory-only rows are unassessed';
+		}
+		$cm = null;
+		foreach ( $methods as $m ) {
+			if ( ( $control['method'] ?? '' ) === ( $m['id'] ?? null ) ) {
+				$cm = $m;
+			}
+		}
+		$sw = (array) ( $result['store_wide'] ?? array() );
+		if ( null === $cm || 'checkout_health' !== ( $cm['assessment'] ?? null ) || ( $cm['quiet']['taken_28d'] ?? null ) !== (int) ( $control['taken_28d'] ?? -1 ) ) {
+			$failures[] = 'checkout control ' . (string) ( $control['method'] ?? '?' ) . ' changed or missing';
+		}
+		if ( ( $sw['taken_28d'] ?? null ) !== (int) ( $control['taken_28d'] ?? -1 ) || 'complete' !== ( $sw['coverage'] ?? null ) ) {
+			$failures[] = 'store-wide taken_28d ' . var_export( $sw['taken_28d'] ?? null, true ) . ', coverage ' . var_export( $sw['coverage'] ?? null, true ) . ' (control ' . (int) ( $control['taken_28d'] ?? -1 ) . ')'; // phpcs:ignore WordPress.PHP.DevelopmentFunctions
+		}
+		return array(
+			'ok'                 => array() === $failures,
+			'failures'           => $failures,
+			'listed'             => $listed,
+			'methods_truncated'  => $truncated,
+			'inventory_coverage' => $inv['coverage'] ?? null,
 		);
 	}
 }

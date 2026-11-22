@@ -82,8 +82,9 @@ $is( 'cheque cohort taken 1 (i=12, completed paid)', 1 === $mid['methods']['cheq
  * @param array<string,mixed> $orders Expected order counts.
  * @param int                 $logs   Stripe log count.
  * @param int                 $jobs   Stripe failed jobs.
+ * @param array<string,mixed> $outside Expected excluded-origin IDs (blzmcp_perf_expect_outside()).
  */
-function blzmcp_test_response( array $orders, int $logs, int $jobs ): array {
+function blzmcp_test_response( array $orders, int $logs, int $jobs, array $outside = array() ): array {
 	$check   = static fn( string $coverage, ?string $reason = null, bool $applicable = true ) => array(
 		'status'     => 'amber',
 		'checked'    => 'unavailable' !== $coverage,
@@ -103,6 +104,13 @@ function blzmcp_test_response( array $orders, int $logs, int $jobs ): array {
 			'test_mode'  => null,
 			'kind'       => $manual ? 'manual' : 'instant',
 			'status'     => 'amber',
+			'assessment' => 'checkout_health',
+			'activity'   => array(
+				'checkout_observed'         => true,
+				'outside_checkout_observed' => in_array( $id, (array) ( $outside['mixed'] ?? array() ), true ),
+				'coverage'                  => 'complete',
+				'reason'                    => null,
+			),
 			'reasons'    => array(),
 			'quiet'      => $check( 'not_applicable', 'method_not_registered', false ) + array( 'taken_28d' => $c['taken_28d'] ),
 			'stuck'      => $check( $manual ? 'not_applicable' : 'complete' ) + array_diff_key( $c, array( 'taken_28d' => 0 ) ),
@@ -114,8 +122,50 @@ function blzmcp_test_response( array $orders, int $logs, int $jobs ): array {
 			),
 		);
 	}
+	$un = array(
+		'status'     => 'unknown',
+		'checked'    => false,
+		'applicable' => false,
+		'coverage'   => 'not_applicable',
+		'reason'     => 'Observed only outside verified checkout activity; checkout health not assessed.',
+	);
+	foreach ( (array) ( $outside['inventory_only'] ?? array() ) as $id ) {
+		$methods[] = array(
+			'id'         => $id,
+			'title'      => 'Payment method',
+			'plugin'     => null,
+			'registered' => null,
+			'enabled'    => null,
+			'test_mode'  => null,
+			'kind'       => 'unknown',
+			'status'     => 'unknown',
+			'assessment' => 'inventory_only',
+			'activity'   => array(
+				'checkout_observed'         => false,
+				'outside_checkout_observed' => true,
+				'coverage'                  => 'complete',
+				'reason'                    => null,
+			),
+			'reasons'    => array( $un['reason'] ),
+			'quiet'      => $un + array( 'taken_28d' => null ),
+			'stuck'      => $un + array( 'examples' => array() ),
+			'errors'     => array(
+				'status'  => 'unknown',
+				'logs'    => $un + array( 'count' => null ),
+				'jobs'    => $un + array( 'failed' => null ),
+				'webhook' => $un,
+			),
+		);
+	}
 	return array(
-		'schema_version' => 1,
+		'schema_version' => 2,
+		'inventory'      => array(
+			'checked'           => true,
+			'coverage'          => 'partial',
+			'reason'            => 'registry not loaded',
+			'methods_truncated' => false,
+		),
+		'findings'       => array(),
 		'checked_at'     => '2026-11-15T10:00:00+11:00',
 		'overall'        => 'amber',
 		'coverage'       => 'partial',
@@ -125,11 +175,12 @@ function blzmcp_test_response( array $orders, int $logs, int $jobs ): array {
 }
 
 $expect = array(
-	'orders' => blzmcp_perf_expect_orders( $seed, 50000, 10000, $seed + 600, 24 ),
-	'logs'   => array( 'stripe' => 150 ),
-	'jobs'   => array( 'stripe' => 40 ),
+	'orders'  => blzmcp_perf_expect_orders( $seed, 50000, 10000, $seed + 600, 24 ),
+	'logs'    => array( 'stripe' => 150 ),
+	'jobs'    => array( 'stripe' => 40 ),
+	'outside' => blzmcp_perf_expect_outside( 1000 ),
 );
-$good   = blzmcp_test_response( $expect['orders'], 150, 40 );
+$good   = blzmcp_test_response( $expect['orders'], 150, 40, $expect['outside'] );
 $exact  = array( 'require_exact_jobs' => true );
 $stripe = static fn( array $r ): int => (int) array_search( 'stripe', array_column( $r['methods'], 'id' ), true );
 
@@ -191,7 +242,7 @@ $is( 'response coverage unavailable fails the trial', false === blzmcp_perf_vali
 
 // Workload not observed: a fast empty store is not a valid trial.
 $empty = blzmcp_perf_expect_orders( $seed, 0, 0, $seed, 24 );
-$v     = blzmcp_perf_validate( blzmcp_test_response( $empty, 150, 40 ), array( 'orders' => $empty ) + $expect, $exact );
+$v     = blzmcp_perf_validate( blzmcp_test_response( $empty, 150, 40, $expect['outside'] ), array( 'orders' => $empty ) + $expect, $exact );
 $is( 'a fixture with no seeded orders fails (workload not observed)', false === $v['ok'] && false === $v['readers']['orders'] );
 $is( 'no seeded log errors in the window fails', false === blzmcp_perf_validate( $good, array( 'logs' => array( 'stripe' => 0 ) ) + $expect, $exact )['readers']['logs'] );
 $is( 'no seeded failed jobs in the window fails', false === blzmcp_perf_validate( $good, array( 'jobs' => array( 'stripe' => 0 ) ) + $expect, $exact )['readers']['jobs'] );
@@ -284,6 +335,131 @@ $is( 'partial jobs for another reason fail', false === blzmcp_perf_validate( $r,
 $r['methods'][ $stripe( $r ) ]['errors']['jobs']['reason'] = $txt( 'sampled_store' );
 $r['methods'][ $stripe( $r ) ]['errors']['jobs']['failed'] = 41;
 $is( 'a sampled count above the seeded failures fails', false === blzmcp_perf_validate( $r, $expect, array() )['ok'] );
+
+// ---------------------------------------------------------------- 1.2.1: outside verified checkout activity.
+
+$out = $expect['outside'];
+$is( 'excluded-origin expectation: 10 methods, 8 inventory-only (bacs among them), cod and stripe mixed', 8 === count( $out['inventory_only'] ) && in_array( 'bacs', $out['inventory_only'], true ) && array( 'cod', 'stripe' ) === $out['mixed'] && 1000 === $out['orders'] );
+$is( 'excluded-origin orders stay inside the history for the run (1 hour to 27 days old)', blzmcp_perf_outside_created( 0, $seed, 1000 ) === $seed - 3600 && blzmcp_perf_outside_created( 999, $seed, 1000 ) > $seed - 27 * 86400 );
+$is( 'the checkout expectation never counts the excluded-origin orders', blzmcp_perf_expect_orders( $seed, 50000, 10000, $seed + 600, 24 ) === $expect['orders'] );
+$is( 'a faithful trial passes the outside reader', true === blzmcp_perf_validate( $good, $expect, $exact )['readers']['outside'] );
+$byid = static fn( array $r, string $id ): int => (int) array_search( $id, array_column( $r['methods'], 'id' ), true );
+$r    = $good;
+array_splice( $r['methods'], $byid( $r, 'bacs' ), 1 );
+$is( 'an inventory-only method missing from the response fails the outside reader', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['outside'] );
+$r = $good;
+$r['methods'][ $byid( $r, 'blzmcp_ext_phone' ) ]['assessment'] = 'checkout_health';
+$is( 'an inventory-only method assessed as checkout_health fails', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['outside'] );
+$r = $good;
+$r['methods'][ $byid( $r, 'blzmcp_ext_none' ) ]['quiet']['taken_28d'] = 0;
+$is( 'an inventory-only method with a synthetic zero count fails', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['outside'] );
+$r = $good;
+$r['methods'][ $byid( $r, 'blzmcp_ext_pos' ) ]['errors']['logs']['checked'] = true;
+$is( 'an inventory-only method whose log check was read fails (diagnostics must not run)', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['outside'] );
+$r               = $good;
+$r['findings'][] = array( 'code' => 'method_disabled_with_history', 'method_id' => 'bacs' );
+$is( 'a finding for an inventory-only method fails', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['outside'] );
+$r = $good;
+$r['methods'][ $byid( $r, 'cod' ) ]['activity']['outside_checkout_observed'] = false;
+$is( 'a mixed method whose outside observation was lost fails', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['outside'] );
+$r = $good;
+$r['methods'][ $byid( $r, 'stripe' ) ]['assessment'] = 'inventory_only';
+$is( 'a mixed method demoted to inventory_only fails', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['outside'] );
+$r                                   = $good;
+$r['inventory']['methods_truncated'] = true;
+$is( 'a truncated inventory in the normal fixture fails', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['outside'] );
+$is( 'no excluded-origin population expected fails (workload not seeded)', false === blzmcp_perf_validate( $good, array( 'outside' => blzmcp_perf_expect_outside( 0 ) ) + $expect, $exact )['readers']['outside'] );
+$is( 'fewer than 10 excluded-origin methods fails', false === blzmcp_perf_validate( $good, array( 'outside' => blzmcp_perf_expect_outside( 9 ) ) + $expect, $exact )['readers']['outside'] );
+$r = $good;
+$r['methods'][ $byid( $r, 'cod' ) ]['quiet']['taken_28d'] += 100;
+$is( 'outside orders leaking into a mixed method\'s checkout count fail the order reader', false === blzmcp_perf_validate( $r, $expect, $exact )['readers']['orders'] );
+
+// ---------------------------------------------------------------- 1.2.1: the method cap (C4).
+
+/**
+ * A faithful method-cap result for $k distinct outside IDs (cap 1,000).
+ *
+ * @param int $k Distinct IDs seeded.
+ */
+function blzmcp_test_cap( int $k ): array {
+	$cap_txt = (string) PaymentHealth::reason_text( 'outside_checkout_method_cap' );
+	$methods = array(
+		array(
+			'id'         => 'cod',
+			'assessment' => 'checkout_health',
+			'status'     => 'green',
+			'activity'   => array( 'checkout_observed' => true, 'outside_checkout_observed' => false ),
+			'quiet'      => array( 'taken_28d' => 24 ),
+		),
+	);
+	for ( $n = 0; $n < min( $k, 1000 ); $n++ ) {
+		$methods[] = array(
+			'id'         => blzmcp_perf_cap_id( $n ),
+			'assessment' => 'inventory_only',
+			'status'     => 'unknown',
+			'activity'   => array( 'checkout_observed' => false, 'outside_checkout_observed' => true ),
+			'quiet'      => array( 'taken_28d' => null ),
+		);
+	}
+	usort( $methods, static fn( $a, $b ) => strcmp( $a['id'], $b['id'] ) );
+	return array(
+		'coverage'   => 'partial',
+		'store_wide' => array( 'taken_28d' => 24, 'coverage' => 'complete' ),
+		'inventory'  => array(
+			'checked'           => true,
+			'coverage'          => $k > 1000 ? 'partial' : 'complete',
+			'reason'            => $k > 1000 ? $cap_txt : null,
+			'methods_truncated' => $k > 1000,
+		),
+		'findings'   => array(),
+		'methods'    => $methods,
+	);
+}
+$ctl = array( 'method' => 'cod', 'taken_28d' => 24 );
+$is( 'cap: 1,000 distinct IDs, all listed, not truncated, is valid', true === blzmcp_perf_validate_cap( blzmcp_test_cap( 1000 ), 1000, $ctl )['ok'] );
+$is( 'cap: 1,001 distinct IDs, 1,000 listed, truncated with the cap reason, is valid', true === blzmcp_perf_validate_cap( blzmcp_test_cap( 1001 ), 1001, $ctl )['ok'] );
+$r                                   = blzmcp_test_cap( 1001 );
+$r['inventory']['methods_truncated'] = false;
+$is( 'cap: 1,001 IDs without methods_truncated fails (silent cap)', false === blzmcp_perf_validate_cap( $r, 1001, $ctl )['ok'] );
+$r                        = blzmcp_test_cap( 1001 );
+$r['inventory']['reason'] = null;
+$is( 'cap: 1,001 IDs without the cap reason fails', false === blzmcp_perf_validate_cap( $r, 1001, $ctl )['ok'] );
+$r                          = blzmcp_test_cap( 1001 );
+$r['inventory']['coverage'] = 'complete';
+$is( 'cap: 1,001 IDs claiming a complete inventory fails', false === blzmcp_perf_validate_cap( $r, 1001, $ctl )['ok'] );
+$r = blzmcp_test_cap( 1000 );
+$r['inventory']['methods_truncated'] = true;
+$is( 'cap: 1,000 IDs reported as truncated fails (the cap is 1,000, not 999)', false === blzmcp_perf_validate_cap( $r, 1000, $ctl )['ok'] );
+$r = blzmcp_test_cap( 1000 );
+array_pop( $r['methods'] );
+$is( 'cap: 1,000 IDs with one missing fails', false === blzmcp_perf_validate_cap( $r, 1000, $ctl )['ok'] );
+$r            = blzmcp_test_cap( 1001 );
+$r['methods'][] = array( 'id' => blzmcp_perf_cap_id( 1000 ), 'assessment' => 'inventory_only', 'status' => 'unknown', 'activity' => array( 'outside_checkout_observed' => true ) );
+$is( 'cap: 1,001 IDs all listed (no cap, and out of order) fails', false === blzmcp_perf_validate_cap( $r, 1001, $ctl )['ok'] );
+$r = blzmcp_test_cap( 1001 );
+$r['methods'] = array_reverse( $r['methods'] );
+$is( 'cap: rows out of ID order fail', false === blzmcp_perf_validate_cap( $r, 1001, $ctl )['ok'] );
+$r                             = blzmcp_test_cap( 1001 );
+$r['store_wide']['taken_28d']  = 23;
+$is( 'cap: a changed checkout control (store-wide) fails', false === blzmcp_perf_validate_cap( $r, 1001, $ctl )['ok'] );
+$r = blzmcp_test_cap( 1001 );
+foreach ( $r['methods'] as &$row ) {
+	if ( 'cod' === $row['id'] ) {
+		$row['quiet']['taken_28d'] = 25;
+	}
+}
+unset( $row );
+$is( 'cap: a changed checkout control (cod) fails', false === blzmcp_perf_validate_cap( $r, 1001, $ctl )['ok'] );
+$r               = blzmcp_test_cap( 1001 );
+$r['findings'][] = array( 'code' => 'method_not_registered', 'method_id' => blzmcp_perf_cap_id( 3 ) );
+$is( 'cap: a finding for a cap ID fails', false === blzmcp_perf_validate_cap( $r, 1001, $ctl )['ok'] );
+$r             = blzmcp_test_cap( 1000 );
+$r['coverage'] = 'complete';
+$is( 'cap: a complete top-level coverage with unassessed rows fails', false === blzmcp_perf_validate_cap( $r, 1000, $ctl )['ok'] );
+$r                    = blzmcp_test_cap( 1000 );
+$r['methods'][1]['id'] = 'bad id!';
+$is( 'cap: an unsafe ID in output fails', false === blzmcp_perf_validate_cap( $r, 1000, $ctl )['ok'] );
+$is( 'cap: no response fails', false === blzmcp_perf_validate_cap( null, 1000, $ctl )['ok'] );
 
 echo "$pass passed, $fail failed\n";
 exit( $fail > 0 ? 1 : 0 );

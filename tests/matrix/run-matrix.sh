@@ -15,6 +15,11 @@
 # HTTP suite, fixture cleanup, wp-env stop. Prints MATRIX PASSED or MATRIX FAILED and writes the
 # evidence record (tests/matrix/record.sh).
 #
+# The HTTP suite prints one TRANSPORT_ROW per route x order authority x principal x case (1.2.1
+# item 5); they go into the summary as TRANSPORT= lines and record.sh fails the evidence when a
+# required row is missing, duplicated, unknown or FAILED (BLZMCP_TRANSPORT_OUT names the separate
+# transport receipt it writes).
+#
 # Every state runs inside one site-local reporting date (tests/matrix/.window). If a state seeds
 # on a different date than the first one, the whole matrix is reseeded once from the start.
 #
@@ -73,6 +78,7 @@ sget() { # name state [default when unset]
 }
 sadd() { sset "$1" "$2" $(($(sget "$1" "$2" 0) + $3)); }
 STORAGE_LINES=()
+TRANSPORT_LINES=()
 PERF_FILE=''
 ZIP_SHA256=$(shasum -a 256 "$ZIP" | awk '{print $1}')
 CAND_VERSION=$(unzip -p "$ZIP" "$SLUG/$SLUG.php" | sed -n 's/^ \* Version:[[:space:]]*//p' | head -1 | tr -d '\r')
@@ -279,7 +285,10 @@ run_state() {
 	WPE="$WPE" BLZMCP_PRODUCT_ID="$product_id" "$BASH" "$REPO/tests/matrix/http-suite.sh" "$state" "$port" >"$LOG_DIR/$state-http.log" 2>&1
 	status=$?
 	summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "$LOG_DIR/$state-http.log" | tail -1)
-	grep -E '^(FAIL|NOTE|TRANSPORT|CLEANUP)' "$LOG_DIR/$state-http.log"
+	grep -E '^(FAIL|NOTE|TRANSPORT UNREACHABLE|CLEANUP)' "$LOG_DIR/$state-http.log"
+	# The transport receipt rows (route x authority x principal x case), checked by record.sh.
+	while IFS= read -r line; do TRANSPORT_LINES+=("${line#TRANSPORT_ROW=}"); done < <(grep '^TRANSPORT_ROW=' "$LOG_DIR/$state-http.log")
+	echo "transport rows [$state]: $(grep -c '^TRANSPORT_ROW=.*|PASSED$' "$LOG_DIR/$state-http.log") passed, $(grep -c '^TRANSPORT_ROW=.*|FAILED$' "$LOG_DIR/$state-http.log") failed"
 	p=$(sed -E 's/^([0-9]+) passed.*/\1/' <<<"${summary:-0 passed}")
 	q=$(sed -E 's/.* ([0-9]+) failed.*/\1/' <<<"${summary:-x 1 failed}")
 	sadd PASSES "$state" "$p"
@@ -347,6 +356,7 @@ attempt=1
 while :; do
 	restart=0
 	STORAGE_LINES=()
+	TRANSPORT_LINES=()
 	PERF_FILE=''
 	FIRST_DATE=''
 	for state in $STATES; do
@@ -383,6 +393,9 @@ done
 	done
 	for line in ${STORAGE_LINES[@]+"${STORAGE_LINES[@]}"}; do
 		echo "STORAGE=$line"
+	done
+	for line in ${TRANSPORT_LINES[@]+"${TRANSPORT_LINES[@]}"}; do
+		echo "TRANSPORT=$line"
 	done
 } >"$LOG_DIR/summary.txt"
 "$BASH" "$REPO/tests/matrix/record.sh" "$LOG_DIR/summary.txt" "$([ "$fail" -eq 0 ] && echo PASSED || echo FAILED)" || fail=1
