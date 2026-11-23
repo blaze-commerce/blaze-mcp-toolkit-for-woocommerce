@@ -59,6 +59,25 @@ final class PaymentOrders {
 	/** Safety bound on rows scanned in one call; beyond it the result is partial. */
 	public const MAX_ROWS = 500000;
 
+	/**
+	 * C4 work bounds (1.2.1): raw order candidates examined per call (including older legacy
+	 * batches that never become selected rows), legacy metadata rows returned per batch and per
+	 * call, and distinct safe method IDs kept in the outside-checkout observation map.
+	 */
+	public const MAX_CANDIDATES = 500000;
+	public const MAX_META_BATCH = 320000;
+	public const MAX_META_CALL  = 2500000;
+	public const MAX_OUTSIDE_IDS = 1000;
+
+	/**
+	 * Test instrumentation only (set through reflection by the reader test; no public API, no
+	 * hook): null in production. A map of smaller values for chunk, candidates, meta_batch,
+	 * meta_call and outside_ids, so the bounds can be proven without 500,000 orders.
+	 *
+	 * @var array<string,int>|null
+	 */
+	private static ?array $limits_override = null;
+
 	/** Examples per method. */
 	public const MAX_EXAMPLES = 5;
 
@@ -67,6 +86,23 @@ final class PaymentOrders {
 
 	/** Current statuses that count as accepted without a paid timestamp. */
 	private const TAKEN_STATUSES = array( 'processing', 'completed', 'on-hold' );
+
+	/**
+	 * One bound, or its test override.
+	 *
+	 * @param string $name chunk|candidates|meta_batch|meta_call|outside_ids.
+	 */
+	private static function limit( string $name ): int {
+		$defaults = array(
+			'chunk'       => self::CHUNK,
+			'candidates'  => self::MAX_CANDIDATES,
+			'meta_batch'  => self::MAX_META_BATCH,
+			'meta_call'   => self::MAX_META_CALL,
+			'outside_ids' => self::MAX_OUTSIDE_IDS,
+		);
+		$value = self::$limits_override[ $name ] ?? null;
+		return is_int( $value ) && $value > 0 ? $value : $defaults[ $name ];
+	}
 
 	private const HPOS_STORE   = 'Automattic\\WooCommerce\\Internal\\DataStores\\Orders\\OrdersTableDataStore';
 	private const LEGACY_STORE = 'WC_Order_Data_Store_CPT';
@@ -145,6 +181,7 @@ final class PaymentOrders {
 			'failed'      => 0,
 			'accepted_7d' => 0,
 			'invalid'     => 0,
+			'observed'    => 0,
 			'complete'    => true,
 			'candidates'  => array(),
 			'stuck_total' => 0,
@@ -178,6 +215,15 @@ final class PaymentOrders {
 				'empty_method'       => 0,
 			),
 			'rows_read' => 0,
+			// Separate outside-checkout observation map (C3/C4, 1.2.1): safe method IDs seen on
+			// shop orders whose origin is missing or not checkout/store-api. Never part of the
+			// checkout aggregates above. Unavailable until a scan completes.
+			'outside'   => self::outside_unavailable( $auth['reason'] ),
+			'work'      => array(
+				'candidates' => 0,
+				'meta_rows'  => 0,
+				'budget'     => false,
+			),
 		);
 		if ( ! $auth['ok'] ) {
 			return $out;
@@ -186,64 +232,183 @@ final class PaymentOrders {
 		if ( 'hpos' === $auth['authority'] ) {
 			$probe = self::hpos_missing_operational_row( $windows['baseline_start'] );
 			if ( null === $probe ) {
-				$out['reason'] = 'read_failed';
-				return $out;
+				return self::failed( $out, 'read_failed' );
 			}
 			if ( $probe ) {
-				$out['reason'] = 'operational_data_missing';
-				return $out;
+				return self::failed( $out, 'operational_data_missing' );
 			}
 		}
 
 		$store   = self::scope();
 		$methods = array();
+		$outside = array(
+			'ids'       => array(),
+			'truncated' => false,
+			'omitted'   => 0,
+			'invalid'   => 0,
+		);
+		$work    = $out['work'];
 		$last_id = 0;
 		$rows    = 0;
 		$capped  = false;
+		$budget  = false;
 		try {
 			do {
-				$chunk = 'hpos' === $auth['authority'] ? self::hpos_chunk( $last_id, $windows['baseline_start'], $tz ) : self::legacy_chunk( $last_id, $windows['baseline_start'], $tz );
+				$work['more'] = false;
+				$chunk        = 'hpos' === $auth['authority'] ? self::hpos_chunk( $last_id, $windows['baseline_start'], $tz, $work ) : self::legacy_chunk( $last_id, $windows['baseline_start'], $tz, $work );
 				if ( false === $chunk ) {
-					$out['reason'] = 'read_failed';
-					return $out;
+					return self::failed( $out, 'read_failed' );
 				}
 				foreach ( $chunk as $row ) {
 					if ( ! empty( $row['op_missing'] ) ) {
 						// HPOS writes an operational row for every order. Its absence is missing
 						// required data (paid date, origin), not an unknown origin: fail closed
 						// rather than drop the order from a complete-looking aggregate. Never
-						// recover it from the posts shadow.
-						$out['reason'] = 'operational_data_missing';
-						return $out;
+						// recover it from the posts shadow, and never count it as an outside
+						// observation.
+						return self::failed( $out, 'operational_data_missing' );
 					}
 					$last_id = max( $last_id, $row['id'] );
 					++$rows;
-					self::fold( $row, $now, $windows, $store, $methods, $out['excluded'] );
+					self::fold( $row, $now, $windows, $store, $methods, $out['excluded'], $outside );
 				}
-				$more = count( $chunk ) >= self::CHUNK;
+				$more = $work['more'];
 				if ( $more && $rows >= self::MAX_ROWS ) {
 					$capped = true;
 					break;
 				}
+				if ( $work['budget'] ) {
+					// A work or metadata bound stopped the scan: what was folded is exact, the
+					// rest is unread. Never declare absence from an unfinished scan.
+					$budget = true;
+					break;
+				}
 			} while ( $more );
 		} catch ( \Throwable $e ) {
-			$out['reason'] = 'read_failed';
-			return $out;
+			return self::failed( $out, 'read_failed' );
 		}
+		unset( $work['more'] );
+		$out['work'] = $work;
 
+		$stopped = $capped || $budget;
 		foreach ( $methods as $id => $scope ) {
-			$methods[ $id ] = self::finish( $scope, $capped );
+			$methods[ $id ] = self::finish( $scope, $stopped );
 		}
 		ksort( $methods, SORT_STRING );
-		$store = self::finish( $store, $capped );
+		$store = self::finish( $store, $stopped );
+
+		$ids = array_map( 'strval', array_keys( $outside['ids'] ) );
+		sort( $ids, SORT_STRING );
+		$o_reason = null;
+		if ( $capped ) {
+			$o_reason = 'row_cap';
+		} elseif ( $budget ) {
+			$o_reason = 'order_scan_budget';
+		} elseif ( $outside['truncated'] ) {
+			$o_reason = 'outside_checkout_method_cap';
+		} elseif ( $outside['invalid'] > 0 ) {
+			$o_reason = 'invalid_timestamps';
+		}
 
 		$out['ok']        = true;
-		$out['reason']    = $capped ? 'row_cap' : ( $store['complete'] ? null : 'invalid_timestamps' );
+		$out['reason']    = $capped ? 'row_cap' : ( $budget ? 'order_scan_budget' : ( $store['complete'] ? null : 'invalid_timestamps' ) );
 		$out['coverage']  = $store['complete'] ? 'complete' : 'partial';
 		$out['store']     = $store;
 		$out['methods']   = $methods;
 		$out['rows_read'] = $rows;
+		$out['outside']   = array(
+			'ids'       => $ids,
+			'coverage'  => null === $o_reason ? 'complete' : 'partial',
+			'reason'    => $o_reason,
+			'truncated' => $outside['truncated'],
+			'omitted'   => $outside['omitted'],
+			'invalid'   => $outside['invalid'],
+		);
 		return $out;
+	}
+
+	/**
+	 * Outside-checkout observations when nothing could be read: unavailable, never an exact
+	 * empty set.
+	 *
+	 * @param string|null $reason Reason code.
+	 * @return array{ids:string[],coverage:string,reason:?string,truncated:bool,omitted:int,invalid:int}
+	 */
+	public static function outside_unavailable( ?string $reason ): array {
+		return array(
+			'ids'       => array(),
+			'coverage'  => 'unavailable',
+			'reason'    => $reason,
+			'truncated' => false,
+			'omitted'   => 0,
+			'invalid'   => 0,
+		);
+	}
+
+	/**
+	 * A failed read: no counts, and outside observations unavailable (positive observations
+	 * folded before the failure are dropped rather than presented as an exhaustive list).
+	 *
+	 * @param array<string,mixed> $out    Result so far.
+	 * @param string              $reason Reason code.
+	 * @return array<string,mixed>
+	 */
+	private static function failed( array $out, string $reason ): array {
+		$out['ok']       = false;
+		$out['reason']   = $reason;
+		$out['coverage'] = 'unavailable';
+		$out['store']    = null;
+		$out['methods']  = array();
+		$out['outside']  = self::outside_unavailable( $reason );
+		return $out;
+	}
+
+	/**
+	 * Record one outside-checkout order (missing or other origin) in the separate observation
+	 * map, after the exact horizon predicate (C4). Nothing here touches the checkout aggregates.
+	 * Empty method IDs are exclusions only; future or malformed dates establish no observation
+	 * and mark observation coverage partial; beyond the identity cap the order is counted, its
+	 * ID is not kept.
+	 *
+	 * @param array<string,mixed> $row     Compact order row.
+	 * @param int                 $now     Now.
+	 * @param array<string,int>   $w       Windows.
+	 * @param array<string,mixed> $outside Observation map (by reference).
+	 * @return bool True only for a valid order in the horizon, the orders the exact recent-origin
+	 *              exclusion totals count. False for a valid order outside the horizon (a superset
+	 *              candidate) and for a future or malformed date (REVIEW-pass4 R3): such an order is
+	 *              not activity "in the last 28 days", so it is tallied in the separate invalid count
+	 *              (observation coverage partial) and never in those totals.
+	 */
+	private static function observe_outside( array $row, int $now, array $w, array &$outside ): bool {
+		$created = $row['created'];
+		$paid    = $row['paid'];
+		$invalid = ! $row['valid'] || null === $created || $created >= $now || ( null !== $paid && ( $paid <= 0 || $paid >= $now ) );
+		// The SQL selection is a superset (legacy paid-looking rows): apply the exact predicate.
+		if ( ! $invalid && $created < $w['baseline_start'] && ( null === $paid || $paid < $w['baseline_start'] ) ) {
+			return false;
+		}
+		$id = PaymentRules::safe_method_id( (string) $row['method'] );
+		if ( $invalid ) {
+			// An empty method ID cannot hide a method, so only a real ID makes coverage partial.
+			if ( '' !== $id ) {
+				++$outside['invalid'];
+			}
+			return false;
+		}
+		if ( '' === $id ) {
+			return true;
+		}
+		if ( isset( $outside['ids'][ $id ] ) ) {
+			return true;
+		}
+		if ( count( $outside['ids'] ) >= self::limit( 'outside_ids' ) ) {
+			$outside['truncated'] = true;
+			++$outside['omitted'];
+			return true;
+		}
+		$outside['ids'][ $id ] = true;
+		return true;
 	}
 
 	/**
@@ -271,8 +436,9 @@ final class PaymentOrders {
 	 * @param array<string,mixed>                 $store    Store scope (by reference).
 	 * @param array<string,array<string,mixed>>   $methods  Method scopes (by reference).
 	 * @param array<string,int>                   $excluded Exclusion counts (by reference).
+	 * @param array<string,mixed>                 $outside  Outside-checkout observation map (by reference).
 	 */
-	private static function fold( array $row, int $now, array $w, array &$store, array &$methods, array &$excluded ): void {
+	private static function fold( array $row, int $now, array $w, array &$store, array &$methods, array &$excluded, array &$outside ): void {
 		$status = str_starts_with( $row['status'], 'wc-' ) ? substr( $row['status'], 3 ) : $row['status'];
 		if ( 'checkout-draft' === $status ) {
 			++$excluded['drafts'];
@@ -281,12 +447,13 @@ final class PaymentOrders {
 		if ( in_array( $status, array( 'trash', 'auto-draft', 'draft' ), true ) ) {
 			return;
 		}
-		if ( null === $row['via'] || '' === $row['via'] ) {
-			++$excluded['unknown_origin'];
-			return;
-		}
-		if ( ! in_array( $row['via'], self::ORIGINS, true ) ) {
-			++$excluded['other_origin'];
+		if ( null === $row['via'] || '' === $row['via'] || ! in_array( $row['via'], self::ORIGINS, true ) ) {
+			// C4: a superset candidate outside the horizon is neither an exclusion of recent
+			// activity nor an observation (the legacy paid-date widening selects such rows); nor
+			// is a future or malformed date, which is tallied as invalid instead (R3).
+			if ( self::observe_outside( $row, $now, $w, $outside ) ) {
+				++$excluded[ null === $row['via'] || '' === $row['via'] ? 'unknown_origin' : 'other_origin' ];
+			}
 			return;
 		}
 
@@ -311,6 +478,14 @@ final class PaymentOrders {
 			}
 			unset( $s );
 			return;
+		}
+
+		if ( $created >= $w['baseline_start'] || ( null !== $paid && $paid >= $w['baseline_start'] ) ) {
+			// Positive valid evidence of checkout activity in the 28-day horizon (activity block).
+			foreach ( $scopes as &$s ) {
+				++$s['observed'];
+			}
+			unset( $s );
 		}
 
 		$accepted = null !== $paid || in_array( $status, self::TAKEN_STATUSES, true );
@@ -401,11 +576,18 @@ final class PaymentOrders {
 	 * @param int           $after History rows with id > $after.
 	 * @param int           $start History start (UTC).
 	 * @param \DateTimeZone $tz    Store timezone (unused: HPOS dates are UTC).
+	 * @param array         $work  Per-call work accounting (by reference): candidates, more, budget.
 	 * @return array<int,array<string,mixed>>|false
 	 */
-	private static function hpos_chunk( int $after, int $start, \DateTimeZone $tz ): array|false {
+	private static function hpos_chunk( int $after, int $start, \DateTimeZone $tz, array &$work ): array|false {
 		unset( $tz );
 		global $wpdb;
+		$left = self::limit( 'candidates' ) - (int) $work['candidates'];
+		if ( $left <= 0 ) {
+			$work['budget'] = true;
+			return array();
+		}
+		$limit            = min( self::limit( 'chunk' ), $left );
 		$from             = gmdate( 'Y-m-d H:i:s', $start );
 		$wpdb->last_error = '';
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
@@ -419,12 +601,17 @@ final class PaymentOrders {
 				$after,
 				$from,
 				$from,
-				self::CHUNK
+				$limit
 			),
 			ARRAY_A
 		);
 		if ( '' !== $wpdb->last_error || ! is_array( $rows ) ) {
 			return false;
+		}
+		$work['candidates'] += count( $rows );
+		$work['more']        = count( $rows ) >= $limit;
+		if ( $work['more'] && $work['candidates'] >= self::limit( 'candidates' ) ) {
+			$work['budget'] = true;
 		}
 		$out = array();
 		foreach ( $rows as $r ) {
@@ -451,14 +638,22 @@ final class PaymentOrders {
 	 * The SQL predicate is a superset (any paid-looking meta row in range); the exact first-row
 	 * precedence is applied in PHP by PaymentRules::legacy_paid().
 	 *
+	 * Work bounds (C4, 1.2.1): every candidate batch counts towards the per-call candidate bound,
+	 * and each batch's meta read returns at most the per-batch and remaining per-call metadata
+	 * bound plus one sentinel row. A batch whose meta rows exceed the bound is not folded at all
+	 * (no partially resolved order); the call stops with $work['budget'] set and returns the
+	 * fully resolved rows of earlier batches.
+	 *
 	 * @param int           $after Rows with ID > $after.
 	 * @param int           $start History start (UTC).
 	 * @param \DateTimeZone $tz    Store timezone.
+	 * @param array         $work  Per-call work accounting (by reference): candidates, meta_rows, more, budget.
 	 * @return array<int,array<string,mixed>>|false
 	 */
-	private static function legacy_chunk( int $after, int $start, \DateTimeZone $tz ): array|false {
+	private static function legacy_chunk( int $after, int $start, \DateTimeZone $tz, array &$work ): array|false {
 		global $wpdb;
-		$from = gmdate( 'Y-m-d H:i:s', $start );
+		$chunk      = self::limit( 'chunk' );
+		$from       = gmdate( 'Y-m-d H:i:s', $start );
 		// Site-local paid strings: widen by the largest possible offset (14 hours) and filter exactly in PHP.
 		$local_from = gmdate( 'Y-m-d H:i:s', $start - 14 * 3600 );
 		$pm         = $wpdb->postmeta;
@@ -477,6 +672,12 @@ final class PaymentOrders {
 		$meta   = array();
 		$cursor = $after;
 		do {
+			$left = self::limit( 'candidates' ) - (int) $work['candidates'];
+			if ( $left <= 0 ) {
+				$work['budget'] = true;
+				break;
+			}
+			$limit            = min( $chunk, $left );
 			$wpdb->last_error = '';
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
 			$cands = $wpdb->get_results(
@@ -486,7 +687,7 @@ final class PaymentOrders {
 					$wpdb->posts,
 					'shop_order',
 					$cursor,
-					self::CHUNK
+					$limit
 				),
 				ARRAY_A
 			);
@@ -496,6 +697,13 @@ final class PaymentOrders {
 			if ( array() === $cands ) {
 				break;
 			}
+			$work['candidates'] += count( $cands );
+			$meta_left           = self::limit( 'meta_call' ) - (int) $work['meta_rows'];
+			if ( $meta_left <= 0 ) {
+				$work['budget'] = true;
+				break;
+			}
+			$meta_limit = min( self::limit( 'meta_batch' ), $meta_left );
 			$ids   = array_map( static fn( $r ) => (int) $r['id'], $cands );
 			$id_ph = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
 			// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- only generated %d/%s placeholder lists are interpolated; every value is a placeholder.
@@ -536,8 +744,8 @@ final class PaymentOrders {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
 				$mrows = $wpdb->get_results(
 					$wpdb->prepare(
-						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE meta_id BETWEEN %d AND %d AND post_id BETWEEN %d AND %d AND meta_key IN ({$key_ph})",
-						array_merge( array( '_date_paid', '^[0-9]+$', $start, '_paid_date', $local_from, $pm, $lo, $hi, $min_i, $max_i ), $keys )
+						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE meta_id BETWEEN %d AND %d AND post_id BETWEEN %d AND %d AND meta_key IN ({$key_ph}) LIMIT %d",
+						array_merge( array( '_date_paid', '^[0-9]+$', $start, '_paid_date', $local_from, $pm, $lo, $hi, $min_i, $max_i ), $keys, array( $meta_limit + 1 ) )
 					),
 					ARRAY_A
 				);
@@ -546,8 +754,8 @@ final class PaymentOrders {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
 				$mrows = $wpdb->get_results(
 					$wpdb->prepare(
-						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE post_id IN ({$id_ph}) AND meta_key IN ({$key_ph})",
-						array_merge( array( '_date_paid', '^[0-9]+$', $start, '_paid_date', $local_from, $pm ), $ids, $keys )
+						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE post_id IN ({$id_ph}) AND meta_key IN ({$key_ph}) LIMIT %d",
+						array_merge( array( '_date_paid', '^[0-9]+$', $start, '_paid_date', $local_from, $pm ), $ids, $keys, array( $meta_limit + 1 ) )
 					),
 					ARRAY_A
 				);
@@ -556,7 +764,15 @@ final class PaymentOrders {
 			if ( '' !== $wpdb->last_error || ! is_array( $mrows ) ) {
 				return false;
 			}
-			$bmeta = array();
+			if ( count( $mrows ) > $meta_limit ) {
+				// The sentinel row came back: this batch's metadata cannot be read completely
+				// within the bound. Fold none of it; stop with the earlier, complete batches.
+				$work['budget'] = true;
+				unset( $mrows );
+				break;
+			}
+			$work['meta_rows'] += count( $mrows );
+			$bmeta              = array();
 			$first = array();
 			$hit   = array();
 			foreach ( $mrows as $mr ) {
@@ -582,16 +798,21 @@ final class PaymentOrders {
 					if ( isset( $bmeta[ $cid ] ) ) {
 						$meta[ $cid ] = $bmeta[ $cid ];
 					}
-					if ( count( $rows ) >= self::CHUNK ) {
+					if ( count( $rows ) >= $chunk ) {
 						break 2;
 					}
 				}
 			}
 			$cursor = (int) end( $cands )['id'];
-			$more   = count( $cands ) >= self::CHUNK;
+			$more   = count( $cands ) >= $limit;
 			unset( $cands, $bmeta, $hit );
+			if ( $more && $work['candidates'] >= self::limit( 'candidates' ) ) {
+				$work['budget'] = true;
+				break;
+			}
 		} while ( $more );
-		$out = array();
+		$work['more'] = count( $rows ) >= $chunk;
+		$out          = array();
 		foreach ( $rows as $r ) {
 			$id      = (int) $r['id'];
 			$m       = $meta[ $id ] ?? array();

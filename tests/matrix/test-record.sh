@@ -45,23 +45,30 @@ HEAD_VERSION=$(git -C "$REPO" show "$COMMIT:$PKG.php" | sed -n 's/^ \* Version:[
 perf_receipt() {
 	jq -n --arg sha "$1" --argjson ms "$2" '
 		[("legacy", "hpos") as $s | (24, 168) as $w | ("file", "db") as $l
-			| {storage:$s, window:$w, logger:$l, trials_ms:[$ms, $ms, $ms, $ms, $ms], max_ms:$ms, warm_ms_max:1, complete:true, pass:($ms < 1500)}] as $p
+			| {storage:$s, window:$w, logger:$l, trials_ms:[$ms, $ms, $ms, $ms, $ms], max_ms:$ms, warm_ms_max:1, queries:[130], rows_examined_max:61000, rows_selected_max:2100, peak_memory_delta_bytes_max:4000000, complete:true, pass:($ms < 1500)}] as $p
 		| [("legacy", "hpos") as $s | (24, 168) as $w | ("cold", "warm") as $k
 			| {storage:$s, window:$w, kind:$k, method:"GET", http_code:"200", valid_body:true, total_ms:(if $k == "cold" then $ms + 40 else 30 end)}] as $h
 		| [("legacy", "hpos") as $s | (24, 168) as $w | ("file", "db") as $l | (1, 2, 3, 4, 5) as $t
-			| {storage:$s, window:$w, logger:$l, trial:$t, ok:true, elapsed_ms:$ms, action_store:"ActionScheduler_DBStore",
-			   validation:{readers:{orders:true, inventory:true, logs:true, jobs:true}, failures:[]}}] as $tr
+			| {storage:$s, window:$w, logger:$l, trial:$t, ok:true, elapsed_ms:$ms, warm_ms:1, queries:130, rows_examined:61000, rows_selected:2100,
+			   peak_memory_delta_bytes:4000000, slowest:[{ms:40, sql:"SELECT ?", plan:[{table:"o", type:"range", key:"k", rows:61000, extra:null}]}],
+			   action_store:"ActionScheduler_DBStore",
+			   validation:{readers:{orders:true, inventory:true, logs:true, jobs:true, outside:true}, failures:[]}}] as $tr
 		| [("legacy", "hpos") as $s | ({l:"file", f:"logs"}, {l:"db", f:"logs"}, {l:"db", f:"orders"}, {l:"db", f:"jobs"}) as $p
 			| {storage:$s, logger:$p.l, force:$p.f, ok:false, forced:$p.f, detected:true}] as $f
-		| ([("legacy", "hpos") as $s | ("before", "diag-file", "diag-db", "after") as $ph
+		| ([("legacy", "hpos") as $s | ("before", "diag-file", "diag-db", "after", "cap") as $ph
 			| {phase:$ph, storage:$s, mode:(if ($ph | startswith("diag")) then "diagnostics" else "orders" end),
-			   orders_removed:(if $ph == "after" then 60000 elif ($ph | startswith("diag")) then null else 0 end),
+			   orders_removed:(if $ph == "after" then 61000 elif $ph == "cap" then 1025 elif ($ph | startswith("diag")) then null else 0 end),
 			   tagged_remaining:0, diag_log_rows_remaining:0, diag_log_files_remaining:0, diag_jobs_remaining:0, settings_restored:true, ok:true}
-			| if .phase == "after" then . + {expected_removed:60000} else . end | . + {passed:true}]
+			| if .phase == "after" then . + {expected_removed:61000} elif .phase == "cap" then . + {expected_removed:1025} else . end | . + {passed:true}]
 		  + [{phase:"final", storage:"legacy", mode:"orders", orders_removed:0, tagged_remaining:0, diag_log_rows_remaining:0, diag_log_files_remaining:0, diag_jobs_remaining:0, settings_restored:true, ok:true, passed:true}]) as $c
-		| {schema:"blzmcp-payment-performance/1", candidate_sha256:$sha, budget_ms:1500, meaning:"application-cache cold",
+		| [("legacy", "hpos") as $s | (1000, 1001) as $k
+			| {storage:$s, distinct_ids:$k, ok:true, failures:[], listed:(if $k > 1000 then 1000 else $k end), methods_truncated:($k > 1000), inventory_coverage:"partial", elapsed_ms:300}] as $cap
+		| {schema:"blzmcp-payment-performance/2", candidate_sha256:$sha, budget_ms:1500, meaning:"application-cache cold",
 		   validity:"a trial counts only with the seeded workload observed and every reader at its expected counts",
-		   seed:{recent_orders:50000, horizon_days:28, older_orders:10000, methods:["stripe", "cod", "cheque"]},
+		   seed:{recent_orders:50000, horizon_days:28, older_orders:10000, outside_orders:1000, methods:["stripe", "cod", "cheque"],
+		     outside_methods:["bacs", "blzmcp_ext_admin", "blzmcp_ext_import", "blzmcp_ext_none", "blzmcp_ext_phone", "blzmcp_ext_pos", "blzmcp_ext_rest", "blzmcp_ext_sub", "cod", "stripe"],
+		     storages:[("legacy", "hpos") as $s | {storage:$s, seeded_recent:50000, seeded_old:10000, seeded_outside:1000, verify:{ok:true, authority:$s, checkout:60000, outside:1000}}]},
+		   cap_ok:true, cap_cases:$cap,
 		   exact_jobs_required:true, jobs_store:["ActionScheduler_DBStore"], jobs_path:"exact database-store path (one grouped query)",
 		   all_pass:($p | all(.pass)), partitions:$p, http:$h, trials:$tr, forced_failures:$f,
 		   cleanup_ok:true, cleanup:$c, storage_restored:{storage:"legacy", sync:"no", ok:true}}'
@@ -72,9 +79,76 @@ reader_failed() {
 	jq --arg r "$1" '(.trials[] | select(.storage == "hpos" and .window == 24 and .logger == "db" and .trial == 3))
 		|= (.ok = false | .validation.readers[$r] = false | .validation.failures = ["\($r): forced"])'
 }
+# Ruling Q6: set one partition's raw trial timings ($1 storage, $2 window, $3 logger, $4 = 5
+# comma-separated values; "invalid" fails that trial's order reader, "null" drops its elapsed_ms,
+# "drop" removes the trial). The partition aggregate (trials_ms, max_ms, pass) and all_pass are left
+# as the receipt claims them, so every failing case here is also a forged passing aggregate.
+trial_times() {
+	jq --arg s "$1" --argjson w "$2" --arg l "$3" --arg v "$4" '($v | split(",")) as $vs
+		| .trials |= [.[] | if .storage == $s and .window == $w and .logger == $l then
+			$vs[.trial - 1] as $x
+			| if $x == "invalid" then (.ok = false | .validation.readers.orders = false | .validation.failures = ["orders: forced"])
+			  elif $x == "null" then del(.elapsed_ms)
+			  elif $x == "drop" then empty
+			  else .elapsed_ms = ($x | tonumber) end
+		  else . end]'
+}
+q6_mut() {
+	case "$1" in
+	q6-run1) trial_times legacy 24 db 1177.4,1248.8,1191.9,1172,1605.8 | trial_times legacy 168 db 1325.4,1192.6,1215.6,1291.2,1630.1 ;;
+	q6-2000) trial_times legacy 24 db 1100,1100,1100,1100,2000 ;;
+	q6-2000.1) trial_times legacy 24 db 1100,1100,1100,1100,2000.1 ;;
+	q6-1500-one) trial_times legacy 168 db 1100,1500,1100,1100,1100 ;;
+	q6-1500-two) trial_times legacy 168 db 1100,1500,1100,1500,1100 ;;
+	q6-second-slow) trial_times legacy 24 db 1177,1606,1192,1172,1546 ;;
+	q6-over-2000) trial_times legacy 168 db 1100,1100,2400,1100,1100 ;;
+	q6-invalid) trial_times legacy 24 db 1100,1100,1100,invalid,1100 ;;
+	q6-null) trial_times legacy 168 db 1100,null,1100,1100,1100 ;;
+	q6-four) trial_times legacy 24 db 1100,1100,1100,1100,drop ;;
+	q6-hpos-slow) trial_times hpos 24 db 900,900,900,900,1600 ;;
+	q6-legacy-file-slow) trial_times legacy 168 file 900,900,900,900,1501 ;;
+	q6-5of5-1500) trial_times hpos 168 file 900,1500,900,900,900 ;;
+	q6-5of5-1499) trial_times hpos 168 file 1499.9,1499.9,1499.9,1499.9,1499.9 ;;
+	# Every partition claims pass with max 900 and the 4of5 rule label; the hpos raw trials do not.
+	q6-forged) jq '.partitions[].rule = "4of5<1500,max<=2000"' | trial_times hpos 24 file 900,900,900,1600,900 ;;
+	# The preserved wave 4 shape: raw trials within Q6, but the suite's own verdict was FAILED.
+	q6-receipt-failed) trial_times legacy 24 db 1177.4,1248.8,1191.9,1172,1605.8 | jq '.all_pass = false | (.partitions[] | select(.storage == "legacy" and .logger == "db") | .pass) = false' ;;
+	*) cat ;;
+	esac
+}
 # A forced probe of reader $1 that came back as a success (not detected).
 forced_passed() {
 	jq --arg r "$1" '(.forced_failures[] | select(.storage == "legacy" and .force == $r and .logger == "db")) |= (.ok = true | .detected = false)'
+}
+
+# The HTTP suite's transport receipt rows for one state (TRANSPORT= lines), with mutations:
+# transport-missing (drops legacy anonymous denial in easy-2.3.1), transport-dup (repeats a both
+# row), transport-failed (one both row FAILED), transport-unknown (an extra case), transport-none
+# (no rows at all for recommended).
+transport_rows() {
+	local state=$1 mut=$2 routes r a c
+	case "$state" in recommended) routes=rec ;; easy-*) routes=easy ;; *) routes='rec easy' ;; esac
+	[ "$mut" == transport-none ] && [ "$state" == recommended ] && return 0
+	for r in $routes; do
+		if [ "$state" == none ]; then
+			echo "TRANSPORT=$state|$r|any|admin|no_tool|PASSED"
+			continue
+		fi
+		for c in 'admin|discovery' 'admin|workflows' 'admin|analytics_off' 'admin|tool_off' 'manager|roles'; do echo "TRANSPORT=$state|$r|any|$c|PASSED"; done
+		for a in hpos legacy; do
+			for c in 'admin|disclosure' 'admin|diag_off' 'admin|diag_on' 'admin|diag_off_again' 'manager|diag_off' 'manager|diag_on' 'manager|diag_off_again' 'customer|denied' 'subscriber|denied' 'anonymous|denied' 'manager|warm_downgrade'; do
+				[ "$mut" == transport-missing ] && [ "$state" == easy-2.3.1 ] && [ "$a" == legacy ] && [ "$c" == 'anonymous|denied' ] && continue
+				if [ "$mut" == transport-failed ] && [ "$state" == both ] && [ "$r" == easy ] && [ "$a" == hpos ] && [ "$c" == 'manager|warm_downgrade' ]; then
+					echo "TRANSPORT=$state|$r|$a|$c|FAILED"
+					continue
+				fi
+				echo "TRANSPORT=$state|$r|$a|$c|PASSED"
+				[ "$mut" == transport-dup ] && [ "$state" == both ] && [ "$r" == rec ] && [ "$a" == legacy ] && [ "$c" == 'admin|disclosure' ] && echo "TRANSPORT=$state|$r|$a|$c|PASSED"
+			done
+		done
+		[ "$mut" == transport-unknown ] && [ "$state" == both ] && echo "TRANSPORT=$state|$r|hpos|admin|extra_case|PASSED"
+	done
+	return 0
 }
 
 # check <label> <expected exit> <stage dir> [mutation]
@@ -99,16 +173,25 @@ check() {
 	[ "$mut" == stale-version ] && version=1.0.0
 	{
 		printf 'ZIP=%s\nZIP_SHA256=%s\nVERSION=%s\nCOMMIT=%s\nWINDOW_FILE=\nPERF_FILE=%s\n' "$zip" "$sha" "$version" "$COMMIT" "$([ "$mut" == no-perf ] || echo "$WORK/perf.json")"
-		for state in recommended easy-2.3.1 easy-2.4.0 both none; do
+		case "$mut" in
+		http-checks-missing) ;;
+		http-checks-failed) echo 'HTTP_CHECKS=68 passed, 3 failed' ;;
+		*) echo 'HTTP_CHECKS=71 passed, 0 failed' ;;
+		esac
+		for state in recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none; do
+			[ "$mut" == drop-easy-2.5.0 ] && [ "$state" == easy-2.5.0 ] && continue
 			if [ "$mut" == state-not-run ] && [ "$state" == both ]; then
 				echo "STATE=$state|NOT RUN|0|1|||[]"
 				continue
 			fi
 			echo "STATE=$state|PASSED|10|0|6.9|8.3|[]"
+			[ "$mut" == state-dup ] && [ "$state" == easy-2.4.0 ] && echo "STATE=$state|PASSED|10|0|6.9|8.3|[]"
+			transport_rows "$state" "$mut"
 			[ "$state" == none ] && continue
 			for combo in hpos:no hpos:yes legacy:yes legacy:no; do
 				for suite in test-payment-orders.php test-payment-health.php; do
 					[ "$mut" == no-storage ] && [ "$combo" == legacy:yes ] && continue
+					[ "$mut" == storage-dup ] && [ "$state" == both ] && [ "$combo" == legacy:no ] && echo "STORAGE=$state|$combo|$suite|PASSED|10|0"
 					if [ "$mut" == failed-storage ] && [ "$combo" == hpos:yes ]; then
 						echo "STORAGE=$state|$combo|$suite|FAILED|9|1"
 					else
@@ -141,12 +224,28 @@ check() {
 	cleanup-diag) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.cleanup[] | select(.storage == "hpos" and .phase == "diag-db")) |= (.diag_jobs_remaining = 2 | .ok = false)' >"$WORK/perf.json" ;;
 	cleanup-restore) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.storage_restored.ok = false' >"$WORK/perf.json" ;;
 	perf-jobs-not-required) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.exact_jobs_required = false' >"$WORK/perf.json" ;;
+	perf-schema-1) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.schema = "blzmcp-payment-performance/1"' >"$WORK/perf.json" ;;
+	perf-no-outside) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.seed.outside_orders = 0' >"$WORK/perf.json" ;;
+	perf-few-outside-methods) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.seed.outside_methods = ["bacs", "cod"]' >"$WORK/perf.json" ;;
+	perf-replaced-volume) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.seed.recent_orders = 49000' >"$WORK/perf.json" ;;
+	perf-verify-outside) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.seed.storages[] | select(.storage == "hpos") | .verify.outside) = 999' >"$WORK/perf.json" ;;
+	perf-reader-outside) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | reader_failed outside >"$WORK/perf.json" ;;
+	perf-reader-keys) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.trials[] | select(.trial == 2)) |= (.validation.readers |= del(.outside))' >"$WORK/perf.json" ;;
+	perf-no-rows) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.trials[] | select(.storage == "legacy" and .trial == 4)) |= del(.rows_selected)' >"$WORK/perf.json" ;;
+	perf-no-plan) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.trials[] | select(.storage == "hpos" and .window == 168)) |= (.slowest = [])' >"$WORK/perf.json" ;;
+	perf-no-cap) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.cap_cases |= map(select(.distinct_ids != 1001 or .storage != "legacy"))' >"$WORK/perf.json" ;;
+	perf-cap-failed) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.cap_cases[] | select(.storage == "hpos" and .distinct_ids == 1000)) |= (.ok = false | .failures = ["listed 999 cap IDs, expected 1000"])' >"$WORK/perf.json" ;;
+	perf-cap-dup) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.cap_cases += [.cap_cases[0]]' >"$WORK/perf.json" ;;
+	cleanup-no-cap) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.cleanup |= map(select(.storage != "legacy" or .phase != "cap"))' >"$WORK/perf.json" ;;
+	q6-*) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | q6_mut "$mut" >"$WORK/perf.json" ;;
 	*) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 >"$WORK/perf.json" ;;
 	esac
 	[ "$mut" == log-leak ] && echo 'FAIL  [both] a check that echoed jane.citizen@realmail.com' >"$WORK/both-http.log"
 	[ "$mut" == log-path ] && echo "FAIL  [both] wp-env start (log: $HOME/private/blzmcp-matrix-logs.XYZ/both-start.log)" >"$WORK/both-http.log"
 	LAST_OUT=$out
-	BLZMCP_MATRIX_OUT=$out BLZMCP_REPORTS_DIR=$WORK "$BASH" "$REPO/tests/matrix/record.sh" "$WORK/summary.txt" PASSED >"$WORK/log" 2>&1
+	local states_env=()
+	[ "$mut" == drop-easy-2.5.0 ] && states_env=(BLZMCP_REQUIRED_STATES='recommended easy-2.3.1 easy-2.4.0 both none')
+	env ${states_env[@]+"${states_env[@]}"} BLZMCP_MATRIX_OUT=$out BLZMCP_TRANSPORT_OUT="${out%.md}-t.md" BLZMCP_REPORTS_DIR=$WORK "$BASH" "$REPO/tests/matrix/record.sh" "$WORK/summary.txt" PASSED >"$WORK/log" 2>&1
 	local got=$?
 	if [ "$got" -eq "$want" ]; then
 		echo "PASS  $label (exit $got)"
@@ -236,7 +335,7 @@ check 'a receipt that did not require the exact jobs store is refused' 5 "$WORK/
 
 # Wave 4 (REVIEW-pass4b gap 2): the volume fixture cleanup is part of the evidence.
 check 'faithful receipt with a clean cleanup record is accepted' 0 "$WORK/good"
-assert 'record shows the cleanup line' "$(grep -qxF -- '- Volume fixture cleanup: legacy removed 60000/60000 orders, 0 tagged left; hpos removed 60000/60000 orders, 0 tagged left; diagnostics cleanups 4, all clean true; order storage restored to legacy sync=no: true' "$LAST_OUT" && echo true)"
+assert 'record shows the cleanup line' "$(grep -qxF -- '- Volume fixture cleanup: legacy removed 61000/61000 orders, 0 tagged left; hpos removed 61000/61000 orders, 0 tagged left; diagnostics cleanups 4, all clean true; order storage restored to legacy sync=no: true' "$LAST_OUT" && echo true)"
 check 'a receipt with no cleanup record is refused' 5 "$WORK/good" cleanup-missing
 check 'a receipt missing a storage'"'"'s post-run cleanup is refused' 5 "$WORK/good" cleanup-no-after
 check 'a receipt missing the final cleanup is refused' 5 "$WORK/good" cleanup-no-final
@@ -245,6 +344,67 @@ check 'a cleanup that removed fewer orders than were seeded is refused' 5 "$WORK
 check 'a diagnostics cleanup that left fixture jobs is refused' 5 "$WORK/good" cleanup-diag
 check 'a failed order storage restore is refused' 5 "$WORK/good" cleanup-restore
 check 'a state that did not run is refused' 5 "$WORK/good" state-not-run
+
+# 1.2.1 item 5: duplicated partitions, the transport rows and the excluded-origin volume.
+check 'a duplicated STATE line is refused' 5 "$WORK/good" state-dup
+check 'a duplicated STORAGE line is refused' 5 "$WORK/good" storage-dup
+check 'faithful transport rows are accepted' 0 "$WORK/good"
+assert 'the transport receipt is written with every row and a TRANSPORT PASSED result' "$(grep -q '^- Result: \*\*TRANSPORT PASSED\*\*' "${LAST_OUT%.md}-t.md" && [ "$(grep -cE '^\| [a-z0-9.-]+ \| (rec|easy) \|' "${LAST_OUT%.md}-t.md")" == 164 ] && echo true)"
+assert 'the matrix record has the transport summary (required 164, received 164, passed 164)' "$(grep -q '^- Required 164 (gate 164), received 164, passed 164; missing 0' "$LAST_OUT" && grep -q '^| both | easy | hpos | 11 | 11 |' "$LAST_OUT" && grep -q '^| easy-2.5.0 | easy | legacy | 11 | 11 |' "$LAST_OUT" && echo true)"
+assert 'the matrix record has 40 storage rows (gate 40) and the HTTP safety-check self-test line' "$(grep -qxF -- '- Storage rows: required 40 (gate 40), received 40' "$LAST_OUT" && grep -qxF -- '- HTTP safety-check self-test (tests/matrix/test-http-checks.sh, offline injected replies): 71 passed, 0 failed' "$LAST_OUT" && echo true)"
+check 'a matrix narrowed to the 5 wave 2 states (no easy-2.5.0) is refused' 5 "$WORK/good" drop-easy-2.5.0
+assert '  ... the record names both gate counts' "$(grep -qF 'required transport partitions come to 137, the release matrix needs 164' "$LAST_OUT" && grep -qF 'required storage partitions come to 32, the release matrix needs 40' "$LAST_OUT" && echo true)"
+check 'a run without the HTTP safety-check self-test is refused' 5 "$WORK/good" http-checks-missing
+assert '  ... recorded as not run, TRANSPORT FAILED' "$(grep -qF 'test-http-checks.sh) did not run (no HTTP_CHECKS line)' "$LAST_OUT" && grep -q 'TRANSPORT FAILED' "${LAST_OUT%.md}-t.md" && echo true)"
+check 'a run whose HTTP safety-check self-test failed is refused' 5 "$WORK/good" http-checks-failed
+assert '  ... recorded with its summary' "$(grep -qF 'test-http-checks.sh) did not pass: 68 passed, 3 failed' "$LAST_OUT" && echo true)"
+check 'a missing transport row is refused' 5 "$WORK/good" transport-missing
+assert '  ... the record names the missing partition' "$(grep -qF 'transport rows missing: 1 of 164 (first: easy-2.3.1|easy|legacy|anonymous|denied)' "$LAST_OUT" && echo true)"
+check 'a duplicated transport row is refused' 5 "$WORK/good" transport-dup
+check 'a transport row outside the required set is refused' 5 "$WORK/good" transport-unknown
+check 'a state with no transport rows is refused' 5 "$WORK/good" transport-none
+check 'a FAILED transport row fails the record' 0 "$WORK/good" transport-failed
+assert '  ... recorded as MATRIX FAILED and TRANSPORT FAILED' "$(grep -q 'MATRIX FAILED' "$LAST_OUT" && grep -q 'TRANSPORT FAILED' "${LAST_OUT%.md}-t.md" && echo true)"
+check 'a schema 1 performance receipt is refused' 5 "$WORK/good" perf-schema-1
+check 'a receipt without the excluded-origin population is refused' 5 "$WORK/good" perf-no-outside
+check 'an excluded-origin population over fewer than 10 methods is refused' 5 "$WORK/good" perf-few-outside-methods
+check 'eligible volume below 50,000 recent orders is refused' 5 "$WORK/good" perf-replaced-volume
+check 'excluded-origin orders not verified per storage are refused' 5 "$WORK/good" perf-verify-outside
+check 'a timed trial whose outside reader failed is refused' 5 "$WORK/good" perf-reader-outside
+check 'a timed trial without the outside reader is refused' 5 "$WORK/good" perf-reader-keys
+check 'a trial without rows selected is refused' 5 "$WORK/good" perf-no-rows
+check 'trials without a query plan are refused' 5 "$WORK/good" perf-no-plan
+check 'a missing 1,001-ID cap case is refused' 5 "$WORK/good" perf-no-cap
+check 'a failed 1,000-ID cap case is refused' 5 "$WORK/good" perf-cap-failed
+check 'a duplicated cap case is refused' 5 "$WORK/good" perf-cap-dup
+check 'a missing cap fixture cleanup is refused' 5 "$WORK/good" cleanup-no-cap
+check 'faithful package with complete 1.2.1 evidence is accepted' 0 "$WORK/good"
+assert 'record shows the excluded-origin seed, rows examined and the cap cases' "$(grep -q 'plus 1000 excluded-origin orders counted separately across 10 methods' "$LAST_OUT" && grep -qE '^\| legacy \| 24h \| file \| 900 \| .* \| 61000 \| 2100 \| 4000000 \| 5of5<1500 \| true \| true \|' "$LAST_OUT" && grep -q 'hpos 1001 IDs: listed 1000, methods_truncated true, inventory partial, passed' "$LAST_OUT" && echo true)"
+
+# Ruling Q6 (REVIEW-pass4c): the recorder decides the budget on the raw trials, per partition.
+check 'Q6: one slow trial in each legacy db partition (run 1 shape, 1605.8 and 1630.1 ms) is accepted' 0 "$WORK/good" q6-run1
+assert '  ... the record shows the recorder rule and decision per partition' "$(grep -qF '| legacy | 168h | db | 1630.1 | 1325.4, 1192.6, 1215.6, 1291.2, 1630.1 | 5 of 5, 4 under |' "$LAST_OUT" && grep -qE '^\| legacy \| 168h \| db \| .* \| 4of5<1500,max<=2000 \| true \| true \|$' "$LAST_OUT" && grep -qE '^\| hpos \| 24h \| db \| .* \| 5of5<1500 \| true \| true \|$' "$LAST_OUT" && grep -qF -- '- Budget rule (ruling Q6, REVIEW-pass4c), decided by this recorder' "$LAST_OUT" && echo true)"
+check 'Q6 boundary: a legacy db trial of exactly 2000 ms is accepted' 0 "$WORK/good" q6-2000
+check 'Q6 boundary: a legacy db trial of 2000.1 ms is refused' 5 "$WORK/good" q6-2000.1
+assert '  ... named as a budget miss under its rule' "$(grep -qF 'performance budget missed: legacy/24h/db (rule 4of5<1500,max<=2000: 4 of 5 trials valid and under 1500 ms, 5 valid, max 2000.1 ms)' "$LAST_OUT" && echo true)"
+check 'Q6 boundary: one legacy db trial of exactly 1500 ms is accepted as the one slow trial' 0 "$WORK/good" q6-1500-one
+check 'Q6 boundary: two legacy db trials of exactly 1500 ms are refused' 5 "$WORK/good" q6-1500-two
+check 'Q6: a second slow legacy db trial is refused (the receipt still claims pass)' 5 "$WORK/good" q6-second-slow
+assert '  ... named with 3 under budget' "$(grep -qF 'legacy/24h/db (rule 4of5<1500,max<=2000: 3 of 5 trials valid and under 1500 ms' "$LAST_OUT" && echo true)"
+check 'Q6: a legacy db trial above 2000 ms is refused' 5 "$WORK/good" q6-over-2000
+check 'Q6: an invalid legacy db trial is refused even with 4 fast trials' 5 "$WORK/good" q6-invalid
+assert '  ... and the recorder table marks that partition not passed' "$(grep -qE '^\| legacy \| 24h \| db \| .* \| 4 of 5, 4 under \| .* \| 4of5<1500,max<=2000 \| false \| true \|$' "$LAST_OUT" && echo true)"
+check 'Q6: a legacy db trial with no elapsed_ms is refused' 5 "$WORK/good" q6-null
+check 'Q6: a legacy db partition with 4 trials is refused' 5 "$WORK/good" q6-four
+check 'Q6: one slow trial in an HPOS db partition is refused (5 of 5)' 5 "$WORK/good" q6-hpos-slow
+assert '  ... named under 5of5<1500' "$(grep -qF 'performance budget missed: hpos/24h/db (rule 5of5<1500: 4 of 5 trials valid and under 1500 ms' "$LAST_OUT" && echo true)"
+check 'Q6: one slow trial in a legacy file partition is refused (5 of 5)' 5 "$WORK/good" q6-legacy-file-slow
+check 'Q6 boundary: a 5of5 trial of exactly 1500 ms is refused' 5 "$WORK/good" q6-5of5-1500
+check 'Q6 boundary: 5of5 trials of 1499.9 ms are accepted' 0 "$WORK/good" q6-5of5-1499
+check 'Q6: a forged passing aggregate (pass flags, max 900, 4of5 labels everywhere) over a failing hpos trial is refused' 5 "$WORK/good" q6-forged
+assert '  ... the recorder applies 5of5<1500 to hpos regardless of the receipt label' "$(grep -qF 'performance budget missed: hpos/24h/file (rule 5of5<1500: 4 of 5 trials valid and under 1500 ms, 5 valid, max 1600 ms)' "$LAST_OUT" && grep -qE '^\| hpos \| 24h \| file \| 1600 \| .* \| 5of5<1500 \| false \| true \|$' "$LAST_OUT" && echo true)"
+check 'Q6: raw trials within Q6 but the receipt verdict FAILED (the wave 4 shape) is refused' 5 "$WORK/good" q6-receipt-failed
+assert '  ... named as the receipt verdict' "$(grep -qF 'performance receipt verdict is not all_pass (perf-suite.sh failed)' "$LAST_OUT" && echo true)"
 
 # Privacy.
 check 'an e-mail address in a copied log line refuses the record' 5 "$WORK/good" log-leak

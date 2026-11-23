@@ -4,7 +4,7 @@ Tags: woocommerce, mcp, ai, analytics, store health
 Requires at least: 6.9
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 1.2.0
+Stable tag: 1.2.1
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -39,6 +39,8 @@ One thing to know up front: the same connection also carries tools from WooComme
   * It only asks: it never changes orders, settings or payments, never retries anything and never contacts your payment provider. Any fix it suggests is yours to make.
   * Unknown means it could not check, not that all is well. It says which checks it couldn't run and why, for example too few orders to judge, a payment method whose settlement timing it can't confirm (its unpaid orders are counted, not judged), a supported payment plugin's log or job list it couldn't fully read, or a role that can't see diagnostics.
   * When WordPress hasn't loaded the list of payment plugins (mostly in scheduled or command-line runs), payment health can't give an all-clear: it reads unknown unless it finds a problem, which it still reports, and it may leave out switched-on methods that have had no checkout orders recently.
+  * Only checkout orders count. Orders whose recorded origin is missing or isn't checkout (for example orders added in the admin, imported or taken by phone) are never counted as checkouts. A payment method that would otherwise be left out because it was seen only on such orders in the last 28 days is still listed, marked as seen outside verified checkout activity, with its checkout health not assessed. A method added only this way gets no colour, no alert and no part in the store's figures, and an all-clear covers only the methods that were assessed. A payment method that is switched on, with its payment plugin active, keeps its usual settings and diagnostic checks (for example a test mode warning) even when its recent orders were all outside checkout; only its checkout order checks have nothing to go on, and it says so. A missing origin doesn't prove how an order was created.
+  * That list has limits. It shows up to 1,000 such payment methods and says when more were seen. On a very large store, or when some orders have a future or malformed date, it says the list may be incomplete instead of claiming there are no others.
   * Its colours are screening signals from your own order records, not proof. A quiet method or a pile of unpaid orders is a reason to look, not proof that checkout is down, that a customer was charged or that money was lost. Counts are orders accepted, not money collected.
   * It returns counts, times, fixed summary categories and up to 5 example order numbers per method with their totals and admin links. It never returns customer names, emails or addresses, raw log lines, log file names, background job details, gateway settings, keys or transaction references.
 
@@ -201,6 +203,12 @@ Unknown means it couldn't check, not that everything is fine. Common reasons: fe
 
 == Changelog ==
 
+= 1.2.1 =
+* Payment health now lists payment methods it used to leave out: those seen in the last 28 days only on orders outside verified checkout activity (a missing or non-checkout order origin, for example admin-created, imported or phone orders). Methods added this way are marked as not assessed: no colour, no alert, and they never count as checkouts or towards the store's figures. Payment methods that are switched on, with their payment plugin active, keep their existing settings and diagnostic checks, such as the test mode warning. Checkout-based checks and their thresholds are unchanged.
+* Each payment method now says whether it was assessed and whether checkout and outside-checkout activity was observed in the last 28 days (yes, no, or not known). A new inventory section says how complete the method list is. The response is schema version 2.
+* The outside-checkout list is bounded: up to 1,000 methods, with a note when more were seen or when not every order could be read.
+* The weekly review, revenue drop and failed order workflows report these methods separately as not assessed, and an all-clear covers only the assessed checks.
+
 = 1.2.0 =
 * New payment health tool: for each payment method, whether it is still taking checkout orders, whether recent checkouts were left unpaid more than usual (judged for Stripe card and the card and wallet methods of PayPal Payments, WooPayments and Square; bank transfer, cheque and cash on delivery skip it; other methods show the unpaid counts without a verdict), whether the payment plugin failed background jobs (Stripe and WooPayments), and whether it logged errors or recorded webhook delivery problems (Stripe only). Checks a plugin isn't supported for are not run and don't count either way. Ask-only: it never changes orders, settings or payments and never contacts a payment provider.
 * Every check says red, amber, green or unknown, whether it was checked and how complete its evidence was. Unknown is reported as a gap, never as healthy.
@@ -223,6 +231,9 @@ Unknown means it couldn't check, not that everything is fine. Common reasons: fe
 * Bundles the commerce-abilities package from WooCommerce for Claude by Automattic (https://github.com/woocommerce/woocommerce-claude, GPL-3.0-or-later), version 0.4.5, commit cdab921aab8d07ef813121ff78b3558af28f39fa, unmodified. It provides the wc-analytics tools and the store knowledge tools.
 
 == Upgrade Notice ==
+
+= 1.2.1 =
+Payment health now also lists payment methods it used to leave out because they were seen only on orders outside verified checkout activity, marked as not assessed. Switched-on methods of active payment plugins keep their existing checks, and how checkout payments are judged is unchanged.
 
 = 1.2.0 =
 Adds a read-only payment health check, run first by the weekly, revenue drop and failed order workflows. Easy MCP AI users: tick payment health under Easy MCP AI › Tools › Abilities.

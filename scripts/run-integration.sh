@@ -259,6 +259,31 @@ fi
 host_bash=/bin/bash
 [ -x "$host_bash" ] || host_bash=$BASH
 if "$host_bash" tests/Integration/frontend-curl.sh; then :; else fail=1; fi
+# The matrix's own host scripts and in-container helpers parse (1.2.1 item 5): the matrix is the
+# only place they run, so a syntax error must fail here first. http-suite.sh re-runs itself under
+# bash 4+, the others must parse under the host bash (3.2 on macOS).
+parse_fail=''
+for f in tests/matrix/run-matrix.sh tests/matrix/record.sh tests/matrix/perf-suite.sh tests/matrix/fake-wp-env.sh; do
+	"$host_bash" -n "$f" 2>/dev/null || parse_fail="$parse_fail $f"
+done
+modern_bash=''
+for b in "$BASH" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+	[ -x "$b" ] && [ "$("$b" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 4 ] 2>/dev/null && { modern_bash=$b; break; }
+done
+if [ -n "$modern_bash" ]; then
+	"$modern_bash" -n tests/matrix/http-suite.sh 2>/dev/null || parse_fail="$parse_fail tests/matrix/http-suite.sh"
+else
+	parse_fail="$parse_fail tests/matrix/http-suite.sh(no-bash-4)"
+fi
+for f in tests/matrix/*.php; do
+	php -l "$f" >/dev/null 2>&1 || parse_fail="$parse_fail $f"
+done
+if [ -z "$parse_fail" ]; then
+	echo "PASS  matrix scripts and helpers parse ($host_bash${modern_bash:+, $modern_bash}, php -l)"
+else
+	echo "FAIL  matrix scripts and helpers parse:$parse_fail"
+	fail=1
+fi
 # The matrix recorder's zip inventory and byte-identity check (host-side, no wp-env).
 if rec_out=$("$host_bash" tests/matrix/test-record.sh 2>&1); then
 	echo "PASS  $host_bash tests/matrix/test-record.sh ($(printf '%s\n' "$rec_out" | tail -1))"
@@ -267,8 +292,9 @@ else
 	printf '%s\n' "$rec_out" | awk '/^FAIL|unbound variable|invalid option|syntax error/ && n++ < 20'
 	fail=1
 fi
-# The performance gate's own self-tests and the release-zip exclusion canaries (host-side, no wp-env).
-for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh"; do
+# The performance gate's own self-tests, the release-zip exclusion canaries and the build-once
+# promotion tooling (artifact checker, release-candidate.sh, deploy.yml checks; offline stubs).
+for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh" "$host_bash tests/matrix/test-http-checks.sh" "$host_bash tests/release/test-promotion.sh"; do
 	if t_out=$($t 2>&1); then
 		echo "PASS  $t ($(printf '%s\n' "$t_out" | tail -1))"
 	else

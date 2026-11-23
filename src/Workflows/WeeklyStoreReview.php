@@ -147,7 +147,7 @@ final class WeeklyStoreReview extends AbstractWorkflow {
 				'Required data: the steps read payment health, order totals, the store profile, revenue, customer and refund totals (all compared with the previous period), the top five products, the channel mix, site errors and recent updates.',
 				'',
 				'Rules:',
-				'- Payment health comes first. Red or amber payment findings lead the Headline and go in the Watch List; an unknown payment check is a gap to mention, never a sign that payments are fine. Its counts are orders accepted at checkout, not collected revenue.',
+				'- Payment health comes first. Red or amber payment findings lead the Headline and go in the Watch List; an unknown payment check is a gap to mention, never a sign that payments are fine. Its counts are orders accepted at checkout, not collected revenue. A payment method marked inventory_only was not assessed: list it in the Watch List as a method to confirm, never as a payment problem, a loss or a reason for a dip.',
 				'- If Analytics figures are unavailable, say so in one sentence in the Headline instead of quoting sales figures, and still report the payment, site error and update findings.',
 				'- Only report numbers returned by tools. Do not invent targets, forecasts, margins, conversion rates, sessions, ad spend, ROAS, or customer identities.',
 				'- Use returned comparison fields for movement. Do not hand-calculate deltas or percentages unless the exact field is present in the response.',

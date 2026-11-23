@@ -2,7 +2,7 @@
 /**
  * One uncached payment-health measurement in this fresh PHP request (FEATURE-PLAN item 10).
  *
- *   wp eval-file .../measure-payment-health.php <since_hours> <seed_now> <recent> <old> <exact_jobs> [force]
+ *   wp eval-file .../measure-payment-health.php <since_hours> <seed_now> <recent> <old> <outside> <exact_jobs> [force]
  *
  * Deletes only the toolkit's own result cache entries (blzmcp_c_ transients, one by one; no
  * whole-cache flush), then times one end-to-end ability execute() as an administrator: permission,
@@ -12,7 +12,7 @@
  * A timing counts only when the call observed the seeded workload and every reader reported its
  * expected success and counts (tests/matrix/perf-validate.php, REVIEW-pass4 #10): the order counts
  * the volume fixture must give at the ability's own now (payment-volume-cycle.php, from
- * checked_at), the gateway log errors and failed jobs present in the window (counted here, after
+ * checked_at), the <outside> excluded-origin orders kept apart as inventory (1.2.1), the gateway log errors and failed jobs present in the window (counted here, after
  * the timed call, straight from the fixture's sources), and the inventory rows. Only documented
  * bounded truncation passes as partial. <exact_jobs>=1 (the matrix) also requires the exact
  * Action Scheduler database-store path for jobs. A call that returns an error, or any failed
@@ -23,8 +23,9 @@
  * the line then carries forced and detected (true when the validator flagged that reader).
  *
  * Prints one line: MEASURE=<json> with ok, validation, expected, elapsed_ms, warm_ms, queries, the
- * slowest queries with their EXPLAIN rows, Handler_read deltas (rows examined), peak memory delta,
- * the Action Scheduler store class and versions.
+ * slowest queries with their EXPLAIN rows, Handler_read deltas, rows examined and rows selected
+ * (the server's session Rows_read / Rows_sent deltas, or the Handler_read sum when Rows_read is not
+ * available), peak memory delta, the Action Scheduler store class and versions.
  *
  * @package Blaze\McpToolkit
  */
@@ -42,8 +43,9 @@ $hours        = (int) ( $blzmcp_args[0] ?? 24 );
 $seed_now     = (int) ( $blzmcp_args[1] ?? 0 );
 $seed_recent  = (int) ( $blzmcp_args[2] ?? 0 );
 $seed_old     = (int) ( $blzmcp_args[3] ?? 0 );
-$exact_jobs   = '1' === (string) ( $blzmcp_args[4] ?? '0' );
-$force        = (string) ( $blzmcp_args[5] ?? '' );
+$seed_outside = (int) ( $blzmcp_args[4] ?? 0 );
+$exact_jobs   = '1' === (string) ( $blzmcp_args[5] ?? '0' );
+$force        = (string) ( $blzmcp_args[6] ?? '' );
 if ( '' !== $force && ! in_array( $force, array( 'orders', 'logs', 'jobs' ), true ) ) {
 	echo 'MEASURE=' . wp_json_encode( array( 'ok' => false, 'error' => 'unknown force mode' ) ) . "\n";
 	return;
@@ -63,7 +65,7 @@ if ( ! $ability instanceof WP_Ability ) {
 $action_store = class_exists( 'ActionScheduler' ) ? get_class( ActionScheduler::store() ) : null;
 
 $blzmcp_handler_status = static function () use ( $wpdb ): array {
-	$rows = $wpdb->get_results( "SHOW SESSION STATUS LIKE 'Handler_read%'", ARRAY_A );
+	$rows = $wpdb->get_results( "SHOW SESSION STATUS WHERE Variable_name LIKE 'Handler_read%' OR Variable_name IN ('Rows_read', 'Rows_sent')", ARRAY_A );
 	$out  = array();
 	foreach ( (array) $rows as $r ) {
 		$out[ $r['Variable_name'] ] = (int) $r['Value'];
@@ -151,6 +153,11 @@ $deltas = array();
 foreach ( $after_status as $k => $v ) {
 	$deltas[ $k ] = $v - ( $before_status[ $k ] ?? 0 );
 }
+// Rows examined versus selected (1.2.1 item 5). MariaDB keeps Rows_read and Rows_sent per session;
+// without Rows_read the Handler_read sum stands in for rows examined. Both include the one status
+// query of the "after" snapshot.
+$rows_examined = isset( $deltas['Rows_read'] ) ? (int) $deltas['Rows_read'] : array_sum( array_intersect_key( $deltas, array_flip( preg_grep( '/^Handler_read/', array_keys( $deltas ) ) ) ) );
+$rows_selected = isset( $deltas['Rows_sent'] ) ? (int) $deltas['Rows_sent'] : null;
 
 // The ability's own now (C4: one captured timestamp, shown as checked_at), bounded by the call.
 $now = is_array( $result ) && is_string( $result['checked_at'] ?? null ) ? strtotime( $result['checked_at'] ) : false;
@@ -198,9 +205,10 @@ $expected_jobs = (int) $wpdb->get_var(
 );
 
 $expect = array(
-	'orders' => blzmcp_perf_expect_orders( $seed_now, $seed_recent, $seed_old, (int) $now, $hours ),
-	'logs'   => array( 'stripe' => $expected_logs ),
-	'jobs'   => array( 'stripe' => $expected_jobs ),
+	'orders'  => blzmcp_perf_expect_orders( $seed_now, $seed_recent, $seed_old, (int) $now, $hours ),
+	'logs'    => array( 'stripe' => $expected_logs ),
+	'jobs'    => array( 'stripe' => $expected_jobs ),
+	'outside' => blzmcp_perf_expect_outside( $seed_outside ),
 );
 $valid  = blzmcp_perf_validate( $result, $expect, array( 'require_exact_jobs' => $exact_jobs ) );
 if ( $exact_jobs && 'ActionScheduler_DBStore' !== $action_store ) {
@@ -226,6 +234,8 @@ echo 'MEASURE=' . wp_json_encode(
 			'logs'                 => $expect['logs'],
 			'jobs'                 => $expect['jobs'],
 			'exact_jobs_required'  => $exact_jobs,
+			'outside_orders'       => $seed_outside,
+			'outside_methods'      => array_merge( $expect['outside']['inventory_only'], $expect['outside']['mixed'] ),
 		),
 		'error'          => is_wp_error( $result ) ? $result->get_error_code() : null,
 		'since_hours'    => $hours,
@@ -234,6 +244,10 @@ echo 'MEASURE=' . wp_json_encode(
 		'warm_same_checked_at' => is_array( $warm ) && is_array( $result ) && ( $warm['checked_at'] ?? null ) === ( $result['checked_at'] ?? null ),
 		'queries'        => $q1 - $q0,
 		'handler_read'   => $deltas,
+		'rows_examined'  => $rows_examined,
+		'rows_selected'  => $rows_selected,
+		'inventory'      => is_array( $result ) ? ( $result['inventory'] ?? null ) : null,
+		'inventory_only' => count( array_filter( $rows, static fn( $m ) => 'inventory_only' === ( $m['assessment'] ?? null ) ) ),
 		'peak_memory_delta_bytes' => $peak,
 		'action_store'   => $action_store,
 		'overall'        => is_array( $result ) ? ( $result['overall'] ?? null ) : null,

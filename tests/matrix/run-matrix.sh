@@ -15,10 +15,16 @@
 # HTTP suite, fixture cleanup, wp-env stop. Prints MATRIX PASSED or MATRIX FAILED and writes the
 # evidence record (tests/matrix/record.sh).
 #
+# The HTTP suite prints one TRANSPORT_ROW per route x order authority x principal x case (1.2.1
+# item 5); they go into the summary as TRANSPORT= lines and record.sh fails the evidence when a
+# required row is missing, duplicated, unknown or FAILED (BLZMCP_TRANSPORT_OUT names the separate
+# transport receipt it writes).
+#
 # Every state runs inside one site-local reporting date (tests/matrix/.window). If a state seeds
 # on a different date than the first one, the whole matrix is reseeded once from the start.
 #
-# Env: BLZMCP_MATRIX_STATES  space-separated subset (default: all five, in order)
+# Env: BLZMCP_MATRIX_STATES  space-separated subset (default: all six, in order; record.sh fails a
+#                            subset as incomplete evidence)
 #      BLZMCP_MATRIX_KEEP=1  leave the environments running afterwards (default: wp-env stop)
 #      BLZMCP_MATRIX_TZ      site timezone for every state (default Australia/Melbourne)
 set -uo pipefail
@@ -30,7 +36,7 @@ case "$ZIP" in /*) ;; *) ZIP="$REPO/$ZIP" ;; esac
 WPE="$REPO/node_modules/.bin/wp-env"
 [ -x "$WPE" ] || { echo "MATRIX FAILED: $WPE missing (npm install)"; exit 1; }
 MATRIX_DIR=${BLZMCP_MATRIX_DIR:-$HOME/.blzmcp-matrix}
-STATES=${BLZMCP_MATRIX_STATES:-recommended easy-2.3.1 easy-2.4.0 both none}
+STATES=${BLZMCP_MATRIX_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none}
 TZ_NAME=${BLZMCP_MATRIX_TZ:-Australia/Melbourne}
 SLUG=blaze-mcp-toolkit-for-woocommerce
 T=wp-content/blzmcp-tests
@@ -73,6 +79,7 @@ sget() { # name state [default when unset]
 }
 sadd() { sset "$1" "$2" $(($(sget "$1" "$2" 0) + $3)); }
 STORAGE_LINES=()
+TRANSPORT_LINES=()
 PERF_FILE=''
 ZIP_SHA256=$(shasum -a 256 "$ZIP" | awk '{print $1}')
 CAND_VERSION=$(unzip -p "$ZIP" "$SLUG/$SLUG.php" | sed -n 's/^ \* Version:[[:space:]]*//p' | head -1 | tr -d '\r')
@@ -81,6 +88,19 @@ for f in $STORAGE_SUITES; do
 done
 fail=0
 FIRST_DATE=''
+# The HTTP suite's fail-closed safety checks prove themselves first, offline (REVIEW-pass4a R4):
+# injected HTTP 000/5xx/malformed replies, helper failures and leaked diagnostics must each fail.
+# Its summary goes into the evidence (HTTP_CHECKS); record.sh refuses a run without a clean one.
+HTTP_CHECKS_LOG="$LOG_DIR/test-http-checks.log"
+"$BASH" "$REPO/tests/matrix/test-http-checks.sh" >"$HTTP_CHECKS_LOG" 2>&1
+HTTP_CHECKS=$(grep -E '^[0-9]+ passed, [0-9]+ failed$' "$HTTP_CHECKS_LOG" | tail -1)
+if [[ "$HTTP_CHECKS" =~ ^[1-9][0-9]*\ passed,\ 0\ failed$ ]]; then
+	echo "PASS  test-http-checks.sh ($HTTP_CHECKS)"
+else
+	echo "FAIL  test-http-checks.sh (${HTTP_CHECKS:-no summary})"
+	grep '^FAIL' "$HTTP_CHECKS_LOG" | head -10
+	fail=1
+fi
 
 run_state() {
 	local state=$1 w="$MATRIX_DIR/$1" port suites f out status summary p q versions phpv wpv
@@ -279,7 +299,10 @@ run_state() {
 	WPE="$WPE" BLZMCP_PRODUCT_ID="$product_id" "$BASH" "$REPO/tests/matrix/http-suite.sh" "$state" "$port" >"$LOG_DIR/$state-http.log" 2>&1
 	status=$?
 	summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "$LOG_DIR/$state-http.log" | tail -1)
-	grep -E '^(FAIL|NOTE|TRANSPORT|CLEANUP)' "$LOG_DIR/$state-http.log"
+	grep -E '^(FAIL|NOTE|TRANSPORT UNREACHABLE|CLEANUP)' "$LOG_DIR/$state-http.log"
+	# The transport receipt rows (route x authority x principal x case), checked by record.sh.
+	while IFS= read -r line; do TRANSPORT_LINES+=("${line#TRANSPORT_ROW=}"); done < <(grep '^TRANSPORT_ROW=' "$LOG_DIR/$state-http.log")
+	echo "transport rows [$state]: $(grep -c '^TRANSPORT_ROW=.*|PASSED$' "$LOG_DIR/$state-http.log") passed, $(grep -c '^TRANSPORT_ROW=.*|FAILED$' "$LOG_DIR/$state-http.log") failed"
 	p=$(sed -E 's/^([0-9]+) passed.*/\1/' <<<"${summary:-0 passed}")
 	q=$(sed -E 's/.* ([0-9]+) failed.*/\1/' <<<"${summary:-x 1 failed}")
 	sadd PASSES "$state" "$p"
@@ -347,6 +370,7 @@ attempt=1
 while :; do
 	restart=0
 	STORAGE_LINES=()
+	TRANSPORT_LINES=()
 	PERF_FILE=''
 	FIRST_DATE=''
 	for state in $STATES; do
@@ -378,11 +402,15 @@ done
 	echo "COMMIT=$(git -C "$REPO" rev-parse HEAD)"
 	echo "WINDOW_FILE=$(ls "$LOG_DIR"/*.window 2>/dev/null | head -1)"
 	echo "PERF_FILE=$PERF_FILE"
+	echo "HTTP_CHECKS=$HTTP_CHECKS"
 	for state in $STATES; do
 		echo "STATE=$state|$(sget RESULT "$state" 'NOT RUN')|$(sget PASSES "$state" 0)|$(sget FAILS "$state" 1)|$(sget WPV "$state")|$(sget PHPV "$state")|$(sget VERSIONS "$state" '[]')"
 	done
 	for line in ${STORAGE_LINES[@]+"${STORAGE_LINES[@]}"}; do
 		echo "STORAGE=$line"
+	done
+	for line in ${TRANSPORT_LINES[@]+"${TRANSPORT_LINES[@]}"}; do
+		echo "TRANSPORT=$line"
 	done
 } >"$LOG_DIR/summary.txt"
 "$BASH" "$REPO/tests/matrix/record.sh" "$LOG_DIR/summary.txt" "$([ "$fail" -eq 0 ] && echo PASSED || echo FAILED)" || fail=1

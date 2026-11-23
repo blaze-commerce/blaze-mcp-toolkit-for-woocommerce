@@ -48,6 +48,78 @@ defined( 'BLZMCP_PERF_CYCLE' ) || define(
 /** Seconds between creation and the paid timestamp of a paid fixture order. */
 defined( 'BLZMCP_PERF_PAID_AFTER' ) || define( 'BLZMCP_PERF_PAID_AFTER', 30 );
 
+/*
+ * 1.2.1 (FEATURE-PLAN item 5): the separately counted excluded-origin population, a cycle of 10
+ * [method, recorded origin] pairs. Origin '' is an empty (missing) origin; every other origin is a
+ * literal that is not checkout or store-api, never a claim about where such orders come from. 8
+ * methods are seen only outside verified checkout activity (bacs among them, a registered core
+ * gateway); cod and stripe are mixed with the checkout cycle above, so their checkout counts must
+ * stay exactly the cycle's. All paid and processing, created inside the last 27 days.
+ */
+defined( 'BLZMCP_PERF_OUTSIDE' ) || define(
+	'BLZMCP_PERF_OUTSIDE',
+	array(
+		array( 'blzmcp_ext_admin', 'admin' ),
+		array( 'blzmcp_ext_none', '' ),
+		array( 'blzmcp_ext_phone', 'phone-order' ),
+		array( 'blzmcp_ext_pos', 'pos' ),
+		array( 'blzmcp_ext_import', 'import' ),
+		array( 'blzmcp_ext_rest', 'rest-api' ),
+		array( 'bacs', '' ),
+		array( 'blzmcp_ext_sub', 'subscription' ),
+		array( 'cod', 'admin' ),
+		array( 'stripe', '' ),
+	)
+);
+
+/** Checkout control orders (cod) seeded with the method-cap stress fixture. */
+defined( 'BLZMCP_PERF_CAP_CONTROL' ) || define( 'BLZMCP_PERF_CAP_CONTROL', 24 );
+
+if ( ! function_exists( 'blzmcp_perf_outside_created' ) ) {
+	/**
+	 * Creation time of excluded-origin order $i of $total: evenly over [now - 27 days, now - 1 hour],
+	 * so every one stays inside the 28-day history for the whole run.
+	 *
+	 * @param int $i     Sequence number.
+	 * @param int $now   Seed reference time.
+	 * @param int $total Excluded-origin orders.
+	 */
+	function blzmcp_perf_outside_created( int $i, int $now, int $total ): int {
+		return $now - 3600 - (int) floor( $i * ( 26 * 86400 ) / max( 1, $total ) );
+	}
+
+	/**
+	 * The method IDs the excluded-origin population must show (C3): inventory-only IDs (no
+	 * checkout-cycle orders) and mixed IDs (also in the checkout cycle), for $count orders.
+	 *
+	 * @param int $count Excluded-origin orders seeded.
+	 * @return array{inventory_only:string[],mixed:string[],orders:int}
+	 */
+	function blzmcp_perf_expect_outside( int $count ): array {
+		$checkout = array();
+		foreach ( BLZMCP_PERF_CYCLE as $row ) {
+			$checkout[ $row[0] ] = true;
+		}
+		$seen  = array();
+		$first = min( $count, count( BLZMCP_PERF_OUTSIDE ) );
+		for ( $i = 0; $i < $first; $i++ ) {
+			$seen[ BLZMCP_PERF_OUTSIDE[ $i ][0] ] = true;
+		}
+		$ids = array_keys( $seen );
+		sort( $ids );
+		return array(
+			'inventory_only' => array_values( array_filter( $ids, static fn( $id ) => ! isset( $checkout[ $id ] ) ) ),
+			'mixed'          => array_values( array_filter( $ids, static fn( $id ) => isset( $checkout[ $id ] ) ) ),
+			'orders'         => $count,
+		);
+	}
+
+	/** Method ID of the n-th distinct ID of the method-cap stress fixture (0-based). */
+	function blzmcp_perf_cap_id( int $n ): string {
+		return sprintf( 'blzmcp_cap_%04d', $n );
+	}
+}
+
 if ( ! function_exists( 'blzmcp_perf_created' ) ) {
 	/**
 	 * Creation time of fixture order $i ('orders' = recent, over 28 days; 'old' = 30-400 days ago).

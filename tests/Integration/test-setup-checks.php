@@ -140,19 +140,15 @@ if ( 'recommended' === $state && ! $denylist ) {
 	$restore = blzmcp_fx_set_inputs();
 	try {
 		$now = json_decode( (string) wp_json_encode( blzmcp_fx_inputs() ), true );
-		// The binding: the 1.0 fixture's inputs plus what is allowed to have moved since, for the
-		// WooCommerce version actually running. The 1.0 fixture file itself stays unchanged.
-		// - Every environment: the toolkit's own abilities added after 1.0 (blaze-mcp-toolkit/payment-health).
-		// - Only when the fixture says WooCommerce 11.2.2 (the capture) AND the store runs exactly 11.3.0
-		// (the pinned current environment since wave 6): the version moves to 11.3.0 and WooCommerce's own
-		// new woocommerce/order-notes-query ability is expected. Rows were checked identical on 11.3.0.
-		// Any other drift (including the minimum environment, WooCommerce 10.9) still counts as changed.
-		$bind = static function ( array $inputs, ?string $live_wc ): array {
+		// The binding: the 1.0 fixture's inputs plus what is allowed to have moved since. The rows are
+		// the 1.0 baseline; _inputs was recaptured on the pinned current environment (WordPress 7.1.5,
+		// WooCommerce 11.3.1, 1.2.1 wave 2) with SetupChecks.php from 8972431, rows byte-identical.
+		// That capture already lists WooCommerce's own woocommerce/order-notes-query, so the earlier
+		// 11.2.2 -> 11.3.0 allowance is gone: the only binding is the toolkit's own abilities added
+		// after 1.0 (blaze-mcp-toolkit/payment-health), on every WooCommerce version. Any other drift
+		// (including the minimum environment, WooCommerce 10.9) still counts as changed.
+		$bind = static function ( array $inputs, ?string $live_wc ): array { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter -- the WooCommerce version no longer moves the binding.
 			$required = array( 'blaze-mcp-toolkit/payment-health' );
-			if ( '11.2.2' === ( $inputs['plugins']['woocommerce/woocommerce.php'] ?? null ) && '11.3.0' === $live_wc ) {
-				$inputs['plugins']['woocommerce/woocommerce.php'] = '11.3.0';
-				$required[] = 'woocommerce/order-notes-query';
-			}
 			if ( isset( $inputs['abilities'] ) && is_array( $inputs['abilities'] ) ) {
 				$abilities = array_values( array_unique( array_merge( $inputs['abilities'], $required ) ) );
 				sort( $abilities );
@@ -170,27 +166,29 @@ if ( 'recommended' === $state && ! $denylist ) {
 			return $out;
 		};
 		$fixture_inputs = (array) ( $fixture['_inputs'] ?? array() );
+		$captured_wc    = $fixture_inputs['plugins']['woocommerce/woocommerce.php'] ?? null;
 
-		// Both sides of the WooCommerce 11.3.0 boundary, independent of the running environment.
-		blzmcp_it_equals( array( 'blaze-mcp-toolkit/payment-health', 'woocommerce/order-notes-query' ), $bind( $fixture_inputs, '11.3.0' )[1], 'binding: on WooCommerce 11.3.0 exactly one core ability is added (woocommerce/order-notes-query)' );
-		blzmcp_it_equals( '11.3.0', $bind( $fixture_inputs, '11.3.0' )[0]['plugins']['woocommerce/woocommerce.php'] ?? null, 'binding: on WooCommerce 11.3.0 the bound WooCommerce version is 11.3.0' );
-		foreach ( array( '10.9.0', '11.2.2', '11.3.1', '11.4.0', null ) as $other ) {
+		// The binding never moves the captured WooCommerce version and never expects a core ability.
+		blzmcp_it_equals( '11.3.1', $captured_wc, 'binding: the fixture inputs were captured on WooCommerce 11.3.1' );
+		blzmcp_it_assert( in_array( 'woocommerce/order-notes-query', (array) ( $fixture_inputs['abilities'] ?? array() ), true ), 'binding: the capture itself lists woocommerce/order-notes-query (no allowance needed)' );
+		foreach ( array( '10.9.0', '11.2.2', '11.3.0', '11.3.1', '11.4.0', null ) as $other ) {
 			list( $o_inputs, $o_required ) = $bind( $fixture_inputs, $other );
 			blzmcp_it_equals( array( 'blaze-mcp-toolkit/payment-health' ), $o_required, 'binding: on WooCommerce ' . ( $other ?? 'none' ) . ' no core ability is expected, only the toolkit\'s own' );
-			blzmcp_it_equals( '11.2.2', $o_inputs['plugins']['woocommerce/woocommerce.php'] ?? null, 'binding: on WooCommerce ' . ( $other ?? 'none' ) . ' the bound version stays the captured 11.2.2' );
+			blzmcp_it_equals( $captured_wc, $o_inputs['plugins']['woocommerce/woocommerce.php'] ?? null, 'binding: on WooCommerce ' . ( $other ?? 'none' ) . ' the bound version stays the captured one' );
 		}
-		$fx_11_3 = $fixture_inputs;
-		$fx_11_3['plugins']['woocommerce/woocommerce.php'] = '11.3.0';
-		blzmcp_it_equals( array( 'blaze-mcp-toolkit/payment-health' ), $bind( $fx_11_3, '11.3.0' )[1], 'binding: the allowance applies only to a fixture captured on 11.2.2' );
-		// Strictness on 11.3.0: a store missing the core ability, or with one more unknown ability, is changed.
-		list( $b11 ) = $bind( $fixture_inputs, '11.3.0' );
+		// Strictness: a store missing a captured ability, with one more unknown ability, or on another
+		// WooCommerce version is changed.
+		list( $b11 ) = $bind( $fixture_inputs, '11.3.1' );
 		$sim_live    = $b11;
 		$sim_live['abilities'] = array_values( array_diff( $b11['abilities'], array( 'woocommerce/order-notes-query' ) ) );
-		blzmcp_it_equals( array( 'abilities' ), $changed_keys( $b11, $sim_live ), 'binding: on 11.3.0 a missing woocommerce/order-notes-query counts as changed' );
+		blzmcp_it_equals( array( 'abilities' ), $changed_keys( $b11, $sim_live ), 'binding: a missing woocommerce/order-notes-query counts as changed' );
 		$sim_live['abilities'] = array_merge( $b11['abilities'], array( 'woocommerce/some-other-new-ability' ) );
 		sort( $sim_live['abilities'] );
-		blzmcp_it_equals( array( 'abilities' ), $changed_keys( $b11, $sim_live ), 'binding: on 11.3.0 any other extra ability still counts as changed' );
-		blzmcp_it_equals( array(), $changed_keys( $b11, $b11 ), 'binding: the exact 11.3.0 inputs count as unchanged' );
+		blzmcp_it_equals( array( 'abilities' ), $changed_keys( $b11, $sim_live ), 'binding: any other extra ability still counts as changed' );
+		$sim_live = $b11;
+		$sim_live['plugins']['woocommerce/woocommerce.php'] = '11.3.0';
+		blzmcp_it_equals( array( 'plugins' ), $changed_keys( $b11, $sim_live ), 'binding: another WooCommerce patch (11.3.0) counts as changed' );
+		blzmcp_it_equals( array(), $changed_keys( $b11, $b11 ), 'binding: the exact captured inputs count as unchanged' );
 
 		// The running environment.
 		$live_wc                         = isset( $now['plugins']['woocommerce/woocommerce.php'] ) ? (string) $now['plugins']['woocommerce/woocommerce.php'] : null;
