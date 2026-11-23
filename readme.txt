@@ -237,7 +237,7 @@ Unknown means it couldn't check, not that everything is fine. Common reasons: fe
 == Upgrade Notice ==
 
 = 1.2.1 =
-Payment health also lists methods seen outside verified checkout activity, as not assessed; checkout checks are unchanged. Connected ChatGPT before updating? Open ChatGPT Settings, then Plugins, then this store's app, and choose Refresh tools to load new tool guidance (Claude loads it per chat).
+Payment health now lists methods seen outside verified checkout activity, marked not assessed. Connected ChatGPT before updating? In ChatGPT Settings, open Plugins, then this store's app, and choose Refresh tools.
 
 = 1.2.0 =
 Adds a read-only payment health check, run first by the weekly, revenue drop and failed order workflows. Easy MCP AI users: tick payment health under Easy MCP AI › Tools › Abilities.
