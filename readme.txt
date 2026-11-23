@@ -153,6 +153,10 @@ New Claude and ChatGPT connections go through Easy MCP AI, because it takes over
 
 In ChatGPT, open Plugins > Add > Add custom MCP server, paste the connector URL from WooCommerce > Blaze MCP Toolkit, and choose OAuth. With Enable Abilities for MCP, turn on "ChatGPT & Other OAuth Connectors" in Settings > WP Abilities first. In our testing this worked on a Free ChatGPT account.
 
+= I updated the plugin. Does ChatGPT need a refresh? =
+
+Yes, if you connected ChatGPT before updating. Open ChatGPT Settings, then Plugins, then this store's app, and choose Refresh tools. ChatGPT then picks up the new tool guidance. Claude loads it each time you start a chat, so it needs nothing.
+
 = How do I add it to Claude? =
 
 In claude.ai, open Customize > Connectors > Add > Add custom connector and paste the connector URL. The connector then works in Claude on the web, desktop and mobile. Claude may ask you to approve each tool call the first time; that's Claude's setting for the connector, not a sign that the tool writes anything.
@@ -233,7 +237,7 @@ Unknown means it couldn't check, not that everything is fine. Common reasons: fe
 == Upgrade Notice ==
 
 = 1.2.1 =
-Payment health now also lists payment methods it used to leave out because they were seen only on orders outside verified checkout activity, marked as not assessed. Switched-on methods of active payment plugins keep their existing checks, and how checkout payments are judged is unchanged.
+Payment health also lists methods seen outside verified checkout activity, as not assessed; checkout checks are unchanged. Connected ChatGPT before updating? Open ChatGPT Settings, then Plugins, then this store's app, and choose Refresh tools to load new tool guidance (Claude loads it per chat).
 
 = 1.2.0 =
 Adds a read-only payment health check, run first by the weekly, revenue drop and failed order workflows. Easy MCP AI users: tick payment health under Easy MCP AI › Tools › Abilities.

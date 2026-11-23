@@ -338,7 +338,10 @@ blzmcp_it_assert( str_contains( $desc, 'signals to check, never confirmed lost s
 blzmcp_it_assert( str_contains( $desc, 'do not tell the merchant they are losing money' ), 'description: the assistant must not say the merchant is losing money' );
 // Wave 5 client smoke (session 3): inventory_only methods must be named, not left out.
 blzmcp_it_assert( str_contains( $desc, 'whenever you report on payment health' ) && str_contains( $desc, 'name every inventory_only method to the merchant' ), 'description: the assistant must name every inventory_only method whenever it reports on payment health' );
-blzmcp_it_assert( str_contains( $desc, 'say its checkout health was not assessed because it was seen only on orders outside verified checkout activity' ), 'description: the assistant must say an inventory_only method was not assessed and why' );
+// Wave 6 (REVIEW-pass4d R7): the reason follows each row's own complete/partial disclosure; no exclusive-origin claim on partial coverage.
+blzmcp_it_assert( str_contains( $desc, "say its checkout health was not assessed, and give the reason that method's own result gives: either it was observed only outside verified checkout activity, or checkout activity may be missing because not every order was read" ), 'description: the assistant must say an inventory_only method was not assessed and give that row\'s own complete or partial reason' );
+blzmcp_it_assert( str_contains( $desc, "when that method's activity coverage or the inventory coverage is not complete, never say the method was seen only outside checkout or has no checkout activity" ), 'description: no "only" or no-checkout claim when the method or inventory coverage is not complete' );
+blzmcp_it_assert( ! str_contains( $desc, 'seen only on orders outside verified checkout activity' ), 'description: no unconditional "seen only on orders outside verified checkout activity" instruction' );
 blzmcp_it_assert( str_contains( $desc, 'suggest confirming whether it is meant for checkout and how those orders were created' ), 'description: the assistant must suggest the manual origin check for inventory_only methods' );
 blzmcp_it_assert( str_contains( $desc, 'never present an inventory_only method as a payment problem, a checkout failure, a lost sale or money at risk' ), 'description: inventory_only is never a problem, failure, lost sale or money at risk' );
 blzmcp_it_assert( str_contains( $desc, 'never count its orders as checkouts or sales' ), 'description: inventory_only orders are never counted as checkouts or sales' );
@@ -791,14 +794,31 @@ $run_limited = static function ( ?array $limits ) use ( $limits_prop, $ability, 
 	}
 };
 $disclosure_notes = static fn( $r ): array => array_values( array_filter( (array) ( is_array( $r ) ? $r['notes'] : array() ), static fn( $n ) => str_starts_with( (string) $n, 'Listed for inventory, not as checkout counts:' ) ) );
-$checkout_numbers = static function ( $r ): array {
+// Two ability calls a moment apart each capture their own "now": the elapsed-time fields
+// (hours since the last order, the expected count over that gap, stuck cohort boundaries) can
+// move between them on a slow host. They are not what the cap could change, so they are left out;
+// every status, check, count and finding is still compared.
+$clock_free = static function ( $v ) use ( &$clock_free ) {
+	if ( ! is_array( $v ) ) {
+		return $v;
+	}
+	foreach ( array_keys( $v ) as $k ) {
+		if ( in_array( $k, array( 'hours_since_last_taken', 'expected_in_gap', 'mature_before', 'baseline_start', 'baseline_end' ), true ) || str_starts_with( (string) $k, 'window_' ) ) {
+			unset( $v[ $k ] );
+		} else {
+			$v[ $k ] = $clock_free( $v[ $k ] );
+		}
+	}
+	return $v;
+};
+$checkout_numbers = static function ( $r ) use ( $clock_free ): array {
 	$out = array( 'store_wide' => is_array( $r ) ? $r['store_wide'] : null );
 	foreach ( (array) ( is_array( $r ) ? $r['methods'] : array() ) as $m ) {
 		if ( 'checkout_health' === $m['assessment'] ) {
 			$out[ $m['id'] ] = array( $m['status'], $m['quiet'], $m['stuck'], $m['errors'], $m['activity']['checkout_observed'] );
 		}
 	}
-	return $out;
+	return $clock_free( $out );
 };
 // (a) order_scan_budget: the scan stops one candidate before the end, after the outside orders of
 // blzph_outside (seeded before the last outside orders) were folded.
@@ -812,6 +832,12 @@ blzmcp_it_equals( array( 'inventory_only', true, 'partial' ), array( $b_out['ass
 blzmcp_it_equals( array( $partial_text ), $b_out['reasons'] ?? null, 'budget case: the method row uses the "checkout activity may be missing" sentence' );
 blzmcp_it_equals( $partial_text, $b_out['quiet']['reason'] ?? null, 'budget case: its checks carry the partial sentence too' );
 blzmcp_it_assert( ! str_contains( (string) wp_json_encode( $b_out ), 'Observed only' ), 'budget case: the method row never says "Observed only"' );
+// Wave 6 (REVIEW-pass4d R7): the description the assistant reads agrees with this partial row.
+$b_desc = strtolower( $ability->get_description() );
+blzmcp_it_assert( str_contains( strtolower( $partial_text ), 'checkout activity may be missing' ) && str_contains( $b_desc, 'or checkout activity may be missing because not every order was read' ), 'budget case: the description\'s partial branch matches the row\'s "checkout activity may be missing" reason' );
+blzmcp_it_assert( 'partial' === ( $b_out['activity']['coverage'] ?? null ) && str_contains( $b_desc, "when that method's activity coverage or the inventory coverage is not complete, never say the method was seen only outside checkout" ), 'budget case: for this partial row the description forbids the "only outside checkout" claim' );
+blzmcp_it_assert( ! str_contains( $b_desc, 'seen only on orders outside verified checkout activity' ) && ! str_contains( $b_desc, 'because it was seen only' ), 'budget case: the description has no unconditional exclusive-origin instruction that would contradict this row' );
+blzmcp_it_assert( str_contains( strtolower( $only_text ), 'observed only outside verified checkout activity' ) && str_contains( $b_desc, 'either it was observed only outside verified checkout activity' ), 'complete case: the description\'s complete branch matches the complete-scan row reason' );
 $b_notes = $disclosure_notes( $budget_r );
 blzmcp_it_assert( array() !== $b_notes && str_contains( implode( ' ', $b_notes ), $partial_text ), 'budget case: the top-level disclosure note uses the partial sentence' );
 blzmcp_it_assert( ! preg_match( '/\bonly\b/i', implode( ' ', $b_notes ) ), 'budget case: the top-level disclosure note does not say "only"' );
