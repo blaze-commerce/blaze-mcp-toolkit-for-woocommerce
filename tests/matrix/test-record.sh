@@ -79,6 +79,43 @@ reader_failed() {
 	jq --arg r "$1" '(.trials[] | select(.storage == "hpos" and .window == 24 and .logger == "db" and .trial == 3))
 		|= (.ok = false | .validation.readers[$r] = false | .validation.failures = ["\($r): forced"])'
 }
+# Ruling Q6: set one partition's raw trial timings ($1 storage, $2 window, $3 logger, $4 = 5
+# comma-separated values; "invalid" fails that trial's order reader, "null" drops its elapsed_ms,
+# "drop" removes the trial). The partition aggregate (trials_ms, max_ms, pass) and all_pass are left
+# as the receipt claims them, so every failing case here is also a forged passing aggregate.
+trial_times() {
+	jq --arg s "$1" --argjson w "$2" --arg l "$3" --arg v "$4" '($v | split(",")) as $vs
+		| .trials |= [.[] | if .storage == $s and .window == $w and .logger == $l then
+			$vs[.trial - 1] as $x
+			| if $x == "invalid" then (.ok = false | .validation.readers.orders = false | .validation.failures = ["orders: forced"])
+			  elif $x == "null" then del(.elapsed_ms)
+			  elif $x == "drop" then empty
+			  else .elapsed_ms = ($x | tonumber) end
+		  else . end]'
+}
+q6_mut() {
+	case "$1" in
+	q6-run1) trial_times legacy 24 db 1177.4,1248.8,1191.9,1172,1605.8 | trial_times legacy 168 db 1325.4,1192.6,1215.6,1291.2,1630.1 ;;
+	q6-2000) trial_times legacy 24 db 1100,1100,1100,1100,2000 ;;
+	q6-2000.1) trial_times legacy 24 db 1100,1100,1100,1100,2000.1 ;;
+	q6-1500-one) trial_times legacy 168 db 1100,1500,1100,1100,1100 ;;
+	q6-1500-two) trial_times legacy 168 db 1100,1500,1100,1500,1100 ;;
+	q6-second-slow) trial_times legacy 24 db 1177,1606,1192,1172,1546 ;;
+	q6-over-2000) trial_times legacy 168 db 1100,1100,2400,1100,1100 ;;
+	q6-invalid) trial_times legacy 24 db 1100,1100,1100,invalid,1100 ;;
+	q6-null) trial_times legacy 168 db 1100,null,1100,1100,1100 ;;
+	q6-four) trial_times legacy 24 db 1100,1100,1100,1100,drop ;;
+	q6-hpos-slow) trial_times hpos 24 db 900,900,900,900,1600 ;;
+	q6-legacy-file-slow) trial_times legacy 168 file 900,900,900,900,1501 ;;
+	q6-5of5-1500) trial_times hpos 168 file 900,1500,900,900,900 ;;
+	q6-5of5-1499) trial_times hpos 168 file 1499.9,1499.9,1499.9,1499.9,1499.9 ;;
+	# Every partition claims pass with max 900 and the 4of5 rule label; the hpos raw trials do not.
+	q6-forged) jq '.partitions[].rule = "4of5<1500,max<=2000"' | trial_times hpos 24 file 900,900,900,1600,900 ;;
+	# The preserved wave 4 shape: raw trials within Q6, but the suite's own verdict was FAILED.
+	q6-receipt-failed) trial_times legacy 24 db 1177.4,1248.8,1191.9,1172,1605.8 | jq '.all_pass = false | (.partitions[] | select(.storage == "legacy" and .logger == "db") | .pass) = false' ;;
+	*) cat ;;
+	esac
+}
 # A forced probe of reader $1 that came back as a success (not detected).
 forced_passed() {
 	jq --arg r "$1" '(.forced_failures[] | select(.storage == "legacy" and .force == $r and .logger == "db")) |= (.ok = true | .detected = false)'
@@ -200,6 +237,7 @@ check() {
 	perf-cap-failed) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '(.cap_cases[] | select(.storage == "hpos" and .distinct_ids == 1000)) |= (.ok = false | .failures = ["listed 999 cap IDs, expected 1000"])' >"$WORK/perf.json" ;;
 	perf-cap-dup) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.cap_cases += [.cap_cases[0]]' >"$WORK/perf.json" ;;
 	cleanup-no-cap) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | jq '.cleanup |= map(select(.storage != "legacy" or .phase != "cap"))' >"$WORK/perf.json" ;;
+	q6-*) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 | q6_mut "$mut" >"$WORK/perf.json" ;;
 	*) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 900 >"$WORK/perf.json" ;;
 	esac
 	[ "$mut" == log-leak ] && echo 'FAIL  [both] a check that echoed jane.citizen@realmail.com' >"$WORK/both-http.log"
@@ -341,7 +379,32 @@ check 'a failed 1,000-ID cap case is refused' 5 "$WORK/good" perf-cap-failed
 check 'a duplicated cap case is refused' 5 "$WORK/good" perf-cap-dup
 check 'a missing cap fixture cleanup is refused' 5 "$WORK/good" cleanup-no-cap
 check 'faithful package with complete 1.2.1 evidence is accepted' 0 "$WORK/good"
-assert 'record shows the excluded-origin seed, rows examined and the cap cases' "$(grep -q 'plus 1000 excluded-origin orders counted separately across 10 methods' "$LAST_OUT" && grep -qE '^\| legacy \| 24h \| file \| 900 \| .* \| 61000 \| 2100 \| 4000000 \| true \|' "$LAST_OUT" && grep -q 'hpos 1001 IDs: listed 1000, methods_truncated true, inventory partial, passed' "$LAST_OUT" && echo true)"
+assert 'record shows the excluded-origin seed, rows examined and the cap cases' "$(grep -q 'plus 1000 excluded-origin orders counted separately across 10 methods' "$LAST_OUT" && grep -qE '^\| legacy \| 24h \| file \| 900 \| .* \| 61000 \| 2100 \| 4000000 \| 5of5<1500 \| true \| true \|' "$LAST_OUT" && grep -q 'hpos 1001 IDs: listed 1000, methods_truncated true, inventory partial, passed' "$LAST_OUT" && echo true)"
+
+# Ruling Q6 (REVIEW-pass4c): the recorder decides the budget on the raw trials, per partition.
+check 'Q6: one slow trial in each legacy db partition (run 1 shape, 1605.8 and 1630.1 ms) is accepted' 0 "$WORK/good" q6-run1
+assert '  ... the record shows the recorder rule and decision per partition' "$(grep -qF '| legacy | 168h | db | 1630.1 | 1325.4, 1192.6, 1215.6, 1291.2, 1630.1 | 5 of 5, 4 under |' "$LAST_OUT" && grep -qE '^\| legacy \| 168h \| db \| .* \| 4of5<1500,max<=2000 \| true \| true \|$' "$LAST_OUT" && grep -qE '^\| hpos \| 24h \| db \| .* \| 5of5<1500 \| true \| true \|$' "$LAST_OUT" && grep -qF -- '- Budget rule (ruling Q6, REVIEW-pass4c), decided by this recorder' "$LAST_OUT" && echo true)"
+check 'Q6 boundary: a legacy db trial of exactly 2000 ms is accepted' 0 "$WORK/good" q6-2000
+check 'Q6 boundary: a legacy db trial of 2000.1 ms is refused' 5 "$WORK/good" q6-2000.1
+assert '  ... named as a budget miss under its rule' "$(grep -qF 'performance budget missed: legacy/24h/db (rule 4of5<1500,max<=2000: 4 of 5 trials valid and under 1500 ms, 5 valid, max 2000.1 ms)' "$LAST_OUT" && echo true)"
+check 'Q6 boundary: one legacy db trial of exactly 1500 ms is accepted as the one slow trial' 0 "$WORK/good" q6-1500-one
+check 'Q6 boundary: two legacy db trials of exactly 1500 ms are refused' 5 "$WORK/good" q6-1500-two
+check 'Q6: a second slow legacy db trial is refused (the receipt still claims pass)' 5 "$WORK/good" q6-second-slow
+assert '  ... named with 3 under budget' "$(grep -qF 'legacy/24h/db (rule 4of5<1500,max<=2000: 3 of 5 trials valid and under 1500 ms' "$LAST_OUT" && echo true)"
+check 'Q6: a legacy db trial above 2000 ms is refused' 5 "$WORK/good" q6-over-2000
+check 'Q6: an invalid legacy db trial is refused even with 4 fast trials' 5 "$WORK/good" q6-invalid
+assert '  ... and the recorder table marks that partition not passed' "$(grep -qE '^\| legacy \| 24h \| db \| .* \| 4 of 5, 4 under \| .* \| 4of5<1500,max<=2000 \| false \| true \|$' "$LAST_OUT" && echo true)"
+check 'Q6: a legacy db trial with no elapsed_ms is refused' 5 "$WORK/good" q6-null
+check 'Q6: a legacy db partition with 4 trials is refused' 5 "$WORK/good" q6-four
+check 'Q6: one slow trial in an HPOS db partition is refused (5 of 5)' 5 "$WORK/good" q6-hpos-slow
+assert '  ... named under 5of5<1500' "$(grep -qF 'performance budget missed: hpos/24h/db (rule 5of5<1500: 4 of 5 trials valid and under 1500 ms' "$LAST_OUT" && echo true)"
+check 'Q6: one slow trial in a legacy file partition is refused (5 of 5)' 5 "$WORK/good" q6-legacy-file-slow
+check 'Q6 boundary: a 5of5 trial of exactly 1500 ms is refused' 5 "$WORK/good" q6-5of5-1500
+check 'Q6 boundary: 5of5 trials of 1499.9 ms are accepted' 0 "$WORK/good" q6-5of5-1499
+check 'Q6: a forged passing aggregate (pass flags, max 900, 4of5 labels everywhere) over a failing hpos trial is refused' 5 "$WORK/good" q6-forged
+assert '  ... the recorder applies 5of5<1500 to hpos regardless of the receipt label' "$(grep -qF 'performance budget missed: hpos/24h/file (rule 5of5<1500: 4 of 5 trials valid and under 1500 ms, 5 valid, max 1600 ms)' "$LAST_OUT" && grep -qE '^\| hpos \| 24h \| file \| 1600 \| .* \| 5of5<1500 \| false \| true \|$' "$LAST_OUT" && echo true)"
+check 'Q6: raw trials within Q6 but the receipt verdict FAILED (the wave 4 shape) is refused' 5 "$WORK/good" q6-receipt-failed
+assert '  ... named as the receipt verdict' "$(grep -qF 'performance receipt verdict is not all_pass (perf-suite.sh failed)' "$LAST_OUT" && echo true)"
 
 # Privacy.
 check 'an e-mail address in a copied log line refuses the record' 5 "$WORK/good" log-leak
