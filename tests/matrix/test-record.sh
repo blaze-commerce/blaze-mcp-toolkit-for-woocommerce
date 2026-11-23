@@ -178,6 +178,29 @@ check() {
 		http-checks-failed) echo 'HTTP_CHECKS=68 passed, 3 failed' ;;
 		*) echo 'HTTP_CHECKS=71 passed, 0 failed' ;;
 		esac
+		# Host admission (ruling Q8): N = 12, bounds load5 < 3.00 and load1 < 3.96.
+		case "$mut" in
+		ha-no-host) ;;
+		ha-no-ncpu) echo 'HOST=testhost||Test CPU|sysctl vm.loadavg' ;;
+		ha-loadsrc) echo 'HOST=testhost|12|Test CPU|/tmp/fake-loadavg' ;;
+		ha-proc) echo 'HOST=testhost|12|Test CPU|/proc/loadavg' ;;
+		*) echo 'HOST=testhost|12|Test CPU|sysctl vm.loadavg' ;;
+		esac
+		case "$mut" in
+		ha-no-start) ;;
+		ha-start-load5) echo 'ADMISSION=start|2026-11-24T00:00:00Z|testhost|12|2.10|3.00|0|1' ;;
+		ha-start-boundary) echo 'ADMISSION=start|2026-11-24T00:00:00Z|testhost|12|3.95|2.99|0|1' ;;
+		*) echo 'ADMISSION=start|2026-11-24T00:00:00Z|testhost|12|2.10|1.90|0|1' ;;
+		esac
+		case "$mut" in
+		ha-no-perf) ;;
+		ha-perf-load1) echo 'ADMISSION=perf|2026-11-24T01:02:00Z|testhost|12|3.96|2.80|120|3' ;;
+		ha-perf-ncpu) echo 'ADMISSION=perf|2026-11-24T01:02:00Z|testhost|8|2.00|1.80|120|3' ;;
+		*) echo 'ADMISSION=perf|2026-11-24T01:02:00Z|testhost|12|3.50|2.80|120|3' ;;
+		esac
+		[ "$mut" == ha-no-samples ] && echo 'LOAD_SAMPLES=0' || echo 'LOAD_SAMPLES=180'
+		echo 'LOAD_MAX=5.10|3.40'
+		echo 'LOAD_OVER=4'
 		for state in recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none; do
 			[ "$mut" == drop-easy-2.5.0 ] && [ "$state" == easy-2.5.0 ] && continue
 			if [ "$mut" == state-not-run ] && [ "$state" == both ]; then
@@ -405,6 +428,27 @@ check 'Q6: a forged passing aggregate (pass flags, max 900, 4of5 labels everywhe
 assert '  ... the recorder applies 5of5<1500 to hpos regardless of the receipt label' "$(grep -qF 'performance budget missed: hpos/24h/file (rule 5of5<1500: 4 of 5 trials valid and under 1500 ms, 5 valid, max 1600 ms)' "$LAST_OUT" && grep -qE '^\| hpos \| 24h \| file \| 1600 \| .* \| 5of5<1500 \| false \| true \|$' "$LAST_OUT" && echo true)"
 check 'Q6: raw trials within Q6 but the receipt verdict FAILED (the wave 4 shape) is refused' 5 "$WORK/good" q6-receipt-failed
 assert '  ... named as the receipt verdict' "$(grep -qF 'performance receipt verdict is not all_pass (perf-suite.sh failed)' "$LAST_OUT" && echo true)"
+
+# Host admission (ruling Q8, REVIEW-pass4e).
+check 'Q8: the faithful run with both admission samples is accepted' 0 "$WORK/good"
+assert '  ... the record has the Host admission section with N, the bounds and the result' "$(grep -qF '## Host admission (ruling Q8)' "$LAST_OUT" && grep -qF -- '- Result: admitted at the start and before the performance phase' "$LAST_OUT" && grep -qF 'logical CPUs N = 12; CPU Test CPU; load source sysctl vm.loadavg' "$LAST_OUT" && grep -qF 'load5 < 0.25 x N = 3.00 and load1 < 0.33 x N = 3.96' "$LAST_OUT" && echo true)"
+assert '  ... both admission samples in the table' "$(grep -qF '| start | 2026-11-24T00:00:00Z | testhost | 12 | 2.10 | 1.90 | 0 | 1 |' "$LAST_OUT" && grep -qF '| perf | 2026-11-24T01:02:00Z | testhost | 12 | 3.50 | 2.80 | 120 | 3 |' "$LAST_OUT" && echo true)"
+assert '  ... the sample count, run maxima and excursions as diagnostics' "$(grep -qF 'Load samples over the run (every 60 s, UTC): 180; max load1 5.10, max load5 3.40; samples above the admission bounds: 4' "$LAST_OUT" && grep -qF 'never excuse a slow valid trial' "$LAST_OUT" && echo true)"
+check 'Q8: /proc/loadavg is an accepted load source' 0 "$WORK/good" ha-proc
+check 'Q8 boundary: admission at load1 3.95 and load5 2.99 is accepted' 0 "$WORK/good" ha-start-boundary
+check 'Q8: no ADMISSION start line is refused' 5 "$WORK/good" ha-no-start
+assert '  ... named, and the record says REFUSED' "$(grep -qF 'host admission (ruling Q8): no ADMISSION start line' "$LAST_OUT" && grep -qF -- '- Result: **REFUSED**: no ADMISSION start line' "$LAST_OUT" && grep -qF 'MATRIX FAILED' "$LAST_OUT" && echo true)"
+check 'Q8: no ADMISSION perf line is refused' 5 "$WORK/good" ha-no-perf
+assert '  ... named' "$(grep -qF 'host admission (ruling Q8): no ADMISSION perf line' "$LAST_OUT" && echo true)"
+check 'Q8: no HOST line is refused' 5 "$WORK/good" ha-no-host
+check 'Q8: a HOST line without the CPU count is refused' 5 "$WORK/good" ha-no-ncpu
+check 'Q8: a non-standard load source is refused' 5 "$WORK/good" ha-loadsrc
+check 'Q8 boundary: a start sample at load5 3.00 (N = 12) is refused' 5 "$WORK/good" ha-start-load5
+assert '  ... named with the bounds' "$(grep -qF 'ADMISSION start sample load1=2.10 load5=3.00 is not within load5 < 3.00 and load1 < 3.96' "$LAST_OUT" && echo true)"
+check 'Q8 boundary: a perf sample at load1 3.96 (N = 12) is refused' 5 "$WORK/good" ha-perf-load1
+check 'Q8: a perf sample taken on another CPU count is refused' 5 "$WORK/good" ha-perf-ncpu
+check 'Q8: zero load samples is refused' 5 "$WORK/good" ha-no-samples
+assert '  ... named' "$(grep -qF 'no 60-second load samples recorded (LOAD_SAMPLES 0)' "$LAST_OUT" && echo true)"
 
 # Privacy.
 check 'an e-mail address in a copied log line refuses the record' 5 "$WORK/good" log-leak
