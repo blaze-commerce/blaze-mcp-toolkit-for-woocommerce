@@ -54,6 +54,14 @@ set -uo pipefail
 # pass; and the HTTP suite's offline fail-closed self-test (tests/matrix/test-http-checks.sh) must
 # have run in this matrix with 0 failures (HTTP_CHECKS line).
 #
+# Wave 6 (ruling Q8, REVIEW-pass4e), also exit 5 / FAILED: the summary must carry the host
+# identity (HOST: hostname, logical CPU count N, CPU model and a standard load source), an
+# ADMISSION line for the start and one for the performance phase, each admitted under this
+# recorder's own check (load5 < 0.25 x N and load1 < 0.33 x N, strict, with N matching HOST),
+# and at least one 60-second load sample (LOAD_SAMPLES). The record's Host admission section shows
+# N, the bounds, the admission samples, the sample count and the run's maximum load1/load5. In-run
+# excursions above the bounds are shown as diagnostics only; they never excuse a slow valid trial.
+#
 # Privacy: absolute local paths in copied log lines are replaced with <path>; the finished record
 # is then scanned for home directories, host paths, auth headers, secrets and e-mail addresses
 # (other than the fixtures' example.invalid ones). Any hit refuses the record (exit 5, nothing
@@ -97,6 +105,13 @@ run_sha=$(sed -n 's/^ZIP_SHA256=//p' "$SUMMARY")
 run_version=$(sed -n 's/^VERSION=//p' "$SUMMARY")
 perf_file=$(sed -n 's/^PERF_FILE=//p' "$SUMMARY")
 http_checks=$(sed -n 's/^HTTP_CHECKS=//p' "$SUMMARY" | head -1)
+# Host admission (ruling Q8): the helper's exact bound arithmetic, nothing else from it.
+# shellcheck source=tests/matrix/host-admission.sh
+. "$REPO/tests/matrix/host-admission.sh"
+ha_host=$(sed -n 's/^HOST=//p' "$SUMMARY" | head -1)
+ha_samples=$(sed -n 's/^LOAD_SAMPLES=//p' "$SUMMARY" | head -1)
+ha_max=$(sed -n 's/^LOAD_MAX=//p' "$SUMMARY" | head -1)
+ha_over=$(sed -n 's/^LOAD_OVER=//p' "$SUMMARY" | head -1)
 zip_sha=$(shasum -a 256 "$zip" 2>/dev/null | awk '{print $1}')
 zip_version=$(unzip -p "$zip" "$PKG/$PKG.php" 2>/dev/null | sed -n 's/^ \* Version:[[:space:]]*//p' | head -1 | tr -d '\r')
 zip_constant=$(unzip -p "$zip" "$PKG/$PKG.php" 2>/dev/null | sed -n "s/.*define( *'BLZMCP_VERSION', *'\([^']*\)'.*/\1/p" | head -1)
@@ -348,6 +363,37 @@ else
 		perf_ok=1
 	fi
 fi
+# Host admission (ruling Q8): identity, both admission samples admitted by this recorder's own
+# bound check, and the run's load samples.
+ha_problems=()
+IFS='|' read -r ha_hostname ha_n ha_cpu ha_src <<<"$ha_host"
+ha_bounds_txt=''
+if [ -z "$ha_host" ]; then
+	ha_problems+=("no host identity (HOST line)")
+elif ! [[ "${ha_n:-}" =~ ^[1-9][0-9]*$ ]]; then
+	ha_problems+=("logical CPU count is not recorded (HOST ${ha_host})")
+else
+	ha_bounds_txt=$(ha_bounds "$ha_n")
+	case "${ha_src:-}" in
+	'sysctl vm.loadavg' | /proc/loadavg) ;;
+	*) ha_problems+=("load source is not sysctl vm.loadavg or /proc/loadavg (${ha_src:-none})") ;;
+	esac
+fi
+for ha_phase in start perf; do
+	ha_line=$(grep "^ADMISSION=$ha_phase|" "$SUMMARY" | head -1)
+	if [ -z "$ha_line" ]; then
+		ha_problems+=("no ADMISSION $ha_phase line")
+		continue
+	fi
+	IFS='|' read -r _ _ _ ha_ln ha_l1 ha_l5 _ _ <<<"${ha_line#ADMISSION=}"
+	if [ -z "$ha_bounds_txt" ] || [ "$ha_ln" != "$ha_n" ]; then
+		ha_problems+=("ADMISSION $ha_phase was not taken on the recorded host (ncpu ${ha_ln:-none}, HOST ${ha_n:-none})")
+	elif ! ha_admits "$ha_n" "${ha_l1:-x}" "${ha_l5:-x}"; then
+		ha_problems+=("ADMISSION $ha_phase sample load1=${ha_l1:-none} load5=${ha_l5:-none} is not within load5 < ${ha_bounds_txt%% *} and load1 < ${ha_bounds_txt##* }")
+	fi
+done
+[[ "${ha_samples:-}" =~ ^[1-9][0-9]*$ ]] || ha_problems+=("no 60-second load samples recorded (LOAD_SAMPLES ${ha_samples:-none})")
+[ "${#ha_problems[@]}" -eq 0 ] || incomplete+=("host admission (ruling Q8): $(printf '%s; ' "${ha_problems[@]}" | sed 's/; $//')")
 [ "${#incomplete[@]}" -eq 0 ] || VERDICT=FAILED
 name_commit=$(basename "$zip" .zip | sed -n 's/^candidate-//p')
 dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommerce.php uninstall.php readme.txt vendor-src | wc -l | tr -d ' ')
@@ -441,6 +487,25 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 	else
 		echo "- (no performance receipt)"
 	fi
+	echo
+	echo "## Host admission (ruling Q8)"
+	echo
+	echo "- Result: $([ "${#ha_problems[@]}" -eq 0 ] && echo 'admitted at the start and before the performance phase' || echo "**REFUSED**: $(printf '%s; ' "${ha_problems[@]}" | sed 's/; $//')")"
+	echo "- Host: ${ha_hostname:-not recorded}; logical CPUs N = ${ha_n:-not recorded}; CPU ${ha_cpu:-not recorded}; load source ${ha_src:-not recorded}"
+	if [ -n "$ha_bounds_txt" ]; then
+		echo "- Bounds (strict, computed, not rounded): load5 < 0.25 x N = ${ha_bounds_txt%% *} and load1 < 0.33 x N = ${ha_bounds_txt##* }, before the matrix and immediately before the performance phase"
+	else
+		echo "- Bounds: not computable (no logical CPU count)"
+	fi
+	echo
+	echo "| Phase | UTC | Host | N | load1 | load5 | Waited (s) | Samples while waiting |"
+	echo "|---|---|---|---|---|---|---|---|"
+	grep '^ADMISSION=' "$SUMMARY" | sed 's/^ADMISSION=//' | while IFS='|' read -r phase utc host n l1 l5 waited k; do
+		echo "| $phase | $utc | $host | $n | $l1 | $l5 | $waited | $k |"
+	done
+	echo
+	echo "- Load samples over the run (every 60 s, UTC): ${ha_samples:-none}; max load1 ${ha_max%%|*}, max load5 ${ha_max##*|}; samples above the admission bounds: ${ha_over:-not recorded}"
+	echo "- In-run excursions above the bounds are diagnostic evidence only and never excuse a slow valid trial. Load average divided by logical CPUs is not CPU utilisation and does not prove timing isolation (ruling Q8)."
 	echo
 	echo "## Coverage notes"
 	echo

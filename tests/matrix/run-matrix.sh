@@ -27,6 +27,15 @@
 #                            subset as incomplete evidence)
 #      BLZMCP_MATRIX_KEEP=1  leave the environments running afterwards (default: wp-env stop)
 #      BLZMCP_MATRIX_TZ      site timezone for every state (default Australia/Melbourne)
+#
+# Host admission (ruling Q8, REVIEW-pass4e; tests/matrix/host-admission.sh), always on, no switch:
+# the matrix refuses to start while a wp-env WordPress container runs on a host port outside the
+# states' own 8890-8901; a background sampler appends `<UTC> host= ncpu= load1= load5=` every 60 s
+# to $LOG_DIR/load-samples.txt for the whole run; before the first state and again immediately
+# before the performance phase it waits, sampling every 60 s inside this same run, until
+# load5 < 0.25 x N and load1 < 0.33 x N (N logical CPUs). It gives up after 12 hours with
+# HOST ADMISSION NOT REACHED and MATRIX FAILED. The ADMISSION lines, host identity and sample
+# statistics go into the summary; record.sh refuses the evidence without both admission lines.
 set -uo pipefail
 
 ZIP=${1:?usage: run-matrix.sh CANDIDATE.zip}
@@ -88,6 +97,47 @@ for f in $STORAGE_SUITES; do
 done
 fail=0
 FIRST_DATE=''
+# Host admission (ruling Q8). No other wp-env environment may run beside the matrix, then the
+# sampler starts and the host must be admitted before the first state.
+# shellcheck source=tests/matrix/host-admission.sh
+. "$REPO/tests/matrix/host-admission.sh"
+LOAD_SAMPLES_FILE="$LOG_DIR/load-samples.txt"
+ADMISSION_LINES=()
+HA_SAMPLER_PID=''
+trap 'ha_sampler_stop' EXIT
+trap 'ha_sampler_stop; exit 130' INT
+trap 'ha_sampler_stop; exit 143' TERM
+# Prints the refusal and returns 1 when another wp-env WordPress environment is running.
+foreign_wpenv_check() {
+	local found rc
+	found=$(ha_foreign_wpenv)
+	rc=$?
+	[ "$rc" -eq 0 ] && return 0
+	if [ "$rc" -eq 2 ]; then
+		echo "HOST ADMISSION REFUSED ($1): $found; the matrix cannot prove that no other wp-env environment is running"
+	else
+		echo "HOST ADMISSION REFUSED ($1): another wp-env WordPress environment is running: $found (container:host port)."
+		echo "  Ruling Q8: no other wp-env or matrix run of this repository may be active, including the owner's port-8888 environment; a separate checkout or port is not an exemption. Stop it (npx wp-env stop in its directory) and run the matrix again. Only the matrix states' own ports $HA_MATRIX_PORT_MIN-$HA_MATRIX_PORT_MAX are allowed."
+	fi
+	return 1
+}
+HA_N=$(ha_ncpu) || { echo "HOST ADMISSION NOT REACHED (start): the logical CPU count is unavailable"; echo "MATRIX FAILED"; exit 1; }
+HA_HOST=$(ha_identity "$HA_N")
+HA_BOUNDS=$(ha_bounds "$HA_N")
+echo "Host admission (ruling Q8): host|N|CPU|load source = $HA_HOST; admitted when load5 < ${HA_BOUNDS%% *} and load1 < ${HA_BOUNDS##* } (strict); samples every ${HA_INTERVAL_DEFAULT}s to $LOAD_SAMPLES_FILE"
+if ! foreign_wpenv_check start; then
+	echo "Logs: $LOG_DIR"
+	echo "MATRIX FAILED"
+	exit 1
+fi
+: >"$LOAD_SAMPLES_FILE"
+ha_sampler_start "$LOAD_SAMPLES_FILE" || { echo "HOST ADMISSION NOT REACHED (start): the load sampler could not start"; echo "MATRIX FAILED"; exit 1; }
+if ! ha_wait_admitted start "$LOAD_SAMPLES_FILE"; then
+	echo "Logs: $LOG_DIR"
+	echo "MATRIX FAILED"
+	exit 1
+fi
+ADMISSION_LINES+=("$HA_ADMISSION")
 # The HTTP suite's fail-closed safety checks prove themselves first, offline (REVIEW-pass4a R4):
 # injected HTTP 000/5xx/malformed replies, helper failures and leaked diagnostics must each fail.
 # Its summary goes into the evidence (HTTP_CHECKS); record.sh refuses a run without a clean one.
@@ -341,15 +391,28 @@ run_state() {
 			echo "FAIL  [$state] perf: Action Scheduler is on ${perf_store:-no store}, not ActionScheduler_DBStore, after the migration"
 			sadd FAILS "$state" 1
 		fi
-		if WPE="$WPE" BLZMCP_T="$T" BLZMCP_PERF_OUT="$PERF_FILE" BLZMCP_PERF_CANDIDATE="$ZIP" BLZMCP_PERF_REQUIRE_DBSTORE=1 \
-			BLZMCP_PERF_PORT="$port" BLZMCP_PERF_LOGIN=admin BLZMCP_PERF_APP_PASSWORD="$perf_secret" \
-			"$BASH" "$REPO/tests/matrix/perf-suite.sh" >"$LOG_DIR/$state-perf.log" 2>&1; then
-			echo "PASS  [$state] perf-suite.sh ($(grep -c '^partition' "$LOG_DIR/$state-perf.log") partitions under 1500 ms)"
-			sadd PASSES "$state" 1
+		# Ruling Q8: immediately before timing, no other wp-env environment and the host admitted
+		# (waiting here, sampling every 60 s, inside this same run). Not admitted within 12 hours:
+		# the performance phase is not run and the matrix fails; no completed trial is repeated.
+		local perf_admitted=0
+		if foreign_wpenv_check perf && ha_wait_admitted perf "$LOAD_SAMPLES_FILE"; then
+			perf_admitted=1
+			ADMISSION_LINES+=("$HA_ADMISSION")
 		else
-			echo "FAIL  [$state] perf-suite.sh (payment health cold budget; see payment-performance.json)"
-			grep -E '^(partition|FAIL|CLEANUP)' "$LOG_DIR/$state-perf.log" | head -10
+			echo "FAIL  [$state] perf: host admission (ruling Q8) not reached before timing; perf-suite.sh not run"
 			sadd FAILS "$state" 1
+		fi
+		if [ "$perf_admitted" -eq 1 ]; then
+			if WPE="$WPE" BLZMCP_T="$T" BLZMCP_PERF_OUT="$PERF_FILE" BLZMCP_PERF_CANDIDATE="$ZIP" BLZMCP_PERF_REQUIRE_DBSTORE=1 \
+				BLZMCP_PERF_PORT="$port" BLZMCP_PERF_LOGIN=admin BLZMCP_PERF_APP_PASSWORD="$perf_secret" \
+				"$BASH" "$REPO/tests/matrix/perf-suite.sh" >"$LOG_DIR/$state-perf.log" 2>&1; then
+				echo "PASS  [$state] perf-suite.sh ($(grep -c '^partition' "$LOG_DIR/$state-perf.log") partitions under 1500 ms)"
+				sadd PASSES "$state" 1
+			else
+				echo "FAIL  [$state] perf-suite.sh (payment health cold budget; see payment-performance.json)"
+				grep -E '^(partition|FAIL|CLEANUP)' "$LOG_DIR/$state-perf.log" | head -10
+				sadd FAILS "$state" 1
+			fi
 		fi
 		unset perf_secret
 		if [ -n "$perf_id" ] && ! wp eval-file "$T/matrix/credentials.php" app-password revoke admin "$perf_id" >/dev/null; then
@@ -395,6 +458,10 @@ for state in $STATES; do
 	[ "$(sget RESULT "$state" FAILED)" == PASSED ] || fail=1
 	echo "$state: $(sget RESULT "$state" 'NOT RUN') ($(sget PASSES "$state" 0) passed, $(sget FAILS "$state" 1) failed)"
 done
+# The sampler ran for the whole matrix; stop it before counting (ruling Q8).
+ha_sampler_stop
+read -r HA_COUNT HA_MAX1 HA_MAX5 HA_OVER <<<"$(ha_samples_stats "$LOAD_SAMPLES_FILE" "$HA_N")"
+echo "Host load (ruling Q8): $HA_COUNT samples, max load1 $HA_MAX1, max load5 $HA_MAX5, $HA_OVER above the admission bounds (diagnostic only)"
 {
 	echo "ZIP=$ZIP"
 	echo "ZIP_SHA256=$ZIP_SHA256"
@@ -403,6 +470,13 @@ done
 	echo "WINDOW_FILE=$(ls "$LOG_DIR"/*.window 2>/dev/null | head -1)"
 	echo "PERF_FILE=$PERF_FILE"
 	echo "HTTP_CHECKS=$HTTP_CHECKS"
+	echo "HOST=$HA_HOST"
+	for line in ${ADMISSION_LINES[@]+"${ADMISSION_LINES[@]}"}; do
+		echo "ADMISSION=$line"
+	done
+	echo "LOAD_SAMPLES=$HA_COUNT"
+	echo "LOAD_MAX=$HA_MAX1|$HA_MAX5"
+	echo "LOAD_OVER=$HA_OVER"
 	for state in $STATES; do
 		echo "STATE=$state|$(sget RESULT "$state" 'NOT RUN')|$(sget PASSES "$state" 0)|$(sget FAILS "$state" 1)|$(sget WPV "$state")|$(sget PHPV "$state")|$(sget VERSIONS "$state" '[]')"
 	done
