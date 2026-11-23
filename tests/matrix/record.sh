@@ -22,7 +22,11 @@ set -uo pipefail
 # (REQUIRED_STATES) has a STATE line that ran; every state except none has a STORAGE line for each
 # authority/sync combination and storage suite; the performance receipt (PERF_FILE) exists, is
 # bound to this zip's SHA-256 and has 5 complete trials for each storage/window/logger partition,
-# each under the 1500 ms budget, every one of them valid (seeded workload observed, all 4 readers
+# within its budget rule (ruling Q6, REVIEW-pass4c; decided here on the raw trials, never on the
+# receipt's own pass flags, maxima or rule labels: legacy/24h/db and legacy/168h/db need all 5
+# trials valid, at least 4 strictly below 1500 ms and none above 2000 ms; every other partition
+# needs all 5 valid and strictly below 1500 ms; no median, no pooling), the receipt's own verdict
+# all_pass true, every one of them valid (seeded workload observed, all 4 readers
 # at their expected counts), a detected forced orders/logs/jobs reader failure per storage, and
 # jobs timed on ActionScheduler_DBStore only, and a clean volume-fixture cleanup record (each
 # storage's before, diag-file, diag-db and after cleanups and a final one, nothing left behind,
@@ -65,6 +69,24 @@ GATE_STORAGE_ROWS=40
 GATE_TRANSPORT_ROWS=164
 STORAGE_COMBOS="hpos:no hpos:yes legacy:yes legacy:no"
 STORAGE_SUITES="test-payment-orders.php test-payment-health.php"
+# Ruling Q6 (REVIEW-pass4c): the recorder's own budget decision, from each partition's raw trials
+# only (never the receipt's pass, max_ms, rule or trials_ms fields). A trial is valid when it ran
+# ok with all 5 readers true and a numeric elapsed_ms. legacy/24h/db and legacy/168h/db: exactly 5
+# trials, all valid, at least 4 strictly below 1500 ms, none above 2000 ms. Every other partition:
+# exactly 5 trials, all valid and strictly below 1500 ms. No median, no pooling. Not overridable.
+Q6_JQ='def q6_rule($s; $l): if $s == "legacy" and $l == "db" then "4of5<1500,max<=2000" else "5of5<1500" end;
+	def q6_valid: .ok == true and ((.validation.readers // {}) | (keys == ["inventory", "jobs", "logs", "orders", "outside"]) and all(.[]; . == true)) and ((.elapsed_ms | type) == "number");
+	def q6_decide($r; $s; $w; $l):
+		(($r.trials // []) | map(select(.storage == $s and .window == $w and .logger == $l))) as $t
+		| ($t | map(select(q6_valid))) as $v
+		| ($v | map(select(.elapsed_ms < 1500)) | length) as $under
+		| ($v | map(.elapsed_ms) | max) as $vmax
+		| q6_rule($s; $l) as $rule
+		| {storage:$s, window:$w, logger:$l, rule:$rule, trials:($t | length), valid:($v | length), under:$under,
+		   max_ms:($t | map(.elapsed_ms | numbers) | max), trials_ms:($t | map(.elapsed_ms)),
+		   pass:(($t | length) == 5 and ($v | length) == 5
+			and (if $rule == "4of5<1500,max<=2000" then $under >= 4 and $vmax <= 2000 else $under == 5 end))};
+	def q6_all: . as $r | [("legacy", "hpos") as $s | (24, 168) as $w | ("file", "db") as $l | q6_decide($r; $s; $w; $l)];'
 PKG=blaze-mcp-toolkit-for-woocommerce
 mkdir -p "$OUT_DIR"
 
@@ -265,6 +287,9 @@ else
 		| (($r.trials // []) | map(select(.storage == $s and .window == $w and .logger == $l))) as $t
 		| ($t | map(select(.ok == true and ((.validation.readers // {}) | (keys == ["inventory", "jobs", "logs", "orders", "outside"]) and all(.[]; . == true))))) as $v
 		| select(($t | length) != 5 or ($v | length) != 5) | "\($s)/\($w)h/\($l) (\($v | length) of \($t | length) trials valid)"] | join(", ")' "$perf_file")
+	# Ruling Q6: the budget, decided on the raw trials (Q6_JQ), not the receipt's own pass or max_ms.
+	pbudget=$(jq -r "$Q6_JQ"' [q6_all[] | select(.pass != true)
+		| "\(.storage)/\(.window)h/\(.logger) (rule \(.rule): \(.under) of \(.trials) trials valid and under 1500 ms, \(.valid) valid, max \(.max_ms // "none") ms)"] | join(", ")' "$perf_file")
 	fmissing=$(jq -r '[("legacy", "hpos") as $s | ({l:"file", f:"logs"}, {l:"db", f:"logs"}, {l:"db", f:"orders"}, {l:"db", f:"jobs"}) as $p | . as $r
 		| (($r.forced_failures // []) | map(select(.storage == $s and .logger == $p.l and .force == $p.f))) as $f
 		| select(($f | length) != 1 or ($f | all(.ok == false and .detected == true)) != true) | "\($p.f) reader (\($s), \($p.l) logger)"] | join(", ")' "$perf_file")
@@ -315,8 +340,10 @@ else
 		incomplete+=("method-cap stress case missing or failed: $kmissing")
 	elif [ -n "$hmissing" ]; then
 		incomplete+=("performance receipt has no HTTP latency figure for: $hmissing")
-	elif [ "$(jq -r '.all_pass and ([.partitions[].max_ms] | all(. < 1500))' "$perf_file")" != true ]; then
-		incomplete+=("performance budget missed: $(jq -r '[.partitions[] | select(.max_ms >= 1500) | "\(.storage)/\(.window)h/\(.logger) \(.max_ms) ms"] | join(", ")' "$perf_file")")
+	elif [ -n "$pbudget" ]; then
+		incomplete+=("performance budget missed: $pbudget")
+	elif [ "$(jq -r '.all_pass == true' "$perf_file")" != true ]; then
+		incomplete+=("performance receipt verdict is not all_pass (perf-suite.sh failed)")
 	else
 		perf_ok=1
 	fi
@@ -391,13 +418,16 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 	echo "## Payment health cold performance"
 	echo
 	if [ -n "$perf_file" ] && [ -f "$perf_file" ]; then
-		echo "- Receipt SHA-256: \`$(shasum -a 256 "$perf_file" | awk '{print $1}')\`; budget $(jq -r '.budget_ms' "$perf_file") ms per partition (maximum of the trials); $(jq -r '.meaning' "$perf_file")"
+		echo "- Receipt SHA-256: \`$(shasum -a 256 "$perf_file" | awk '{print $1}')\`; budget $(jq -r '.budget_ms' "$perf_file") ms per trial; $(jq -r '.meaning' "$perf_file")"
+		echo "- Budget rule (ruling Q6, REVIEW-pass4c), decided by this recorder on each partition's own raw trials (no median, no pooling, the receipt's pass flags not trusted): legacy/24h/db and legacy/168h/db \`4of5<1500,max<=2000\` (all 5 trials valid, at least 4 strictly below 1500 ms, none above 2000 ms); every other partition \`5of5<1500\` (all 5 valid and strictly below 1500 ms). Receipt verdict all_pass: $(jq -r '.all_pass' "$perf_file")"
 		echo "- Seed: $(jq -r '"\(.seed.recent_orders) recent checkout orders over \(.seed.horizon_days) days + \(.seed.older_orders) older, methods \(.seed.methods | join(", ")); plus \(.seed.outside_orders // 0) excluded-origin orders counted separately across \((.seed.outside_methods // []) | length) methods (\((.seed.outside_methods // []) | join(", ")))"' "$perf_file")"
 		echo "- Verified per storage: $(jq -r '(.seed.storages // []) | map("\(.storage) checkout \(.verify.checkout // "?") + excluded-origin \(.verify.outside // "?"), ok \(.verify.ok // false)") | join("; ")' "$perf_file")"
 		echo
-		echo "| Storage | Window | Logger | Max ms | Trials (ms) | Warm max ms | Queries | Rows examined max | Rows selected max | Peak memory max (bytes) | Pass |"
-		echo "|---|---|---|---|---|---|---|---|---|---|---|"
-		jq -r '.partitions[] | "| \(.storage) | \(.window)h | \(.logger) | \(.max_ms) | \(.trials_ms | map(tostring) | join(", ")) | \(.warm_ms_max) | \(.queries | map(tostring) | join("/")) | \(.rows_examined_max) | \(.rows_selected_max) | \(.peak_memory_delta_bytes_max) | \(.pass) |"' "$perf_file"
+		echo "| Storage | Window | Logger | Max ms | Trials (ms) | Valid, under 1500 ms | Warm max ms | Queries | Rows examined max | Rows selected max | Peak memory max (bytes) | Rule | Pass (recorder) | Pass (receipt) |"
+		echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+		jq -r "$Q6_JQ"' . as $r | q6_all[] as $d
+			| ((($r.partitions // []) | map(select(.storage == $d.storage and .window == $d.window and .logger == $d.logger)))[0] // {}) as $p
+			| "| \($d.storage) | \($d.window)h | \($d.logger) | \($d.max_ms) | \($d.trials_ms | map(tostring) | join(", ")) | \($d.valid) of \($d.trials), \($d.under) under | \($p.warm_ms_max) | \(($p.queries // []) | map(tostring) | join("/")) | \($p.rows_examined_max) | \($p.rows_selected_max) | \($p.peak_memory_delta_bytes_max) | \($d.rule) | \($d.pass) | \($p.pass) |"' "$perf_file"
 		echo
 		echo "- Method-cap stress cases (own assertions, not performance trials): $(jq -r '(.cap_cases // []) | map("\(.storage) \(.distinct_ids) IDs: listed \(.listed), methods_truncated \(.methods_truncated), inventory \(.inventory_coverage), \(if .ok then "passed" else "FAILED" end) (\(.elapsed_ms) ms)") | join("; ") | if . == "" then "none" else . end' "$perf_file")"
 		echo

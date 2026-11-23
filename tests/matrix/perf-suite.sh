@@ -30,8 +30,14 @@
 # once each and must be reported as failed and detected, or the suite fails: a broken reader can
 # never be a fast success.
 #
+# Budget (ruling Q6, REVIEW-pass4c), decided per partition on its own 5 raw trials, never a
+# median and never pooled across partitions or runs: the legacy DB-logger partitions (legacy/24h/db
+# and legacy/168h/db) pass when all 5 trials are valid, at least 4 are strictly below 1500 ms and
+# none is above 2000 ms (rule "4of5<1500,max<=2000"); every other partition needs every trial
+# valid and strictly below 1500 ms (rule "5of5<1500"). Each partition records its rule.
+#
 # Writes BLZMCP_PERF_OUT (JSON): every trial with its validation, the per-partition maximum as
-# payment_health_cold_ms, the 1500 ms budget verdict, the forced-failure probes, warm timings,
+# payment_health_cold_ms, the budget verdict and rule per partition, the forced-failure probes, warm timings,
 # query counts, plans, memory, versions, the seed distribution and the container limits. The
 # original order storage is restored and every fixture row removed on every exit. Each fixture
 # cleanup (before and after each storage, after each logger's diagnostics, and a final one) and
@@ -64,6 +70,10 @@ STORAGES=${BLZMCP_PERF_STORAGES:-legacy hpos}
 EXACT_JOBS=${BLZMCP_PERF_REQUIRE_DBSTORE:-0}
 [ "$EXACT_JOBS" == 1 ] || EXACT_JOBS=0
 BUDGET=1500
+# Ruling Q6 (REVIEW-pass4c): only the legacy DB-logger partitions (24h and 168h) use 4 of 5.
+HARD_MAX=2000
+RULE_4OF5='4of5<1500,max<=2000'
+RULE_5OF5='5of5<1500'
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-perf.XXXXXX")
 SEED="$T/matrix/seed-payment-volume.php"
 MEASURE="$T/matrix/measure-payment-health.php"
@@ -273,7 +283,7 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 	--slurpfile forced "$WORK/forced.jsonl" --argjson exact_jobs "$EXACT_JOBS" --slurpfile cap "$WORK/cap.jsonl" --argjson outside "$OUTSIDE" \
 	--slurpfile cleanup "$WORK/cleanup.jsonl" --argjson restore "$restore_json" \
 	--argjson limits "${limits:-null}" --argjson dist "${dist:-null}" --argjson cand "$cand_sha" \
-	--argjson budget "$BUDGET" --argjson trials_n "$TRIALS" --argjson recent "$RECENT" --argjson old "$OLD" --arg storages "$STORAGES" '
+	--argjson budget "$BUDGET" --argjson hard_max "$HARD_MAX" --arg rule_4of5 "$RULE_4OF5" --arg rule_5of5 "$RULE_5OF5" --argjson trials_n "$TRIALS" --argjson recent "$RECENT" --argjson old "$OLD" --arg storages "$STORAGES" '
 	def key: "\(.storage)/\(.window)h/\(.logger)";
 	($storages | split(" ") | map(select(. != ""))) as $st
 	| [ $st[] as $s | (24, 168) as $w | ("file", "db") as $l | {storage:$s, window:$w, logger:$l} ] as $want
@@ -298,13 +308,23 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 			rows_examined_max: ($t | map(.rows_examined // null) | max),
 			rows_selected_max: ($t | map(.rows_selected // null) | max),
 			peak_memory_delta_bytes_max: ($t | map(.peak_memory_delta_bytes // 0) | max),
-			complete: (($t | length) == $trials_n and ($t | map(select(.ok != true)) | length) == 0)
-		} | . + {pass: (.complete and .max_ms < $budget)})) as $parts
+			complete: (($t | length) == $trials_n and ($t | map(select(.ok != true)) | length) == 0),
+			# Ruling Q6 (REVIEW-pass4c): decided on the raw trials of this partition only.
+			rule: (if $p.storage == "legacy" and $p.logger == "db" then $rule_4of5 else $rule_5of5 end),
+			valid_timed_trials: ($t | map(select(.ok == true and (.elapsed_ms | type) == "number")) | length),
+			trials_under_budget: ($t | map(select(.ok == true and (.elapsed_ms | type) == "number" and .elapsed_ms < $budget)) | length)
+		} | . + {pass: (.complete and .valid_timed_trials == ($t | length)
+			and (if .rule == $rule_4of5
+				then ($t | length) == 5 and .trials_under_budget >= 4 and .max_ms <= $hard_max
+				else .trials_under_budget == ($t | length) and .max_ms < $budget end))})) as $parts
 	| {
 		schema: "blzmcp-payment-performance/2",
 		measured_at_utc: (now | todate),
 		candidate_sha256: $cand,
 		budget_ms: $budget,
+		hard_max_ms: $hard_max,
+		budget_rules: {default: $rule_5of5, "legacy/24h/db": $rule_4of5, "legacy/168h/db": $rule_4of5},
+		budget_rule_meaning: "ruling Q6 (REVIEW-pass4c): legacy DB-logger partitions pass with all 5 trials valid, at least 4 strictly below \($budget) ms and none above \($hard_max) ms; every other partition needs every trial valid and strictly below \($budget) ms; decided per partition on its own raw trials (no median, no pooling across partitions or runs)",
 		meaning: "application-cache cold (toolkit result cache cleared per trial, fresh PHP request); not a claim about cold OS or database buffers",
 		validity: "a trial counts only with the seeded workload observed and every reader (orders, inventory, logs, jobs) at its expected success and counts; partial only for documented bounds (log log_row_cap/byte_cap/file_cap, matched by their public reason text; sampled jobs only where the exact store is not required)",
 		exact_jobs_required: ($exact_jobs == 1),
@@ -335,7 +355,7 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 		trials: $trials
 	}' >"$OUT"
 verdict=$(jq -r '.all_pass' "$OUT" 2>/dev/null)
-jq -r '.partitions[] | "partition \(.storage) \(.window)h \(.logger): max \(.max_ms) ms over \(.trials_ms | length) trials (\(.trials_ms | map(tostring) | join(", "))), warm max \(.warm_ms_max) ms, invalid trials \(.failed_trials), pass \(.pass)"' "$OUT"
+jq -r '.partitions[] | "partition \(.storage) \(.window)h \(.logger): rule \(.rule), max \(.max_ms) ms over \(.trials_ms | length) trials (\(.trials_ms | map(tostring) | join(", "))), under budget \(.trials_under_budget), warm max \(.warm_ms_max) ms, invalid trials \(.failed_trials), pass \(.pass)"' "$OUT"
 jq -r '.forced_failure_checks[] | "forced \(.force)-reader failure \(.storage) \(.logger): probes \(.probes), detected \(.detected)"' "$OUT"
 jq -r '.cap_checks[] | "cap \(.distinct_ids) distinct outside IDs \(.storage): runs \(.runs), ok \(.ok)"' "$OUT"
 echo "jobs store: $(jq -r '.jobs_path' "$OUT")"
