@@ -2,7 +2,7 @@
 Contributors: blazecommerce
 Tags: woocommerce, mcp, ai, analytics, store health
 Requires at least: 6.9
-Tested up to: 7.1
+Tested up to: 7.2
 Requires PHP: 8.1
 Stable tag: 1.2.1
 License: GPLv3 or later
