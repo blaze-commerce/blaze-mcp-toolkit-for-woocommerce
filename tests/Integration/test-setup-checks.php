@@ -449,6 +449,7 @@ blzmcp_it_assert( $never >= 7, 'blaze and wc-analytics abilities were checked' )
 blzmcp_it_equals( true, SetupChecks::is_pii_name( 'ewpa/wc-get-customers' ), 'wc-get-customers is on the PII list' );
 blzmcp_it_equals( true, SetupChecks::is_pii_name( 'ewpa/get-comments' ), 'get-comments is on the PII list' );
 blzmcp_it_equals( false, SetupChecks::is_pii_name( 'blaze-mcp-toolkit/store-profile' ), 'our tools are not on the PII list' );
+blzmcp_it_equals( true, SetupChecks::is_pii_name( 'core/users-query' ), 'core/users-query (WordPress 7.2) is on the PII list' );
 blzmcp_it_equals( 'pass', SetupChecks::result( 'x', 'pass', 'Label' )['status'], 'result() is public and builds a row' );
 
 // ---------------------------------------------------------------------------------------------
@@ -493,6 +494,21 @@ try {
 		update_option( 'ewpa_thirdparty_disabled', array( 'woocommerce/orders-query', 'ewpa/wc-get-customers' ) );
 		$by = array_column( SetupChecks::run(), null, 'id' );
 		blzmcp_it_assert( ! str_contains( $by['pii_tools']['fix'], 'ewpa/wc-get-customers' ) && ! str_contains( $by['pii_tools']['fix'], 'woocommerce/orders-query' ), 'denylisted tools are not flagged' );
+
+		// WordPress 7.2: core/users-query sets only the `public` meta and MCP Adapter serves it, so the
+		// PII row names it under the adapter's exposure rule; denylisting it removes it. On 7.1 it does
+		// not exist and nothing changes.
+		if ( function_exists( 'wp_has_ability' ) && wp_has_ability( 'core/users-query' ) && class_exists( '\WP\MCP\Abilities\McpAbilityExposure' ) ) {
+			$uq_public = (bool) \WP\MCP\Abilities\McpAbilityExposure::is_public( wp_get_ability( 'core/users-query' ) );
+			update_option( 'ewpa_thirdparty_disabled', array() );
+			$by = array_column( SetupChecks::run(), null, 'id' );
+			blzmcp_it_equals( $uq_public, str_contains( $by['pii_tools']['fix'], 'core/users-query' ), 'core/users-query is flagged exactly when MCP Adapter exposes it (WordPress 7.2)' );
+			update_option( 'ewpa_thirdparty_disabled', array( 'core/users-query' ) );
+			$by = array_column( SetupChecks::run(), null, 'id' );
+			blzmcp_it_assert( ! str_contains( $by['pii_tools']['fix'], 'core/users-query' ), 'denylisted core/users-query is not flagged (WordPress 7.2)' );
+		} else {
+			echo "NOTE  core/users-query not registered (WordPress before 7.2): its PII row check is not applicable\n";
+		}
 
 		// A denylisted wc-analytics tool makes tools_visible warn.
 		update_option( 'ewpa_thirdparty_disabled', array( 'wc-analytics/totals' ) );
