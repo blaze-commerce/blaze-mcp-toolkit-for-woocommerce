@@ -20,8 +20,9 @@ defined( 'ABSPATH' ) || exit;
 final class RecommendedConnector implements Connector {
 
 	/**
-	 * Customer list and order-detail tools from Enable Abilities and WooCommerce core. These return
-	 * customer names, emails and addresses.
+	 * Customer list and order-detail tools from Enable Abilities, WooCommerce core and WordPress
+	 * core. These return customer names, emails and addresses. core/users-query (WordPress 7.2)
+	 * returns user emails, usernames and names on request, and customers are users.
 	 */
 	private const PII_ABILITIES = array(
 		'ewpa/wc-get-customers',
@@ -31,6 +32,7 @@ final class RecommendedConnector implements Connector {
 		'ewpa/get-comments',
 		'ewpa/obtener-usuarios',
 		'woocommerce/orders-query',
+		'core/users-query',
 	);
 
 	/**
@@ -288,6 +290,11 @@ final class RecommendedConnector implements Connector {
 	 * Ours (blaze-mcp-toolkit/*) and the adapter's own tools are left out. Enable Abilities only
 	 * registers its own ewpa/* abilities when enabled, so registered means enabled.
 	 *
+	 * MCP-public is MCP Adapter's own rule when it is loaded: an explicit `mcp.public`, else the
+	 * ability's `public` meta. WordPress 7.2's core/users-query, core/settings-get and
+	 * core/content-query set only `public`, and the adapter serves them. Without the adapter, the
+	 * ability's `mcp.public` meta.
+	 *
 	 * @return array<string, \WP_Ability>
 	 */
 	private function exposed_abilities(): array {
@@ -296,14 +303,20 @@ final class RecommendedConnector implements Connector {
 		}
 
 		$denylist = self::denylist();
+		$adapter  = class_exists( '\WP\MCP\Abilities\McpAbilityExposure' );
 		$out      = array();
 		foreach ( wp_get_abilities() as $ability ) {
 			$name = $ability->get_name();
 			if ( str_starts_with( $name, Registrar::CATEGORY . '/' ) || str_starts_with( $name, 'mcp-adapter/' ) || in_array( $name, $denylist, true ) ) {
 				continue;
 			}
-			$meta = $ability->get_meta();
-			if ( empty( $meta['mcp']['public'] ) ) {
+			if ( $adapter ) {
+				$public = (bool) \WP\MCP\Abilities\McpAbilityExposure::is_public( $ability );
+			} else {
+				$meta   = $ability->get_meta();
+				$public = ! empty( $meta['mcp']['public'] );
+			}
+			if ( ! $public ) {
 				continue;
 			}
 			$out[ $name ] = $ability;
