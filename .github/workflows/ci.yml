@@ -55,7 +55,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [ min, current ]
+        # min: the oldest supported stack. current: the pinned release stack (WordPress 7.1.5).
+        # next: the WordPress pre-release (7.2-RC3), so 7.2-only code paths run before 7.2 ships.
+        env: [ min, current, next ]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -67,7 +69,7 @@ jobs:
           tools: composer:v2
       - run: composer install --prefer-dist --no-interaction
       - run: npm install
-      - run: if [ "${{ matrix.env }}" = "min" ]; then cp .wp-env.min.json .wp-env.override.json; fi
+      - run: if [ "${{ matrix.env }}" != "current" ]; then cp ".wp-env.${{ matrix.env }}.json" .wp-env.override.json; fi
       - run: npx wp-env start
       - run: npx wp-env run cli wp plugin activate woocommerce mcp-adapter enable-abilities-for-mcp plugin-check blaze-mcp-toolkit-for-woocommerce
       # The canonical runner: every test file with BLZMCP_SKIP_HTTP=1 in the container, the
@@ -76,8 +78,9 @@ jobs:
       - name: Integration tests
         shell: bash
         env:
-          # The 1.0 setup-rows fixture is bound to the pinned current environment; not applicable on min.
-          BLZMCP_FIXTURE_ENV: ${{ matrix.env == 'min' && 'min' || '' }}
+          # The 1.0 setup-rows fixture is bound to the pinned current environment: not applicable on
+          # min; on next it is compared with the WordPress 7.2 allowance (tests/Integration/test-setup-checks.php).
+          BLZMCP_FIXTURE_ENV: ${{ matrix.env != 'current' && matrix.env || '' }}
         run: bash scripts/run-integration.sh
       - name: Plugin Check (built zip)
         shell: bash
@@ -88,7 +91,7 @@ jobs:
           # Written as the whole config (not an override): wp-env merges override mappings into
           # the base ones, which would keep the dev-tree mapping.
           base=.wp-env.json
-          if [ "${{ matrix.env }}" = "min" ]; then base=.wp-env.min.json; fi
+          if [ "${{ matrix.env }}" != "current" ]; then base=".wp-env.${{ matrix.env }}.json"; fi
           jq '.plugins |= map(if . == "." then "./dist/blaze-mcp-toolkit-for-woocommerce" else . end) | .mappings = {}' "$base" > "$RUNNER_TEMP/wp-env.json"
           mv "$RUNNER_TEMP/wp-env.json" .wp-env.json
           rm -f .wp-env.override.json
