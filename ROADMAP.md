@@ -2,10 +2,7 @@
 
 Blaze MCP Toolkit for WooCommerce ships as a release train: small releases, each answering one question a store owner asks their AI assistant. This page lists what has shipped, what is next, and what is waiting.
 
-Work is tracked on GitHub:
-
-- [Project board](https://github.com/orgs/blaze-commerce/projects/6): Backlog, Next release, In progress, Done.
-- [Milestones](https://github.com/blaze-commerce/blaze-mcp-toolkit-for-woocommerce/milestones): one per release, plus Backlog for accepted work that has no release yet.
+Work is tracked in GitHub [milestones](https://github.com/blaze-commerce/blaze-mcp-toolkit-for-woocommerce/milestones): one per release, plus Backlog for accepted work that has no release yet.
 
 ## How a release is scoped
 
