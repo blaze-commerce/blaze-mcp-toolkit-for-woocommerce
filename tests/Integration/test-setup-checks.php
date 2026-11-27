@@ -6,6 +6,8 @@
  * Run: npx wp-env run cli wp eval-file wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration/test-setup-checks.php
  * Modes (scripts/run-integration.sh runs each):
  * - default wp-env: the recommended state; compared with tests/fixtures/setup-checks-1.0.json.
+ *   BLZMCP_FIXTURE_ENV=min (CI's minimum-versions job): the fixture comparison is not applicable.
+ *   BLZMCP_FIXTURE_ENV=next (CI's WordPress 7.2 pre-release job): compared with the 7.2 allowance.
  * - Easy MCP stub (`both`): add --require=…/tests/Integration/stub-easymcp.php before eval-file;
  *   also add --require=…/tests/Integration/stub-easymcp-toolstate.php for a Tool_State whose
  *   resolve() answers from a test global.
@@ -195,7 +197,34 @@ if ( 'recommended' === $state && ! $denylist ) {
 		list( $bound_inputs, $required ) = $bind( $fixture_inputs, $live_wc );
 		blzmcp_it_assert( array() === array_diff( $required, (array) ( $now['abilities'] ?? array() ) ), 'recommended: abilities added since 1.0 are registered on WooCommerce ' . ( $live_wc ?? '?' ) . ' (' . implode( ', ', $required ) . ')' );
 		$changed = $changed_keys( $bound_inputs, $now );
-		if ( $changed && 'min' === getenv( 'BLZMCP_FIXTURE_ENV' ) ) {
+		if ( 'next' === getenv( 'BLZMCP_FIXTURE_ENV' ) ) {
+			// CI's WordPress pre-release job (7.2-RC3). The 1.0 fixture was captured on 7.1.5, so the
+			// 7.2 binding allows exactly the WordPress version, 7.2's three new core abilities and the
+			// abilities of the active theme (7.2's bundled default theme, ipsum, registers
+			// ipsum/get-design-guide), and the only row change allowed is core/users-query in the PII row
+			// (issue #14). Any other drift fails.
+			$wp72_core               = array( 'core/content-query', 'core/settings-get', 'core/users-query' );
+			$wp72_theme              = array_values( array_filter( (array) ( $now['abilities'] ?? array() ), static fn( $n ) => str_starts_with( (string) $n, get_stylesheet() . '/' ) ) );
+			$wp72_bound              = $bound_inputs;
+			$wp72_bound['wordpress'] = $now['wordpress'] ?? null;
+			$wp72_bound['abilities'] = array_values( array_unique( array_merge( (array) ( $bound_inputs['abilities'] ?? array() ), $wp72_core, $wp72_theme ) ) );
+			sort( $wp72_bound['abilities'] );
+			blzmcp_it_assert( version_compare( (string) ( $now['wordpress'] ?? '' ), '7.2-alpha', '>=' ), 'next: running on WordPress 7.2 or later (' . ( $now['wordpress'] ?? '?' ) . ')' );
+			$wp72_changed = $changed_keys( $wp72_bound, $now );
+			$wp72_extra   = array_diff( (array) ( $now['abilities'] ?? array() ), $wp72_bound['abilities'] );
+			$wp72_missing = array_diff( $wp72_bound['abilities'], (array) ( $now['abilities'] ?? array() ) );
+			blzmcp_it_assert( array() === $wp72_changed, 'next: inputs differ from the 1.0 fixture only by the WordPress version, ' . implode( ', ', $wp72_core ) . ' and the theme\'s abilities (' . ( $wp72_theme ? implode( ', ', $wp72_theme ) : 'none' ) . '); changed: ' . ( $wp72_changed ? implode( ', ', $wp72_changed ) : 'none' ) . '; extra abilities: ' . ( $wp72_extra ? implode( ', ', $wp72_extra ) : 'none' ) . '; missing: ' . ( $wp72_missing ? implode( ', ', $wp72_missing ) : 'none' ) );
+			if ( ! $wp72_changed ) {
+				$current = array_values( array_filter( blzmcp_fx_rows( SetupChecks::run() ), static fn( $r ) => 'connection' !== $r['id'] ) );
+				$pii_at  = array_search( 'pii_tools', array_column( $current, 'id' ), true );
+				$pii_fix = false === $pii_at ? '' : (string) $current[ $pii_at ]['fix'];
+				blzmcp_it_assert( str_contains( $pii_fix, 'core/users-query' ), 'next: the PII row names core/users-query on WordPress 7.2' );
+				if ( false !== $pii_at ) {
+					$current[ $pii_at ]['fix'] = str_replace( array( ', core/users-query', 'core/users-query, ' ), '', $pii_fix );
+				}
+				blzmcp_it_equals( $fixture['rows'], $current, 'next: rows minus connection equal the 1.0 fixture apart from core/users-query in the PII row' );
+			}
+		} elseif ( $changed && 'min' === getenv( 'BLZMCP_FIXTURE_ENV' ) ) {
 			// CI minimum-versions job only: the fixture is bound to the pinned current environment.
 			echo 'NOTE  1.0 fixture comparison not applicable in the minimum-versions environment (fixture captured on WooCommerce ' . ( $fixture['_inputs']['plugins']['woocommerce/woocommerce.php'] ?? '?' ) . ")\n";
 		} elseif ( $changed ) {
@@ -449,6 +478,7 @@ blzmcp_it_assert( $never >= 7, 'blaze and wc-analytics abilities were checked' )
 blzmcp_it_equals( true, SetupChecks::is_pii_name( 'ewpa/wc-get-customers' ), 'wc-get-customers is on the PII list' );
 blzmcp_it_equals( true, SetupChecks::is_pii_name( 'ewpa/get-comments' ), 'get-comments is on the PII list' );
 blzmcp_it_equals( false, SetupChecks::is_pii_name( 'blaze-mcp-toolkit/store-profile' ), 'our tools are not on the PII list' );
+blzmcp_it_equals( true, SetupChecks::is_pii_name( 'core/users-query' ), 'core/users-query (WordPress 7.2) is on the PII list' );
 blzmcp_it_equals( 'pass', SetupChecks::result( 'x', 'pass', 'Label' )['status'], 'result() is public and builds a row' );
 
 // ---------------------------------------------------------------------------------------------
@@ -493,6 +523,27 @@ try {
 		update_option( 'ewpa_thirdparty_disabled', array( 'woocommerce/orders-query', 'ewpa/wc-get-customers' ) );
 		$by = array_column( SetupChecks::run(), null, 'id' );
 		blzmcp_it_assert( ! str_contains( $by['pii_tools']['fix'], 'ewpa/wc-get-customers' ) && ! str_contains( $by['pii_tools']['fix'], 'woocommerce/orders-query' ), 'denylisted tools are not flagged' );
+
+		// WordPress 7.2: core/users-query sets only the `public` meta and MCP Adapter serves it, so the
+		// PII row names it under the adapter's exposure rule; denylisting it removes it. On 7.1 it does
+		// not exist and nothing changes.
+		if ( function_exists( 'wp_has_ability' ) && wp_has_ability( 'core/users-query' ) && class_exists( '\WP\MCP\Abilities\McpAbilityExposure' ) ) {
+			$uq_public = (bool) \WP\MCP\Abilities\McpAbilityExposure::is_public( wp_get_ability( 'core/users-query' ) );
+			update_option( 'ewpa_thirdparty_disabled', array() );
+			$by = array_column( SetupChecks::run(), null, 'id' );
+			blzmcp_it_equals( $uq_public, str_contains( $by['pii_tools']['fix'], 'core/users-query' ), 'core/users-query is flagged exactly when MCP Adapter exposes it (WordPress 7.2)' );
+			update_option( 'ewpa_thirdparty_disabled', array( 'core/users-query' ) );
+			$by = array_column( SetupChecks::run(), null, 'id' );
+			blzmcp_it_assert( ! str_contains( $by['pii_tools']['fix'], 'core/users-query' ), 'denylisted core/users-query is not flagged (WordPress 7.2)' );
+			if ( 'next' === getenv( 'BLZMCP_FIXTURE_ENV' ) ) {
+				blzmcp_it_assert( $uq_public, 'next: MCP Adapter exposes core/users-query on WordPress 7.2, so the flagged case is the one tested' );
+			}
+		} elseif ( 'next' === getenv( 'BLZMCP_FIXTURE_ENV' ) ) {
+			// CI's WordPress 7.2 job must run the check above, never skip it.
+			blzmcp_it_assert( false, 'next: core/users-query and MCP Adapter are registered on WordPress 7.2' );
+		} else {
+			echo "NOTE  core/users-query not registered (WordPress before 7.2): its PII row check is not applicable\n";
+		}
 
 		// A denylisted wc-analytics tool makes tools_visible warn.
 		update_option( 'ewpa_thirdparty_disabled', array( 'wc-analytics/totals' ) );
