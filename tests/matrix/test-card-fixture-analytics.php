@@ -86,7 +86,7 @@ function blzmcp_cfa_clean( string $label ): void {
 
 $hook = blzmcp_cardfx_import_hook();
 blzmcp_it_assert( '' !== $hook, "WooCommerce's per-order Analytics import hook is known ($hook)" );
-$batch_mode = method_exists( OrdersScheduler::class, 'is_scheduled_import_enabled' ) && OrdersScheduler::is_scheduled_import_enabled();
+$batch_mode = is_callable( array( OrdersScheduler::class, 'is_scheduled_import_enabled' ) ) && OrdersScheduler::is_scheduled_import_enabled(); // Private in WooCommerce 10.9.0, public in 11.3.1.
 echo 'NOTE  WooCommerce Analytics import mode: ' . ( $batch_mode ? 'scheduled batches' : 'per-order jobs' ) . "\n";
 
 // 1. Prime the guard's cache with a clean probe of the fixture's window (nothing seeded yet).
