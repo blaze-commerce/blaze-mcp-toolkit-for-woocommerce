@@ -9,8 +9,8 @@
  * (@package WooCommerce\Claude). Licensed GPL-3.0-or-later.
  *
  * Modified by Blaze Commerce: delivered as a tool returning instructions plus ordered steps instead
- * of an MCP prompt; payment health first, then order totals (Analytics check); update history and
- * site health steps over the drop window.
+ * of an MCP prompt; payment health first, then the card-testing check, then order totals (Analytics
+ * check); update history and site health steps over the drop window.
  *
  * @package Blaze\McpToolkit
  */
@@ -44,7 +44,7 @@ final class RevenueDropTriage extends AbstractWorkflow {
 	 * Description the AI reads in ability discovery.
 	 */
 	protected static function description(): string {
-		return __( 'Revenue drop triage: diagnose WooCommerce revenue drops by separating order volume, AOV, customers, refunds, products, channels, and next merchant actions. Use this first when the merchant asks why sales or revenue are down, dropped or slow, or whether there is a real drop. Returns a plan, not data: instructions plus an ordered list of other tools to run with their arguments, starting with a payment health check and including recent plugin or theme updates and site errors over the same window. Run the steps, then write the triage. Read-only.', 'blaze-mcp-toolkit-for-woocommerce' );
+		return __( 'Revenue drop triage: diagnose WooCommerce revenue drops by separating order volume, AOV, customers, refunds, products, channels, and next merchant actions. Use this first when the merchant asks why sales or revenue are down, dropped or slow, or whether there is a real drop. Returns a plan, not data: instructions plus an ordered list of other tools to run with their arguments, starting with a payment health check and then a card-testing check, and including recent plugin or theme updates and site errors over the same window. Run the steps, then write the triage. Read-only.', 'blaze-mcp-toolkit-for-woocommerce' );
 	}
 
 	/**
@@ -56,6 +56,7 @@ final class RevenueDropTriage extends AbstractWorkflow {
 	protected static function plan( string $period ): array {
 		return array(
 			self::payment_health_step( $period ),
+			self::card_testing_step( $period ),
 			self::step(
 				'wc-analytics/totals',
 				array(
@@ -144,13 +145,14 @@ final class RevenueDropTriage extends AbstractWorkflow {
 				'',
 				'Use the tools quietly. If you need a progress sentence before the final answer, say only: "I\'ll compare the period with the previous one and separate volume, basket size, refunds, products, and channels." Do not tell the merchant you are loading schemas, loading tools, selecting tools, calling tools, using a connector, or constructing filters.',
 				'',
-				'Required data: the steps read payment health, order, revenue, customer and refund totals (all compared with the previous period), the store profile, the top eight products, the channel mix, and recent updates and site errors over the same window.',
+				'Required data: the steps read payment health, the card-testing check, order, revenue, customer and refund totals (all compared with the previous period), the store profile, the top eight products, the channel mix, and recent updates and site errors over the same window.',
 				'Optional only if it supports a claim you will make: revenue by country for regional shifts ({tool:wc-analytics/breakdown} with subject=revenue, dimension=country), revenue by payment method for gateway/pipeline signals (subject=revenue, dimension=payment_method), or coupons if discounting/campaign cost is central (subject=coupons, dimension=code). Use the same period and compare=true.',
 				'',
 				'Rules:',
-				'- Payment health comes first. If it returned red or amber findings, open with them: a payment method that stopped taking orders or a rise in unpaid checkouts can be part of a drop, but call it a possible link, not a proven cause. An unknown payment check is a gap to mention, never a sign that payments are fine. Its counts are orders accepted at checkout, not collected revenue. A payment method marked inventory_only was not assessed: mention it as a method to confirm, never as a cause of the drop, a lost sale or money at risk.',
-				'- If Analytics figures are unavailable, say so plainly, make no claim about whether revenue dropped, and still report the payment, update and site error findings.',
-				'- After any payment findings, lead with collected revenue: paid orders, net of refunds. Keep pending/on-hold revenue separate and never describe it as lost revenue.',
+				'- Card testing and payment health come first. If the card-testing check returned a likely or possible result, open with it, as the CARD TESTING CHECK above says. Never call card testing a cause of the drop, and never judge card testing from failed or paid order figures: only the card-testing check\'s verdict says whether failed orders look like card testing.',
+				'- Then, if payment health returned red or amber findings, report them: a payment method that stopped taking orders or a rise in unpaid checkouts can be part of a drop, but call it a possible link, not a proven cause. An unknown card-testing or payment check is a gap to mention, never a sign that checkout or payments are fine. Payment health counts are orders accepted at checkout, not collected revenue. A payment method marked inventory_only was not assessed: mention it as a method to confirm, never as a cause of the drop, a lost sale or money at risk.',
+				'- If Analytics figures are unavailable, say so plainly, make no claim about whether revenue dropped, and still report the card-testing, payment, update and site error findings.',
+				'- After any card-testing and payment findings, lead with collected revenue: paid orders, net of refunds. Keep pending/on-hold revenue separate and never describe it as lost revenue.',
 				'- First decide whether there is a real drop. If collected revenue is flat or up versus the comparison, say so plainly and pivot to softer underlying signals instead of forcing a decline narrative.',
 				'- Separate the levers: order volume, average order value, customer count/mix, refunds, pending pipeline, product mix, and channel mix.',
 				'- Use returned comparison fields for movement. Do not hand-calculate deltas, percentages, shares, averages, or ratios unless the exact field is present.',
@@ -180,7 +182,7 @@ final class RevenueDropTriage extends AbstractWorkflow {
 				'',
 				'#### 1. Snapshot',
 				'',
-				'Two or three sentences. If payment health returned red or amber findings, open with them. Then cover collected revenue movement, order count, average order value, customers, and whether the headline is truly a drop. If revenue is not down, say that clearly.',
+				'Two or three sentences. If the card-testing check returned a likely or possible result, open with it. If payment health returned red or amber findings, report them next. Then cover collected revenue movement, order count, average order value, customers, and whether the headline is truly a drop. If revenue is not down, say that clearly.',
 				'',
 				'#### 2. Severity',
 				'',

@@ -219,6 +219,16 @@ if ( $payment instanceof \WP_Ability ) {
 	blzmcp_av_easy( $payment, false, Availability::DISABLED_HERE, 'easy: payment-health not ticked on a 1.1 install', 'not ticked in Easy MCP AI › Tools › Abilities' );
 }
 
+// Card testing (new in 1.3) on an existing install: public through the recommended connector, and
+// off and diagnosed as not ticked in Easy MCP AI until the owner ticks it (never ticked for them).
+$card = wp_has_ability( 'blaze-mcp-toolkit/card-testing' ) ? wp_get_ability( 'blaze-mcp-toolkit/card-testing' ) : null;
+blzmcp_it_assert( $card instanceof \WP_Ability, 'card-testing is registered' );
+if ( $card instanceof \WP_Ability ) {
+	blzmcp_it_equals( true, $rec->is_exposed( $card ), 'recommended: card-testing exposed' );
+	blzmcp_it_equals( null, $rec->diagnose( 'blaze-mcp-toolkit/card-testing' ), 'recommended: card-testing has no diagnosis without a denylist entry' );
+	blzmcp_av_easy( $card, false, Availability::DISABLED_HERE, 'easy: card-testing not ticked on a 1.2 install', 'not ticked in Easy MCP AI › Tools › Abilities' );
+}
+
 if ( $real_toolstate ) {
 	// Real Easy MCP AI: on by default once ticked; switched off through its disabled-tools list.
 	blzmcp_av_easy( $health, true, null, 'real easy: ticked, on by default' );

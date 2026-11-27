@@ -1,0 +1,382 @@
+{
+  "schema_version": 1,
+  "rule_version": 1,
+  "purpose": "Synthetic order patterns for the card-testing rules (FEATURE-PLAN item 3, contract C5). Each vector is expanded into compact order rows, folded by the real CardTestingOrders accumulator and evaluated by CardTestingRules. All values are invented test shapes, never store data. IP addresses are documentation and private ranges only.",
+  "now": 1795000000,
+  "generator": {
+    "fields": "method (default stripe), via (default checkout; empty string = missing origin), status, paid (true = paid 60 seconds after creation), count, from/to (seconds before now, orders spread evenly over [now - from, now - to)) or at (seconds before now, every order at that instant), ip, attr, repeat {every, times} (copies shifted closer to now by every seconds), invalid (true = malformed creation date)",
+    "ip": "missing | invalid (a list) | networks:N[:base] (N recorded /24 networks) | distinct[:base] (one /24 per order) | v6:N (N /64 networks); or a list of [mode, count] pairs applied in order",
+    "attr": "absent (no meta row) | none ((none)) | typein | utm | organic | bogus (unrecognised text) | long (over 64 bytes); or a list of [value, count] pairs applied in order"
+  },
+  "templates": {
+    "healthy_baseline": [
+      { "status": "processing", "paid": true, "count": 2400, "from": 2419200, "to": 172800, "ip": "distinct:1", "attr": [ [ "typein", 1680 ], [ "absent", 720 ] ] },
+      { "status": "failed", "count": 240, "from": 2419200, "to": 172800, "ip": "distinct:2", "attr": [ [ "typein", 168 ], [ "absent", 72 ] ] }
+    ],
+    "healthy_current": [
+      { "status": "processing", "paid": true, "count": 180, "from": 172800, "to": 3600, "ip": "distinct:3", "attr": [ [ "typein", 126 ], [ "absent", 54 ] ] },
+      { "status": "failed", "count": 18, "from": 172800, "to": 3600, "ip": "distinct:4", "attr": "typein" }
+    ]
+  },
+  "vectors": [
+    {
+      "name": "corroborated_recent_burst",
+      "about": "Corroborated burst in the last hour: high failed share, 3 recorded networks, no recorded marketing source against a populated baseline, still running in the last 15 minutes.",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 5, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" }
+      ],
+      "expect": { "verdict": "likely_attack", "activity": "recent", "coverage": "complete", "findings_include": [ "likely_card_testing" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "likely_attack", "activity": "recent" } }
+    },
+    {
+      "name": "recovered_earlier_burst",
+      "about": "The same corroborated burst 19 to 20 hours ago and nothing unusual since.",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 120, "from": 72000, "to": 68400, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 5, "from": 72000, "to": 68400, "ip": "distinct:5", "attr": "typein" }
+      ],
+      "expect": { "verdict": "likely_attack", "activity": "earlier_in_window", "findings_include": [ "likely_card_testing" ] }
+    },
+    {
+      "name": "continued_recent_burst",
+      "about": "A burst running for the last 3 hours: 3 non-overlapping representative hours, whole-window failed count distinct (never a sum of overlapping hours).",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 360, "from": 10800, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 15, "from": 10800, "to": 0, "ip": "distinct:5", "attr": "typein" }
+      ],
+      "expect": { "verdict": "likely_attack", "activity": "recent", "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "likely_attack", "failed_unpaid": 378, "episodes": 3, "episodes_truncated": false } }
+    },
+    {
+      "name": "absolute_burst_no_baseline",
+      "about": "New store with 4 days of orders: 150 failed orders in one hour are an absolute burst, but without a baseline the marketing-source comparison cannot run, so the verdict stays possible.",
+      "orders": [
+        { "status": "processing", "paid": true, "count": 40, "from": 345600, "to": 3600, "ip": "distinct:1", "attr": "typein" },
+        { "status": "failed", "count": 150, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 3, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" }
+      ],
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ], "findings_include": [ "possible_card_testing" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "possible_attack", "baseline_sufficient": false } }
+    },
+    {
+      "name": "distributed_no_concentration",
+      "about": "Burst spread over a different network for every order: no network concentration, so possible, not likely.",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "distinct:9", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 5, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" }
+      ],
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ], "findings_include": [ "possible_card_testing" ] }
+    },
+    {
+      "name": "stable_low_volume_declines",
+      "about": "A small store with a steady trickle of declines.",
+      "orders": [
+        { "status": "processing", "paid": true, "count": 600, "from": 2419200, "to": 172800, "ip": "distinct:1", "attr": [ [ "typein", 420 ], [ "absent", 180 ] ] },
+        { "status": "failed", "count": 60, "from": 2419200, "to": 172800, "ip": "distinct:2", "attr": "typein" },
+        { "status": "processing", "paid": true, "count": 20, "from": 172800, "to": 0, "ip": "distinct:3", "attr": "typein" },
+        { "status": "failed", "count": 2, "from": 172800, "to": 0, "ip": "distinct:4", "attr": "typein" }
+      ],
+      "expect": { "verdict": "no_sign", "activity": "not_established", "findings_exclude": [ "likely_card_testing", "possible_card_testing" ] }
+    },
+    {
+      "name": "tiny_store",
+      "about": "Too few earlier orders to compare with and no large burst: unknown, never a fabricated zero baseline.",
+      "orders": [
+        { "status": "processing", "paid": true, "count": 30, "from": 2419200, "to": 0, "ip": "distinct:1", "attr": "typein" },
+        { "status": "failed", "count": 5, "from": 2419200, "to": 0, "ip": "distinct:2", "attr": "typein" }
+      ],
+      "expect": { "verdict": "unknown", "never": [ "likely_attack", "possible_attack" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "baseline_sufficient": false, "reason_code": "baseline_insufficient_volume" } }
+    },
+    {
+      "name": "healthy_promotion",
+      "about": "A promotion hour with 2,000 accepted and 120 declined orders: the decline count crosses both burst bars but the failed share is low, so it is volume context only.",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "processing", "paid": true, "count": 2000, "from": 21600, "to": 18000, "ip": "distinct:6", "attr": "utm" },
+        { "status": "failed", "count": 120, "from": 21600, "to": 18000, "ip": "distinct:7", "attr": "utm" }
+      ],
+      "expect": { "verdict": "no_sign", "findings_include": [ "failed_order_volume_context" ], "findings_exclude": [ "likely_card_testing", "possible_card_testing" ] }
+    },
+    {
+      "name": "low_share_sales_growth",
+      "about": "Sales tripled, with declines rising in proportion and one busy hour of 25 declines among 400 accepted orders: not even a possible warning.",
+      "use": [ "healthy_baseline" ],
+      "orders": [
+        { "status": "processing", "paid": true, "count": 576, "from": 172800, "to": 0, "ip": "distinct:3", "attr": "typein" },
+        { "status": "failed", "count": 55, "from": 172800, "to": 0, "ip": "distinct:4", "attr": "typein" },
+        { "status": "processing", "paid": true, "count": 400, "from": 36000, "to": 32400, "ip": "distinct:6", "attr": "typein" },
+        { "status": "failed", "count": 25, "from": 36000, "to": 32400, "ip": "distinct:7", "attr": "typein" }
+      ],
+      "expect": { "verdict": "no_sign", "findings_exclude": [ "likely_card_testing", "possible_card_testing" ] }
+    },
+    {
+      "name": "busy_daily_cycle",
+      "about": "Every day has 8 busy hours with 30 declines and 300 accepted orders an hour and quiet nights; a normal busy day now is not a burst against the store's own P95.",
+      "orders": [
+        { "status": "failed", "count": 240, "from": 2419200, "to": 2390400, "ip": "distinct:2", "attr": "typein", "repeat": { "every": 86400, "times": 26 } },
+        { "status": "processing", "paid": true, "count": 2400, "from": 2419200, "to": 2390400, "ip": "distinct:1", "attr": "typein", "repeat": { "every": 86400, "times": 26 } },
+        { "status": "failed", "count": 240, "from": 108000, "to": 79200, "ip": "distinct:4", "attr": "typein" },
+        { "status": "processing", "paid": true, "count": 2400, "from": 108000, "to": 79200, "ip": "distinct:3", "attr": "typein" }
+      ],
+      "expect": { "verdict": "no_sign", "findings_exclude": [ "likely_card_testing", "possible_card_testing" ] }
+    },
+    {
+      "name": "shared_office_proxy_network",
+      "about": "A business store whose buyers all come through 2 office networks: a payment fault hour concentrates in those networks, which alone cannot make it likely.",
+      "orders": [
+        { "status": "processing", "paid": true, "count": 1000, "from": 2419200, "to": 172800, "ip": "networks:2:10", "attr": "typein" },
+        { "status": "failed", "count": 100, "from": 2419200, "to": 172800, "ip": "networks:2:10", "attr": "typein" },
+        { "status": "failed", "count": 40, "from": 10800, "to": 7200, "ip": "networks:2:10", "attr": "typein" },
+        { "status": "processing", "paid": true, "count": 4, "from": 10800, "to": 7200, "ip": "networks:2:10", "attr": "typein" }
+      ],
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ] }
+    },
+    {
+      "name": "all_attribution_missing_store",
+      "about": "No order ever recorded a marketing source (consent or tracking off): missing attribution cannot corroborate, so a concentrated burst stays possible.",
+      "orders": [
+        { "status": "processing", "paid": true, "count": 2400, "from": 2419200, "to": 172800, "ip": "distinct:1", "attr": "absent" },
+        { "status": "failed", "count": 240, "from": 2419200, "to": 172800, "ip": "distinct:2", "attr": "absent" },
+        { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 5, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "absent" }
+      ],
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ] }
+    },
+    {
+      "name": "bank_transfer_cancellations",
+      "about": "200 cancelled bank-transfer orders, 100 of them in one hour, beside a quiet card method: manual methods are not applicable.",
+      "methods": { "stripe": { "kind": "instant", "test_mode": false, "family": "stripe" }, "bacs": { "kind": "manual" } },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "method": "bacs", "status": "on-hold", "count": 500, "from": 2419200, "to": 172800, "ip": "distinct:8", "attr": "typein" },
+        { "method": "bacs", "status": "cancelled", "count": 100, "from": 172800, "to": 3600, "ip": "distinct:9", "attr": "typein" },
+        { "method": "bacs", "status": "cancelled", "count": 100, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "no_sign", "assessment": { "method_id": "bacs", "origin_scope": "verified_checkout", "applicable": false, "reason_code": "method_manual" } }
+    },
+    {
+      "name": "bank_transfer_only",
+      "about": "A store taking only bank transfers: nothing card testing applies to.",
+      "methods": { "bacs": { "kind": "manual" } },
+      "orders": [
+        { "method": "bacs", "status": "on-hold", "count": 500, "from": 2419200, "to": 172800, "ip": "distinct:8", "attr": "typein" },
+        { "method": "bacs", "status": "cancelled", "count": 200, "from": 172800, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "unknown", "never": [ "likely_attack", "possible_attack" ], "limitations_include": [ "no_applicable_scope" ] }
+    },
+    {
+      "name": "store_api_drafts",
+      "about": "600 unfinished block-checkout orders (300 without a method, 300 in the last 2 hours): drafts are counted as drafts only.",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "method": "", "via": "store-api", "status": "checkout-draft", "count": 300, "from": 172800, "to": 0, "ip": "distinct:6", "attr": "absent" },
+        { "via": "store-api", "status": "checkout-draft", "count": 300, "from": 7200, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "no_sign", "totals": { "checkout_draft": 600 }, "findings_exclude": [ "likely_card_testing", "possible_card_testing" ] }
+    },
+    {
+      "name": "normal_order_retries",
+      "about": "60 orders that failed once and were then paid, in the last hour: a paid date wins over the failed status, so they are accepted.",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "paid": true, "count": 60, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "pending", "count": 10, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "no_sign", "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "no_sign", "failed_unpaid": 18 } }
+    },
+    {
+      "name": "ip_unsupported_burst",
+      "about": "The corroborated burst on a store whose saved network details cannot be read: counts and attribution alone cannot make it likely.",
+      "signals": { "ip": "unsupported_source_version", "attribution": true },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 5, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" }
+      ],
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ], "coverage": "partial" }
+    },
+    {
+      "name": "ip_unsupported_quiet",
+      "about": "A quiet store with some failed orders whose network details cannot be read: no all-clear.",
+      "signals": { "ip": "ip_storage_unavailable", "attribution": true },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "ip_storage_unavailable" ] }
+    },
+    {
+      "name": "attribution_disabled_quiet",
+      "about": "A quiet store with Order Attribution switched off: no all-clear, and missing sources are not suspicious.",
+      "signals": { "ip": true, "attribution": "attribution_feature_disabled" },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "attribution_feature_disabled" ] }
+    },
+    {
+      "name": "logs_denied_quiet",
+      "about": "A quiet store checked by a role without diagnostics access: the supported log was not read, so no unqualified all-clear.",
+      "logs": { "checked": false, "coverage": "unavailable", "reason_code": "diagnostics_denied", "summaries": [ { "family": "stripe", "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "diagnostics_denied" } ] },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "logs_unavailable" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable" } }
+    },
+    {
+      "name": "logs_unsupported_quiet",
+      "about": "A quiet PayPal store: PayPal has no supported log adapter, which is disclosed and not applicable, never a gap that blocks the result.",
+      "methods": { "ppcp-gateway": { "kind": "instant", "family": "paypal" } },
+      "rename": { "stripe": "ppcp-gateway" },
+      "logs": { "checked": false, "coverage": "unavailable", "reason_code": "no_supported_log_mapping", "summaries": [ { "family": "paypal", "checked": false, "applicable": false, "coverage": "not_applicable", "reason_code": "no_supported_log_mapping" } ] },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "no_sign", "limitations_include": [ "test_mode_unknown" ] }
+    },
+    {
+      "name": "logs_denied_no_supported_family",
+      "about": "Diagnostics denied on a PayPal-only store: the denial carries no per-family row, so it names no supported log family and cannot block the result (fix round, wave 1 pre-review).",
+      "methods": { "ppcp-gateway": { "kind": "instant", "test_mode": false, "family": "paypal" } },
+      "rename": { "stripe": "ppcp-gateway" },
+      "logs": { "checked": false, "coverage": "unavailable", "reason_code": "diagnostics_denied", "summaries": [] },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "no_sign", "coverage": "complete", "limitations_exclude": [ "logs_unavailable" ] }
+    },
+    {
+      "name": "logs_denied_family_not_in_play",
+      "about": "A denied Stripe log on a store whose only card method is PayPal: the gap belongs to a family no assessed method uses, so it blocks nothing.",
+      "methods": { "ppcp-gateway": { "kind": "instant", "test_mode": false, "family": "paypal" } },
+      "rename": { "stripe": "ppcp-gateway" },
+      "logs": { "checked": false, "coverage": "unavailable", "reason_code": "diagnostics_denied", "summaries": [ { "family": "stripe", "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "diagnostics_denied" }, { "family": "paypal", "checked": false, "applicable": false, "coverage": "not_applicable", "reason_code": "no_supported_log_mapping" } ] },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "no_sign", "coverage": "complete", "limitations_exclude": [ "logs_unavailable" ] }
+    },
+    {
+      "name": "logs_denied_stripe_and_paypal",
+      "about": "A denied Stripe log on a store with Stripe and PayPal: the Stripe scope and the store-wide aggregate lose their all-clear, the PayPal scope keeps it.",
+      "methods": { "stripe": { "kind": "instant", "test_mode": false, "family": "stripe" }, "ppcp-gateway": { "kind": "instant", "test_mode": false, "family": "paypal" } },
+      "logs": { "checked": false, "coverage": "unavailable", "reason_code": "diagnostics_denied", "summaries": [ { "family": "stripe", "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "diagnostics_denied" }, { "family": "paypal", "checked": false, "applicable": false, "coverage": "not_applicable", "reason_code": "no_supported_log_mapping" } ] },
+      "use": [ "healthy_baseline", "healthy_current", { "template": "healthy_baseline", "rename": { "stripe": "ppcp-gateway" } } ],
+      "expect": { "verdict": "unknown", "coverage": "partial", "limitations_include": [ "logs_unavailable" ], "assessments": [ { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable" }, { "method_id": "ppcp-gateway", "origin_scope": "verified_checkout", "verdict": "no_sign" }, { "method_id": null, "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable" } ] }
+    },
+    {
+      "name": "logs_source_read_failed_row",
+      "about": "The Stripe log reader failed and returned an applicable per-family row with source_read_failed: any applicable row that is not complete still blocks its family.",
+      "logs": { "checked": false, "coverage": "unavailable", "reason_code": "source_read_failed", "summaries": [ { "family": "stripe", "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "source_read_failed" } ] },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable" } }
+    },
+    {
+      "name": "logs_capped_row_positive_survives",
+      "about": "A capped Stripe log (partial) with a corroborated burst: the gap withholds an all-clear but never lowers a positive verdict.",
+      "logs": { "checked": true, "coverage": "partial", "reason_code": "byte_cap", "summaries": [ { "family": "stripe", "checked": true, "applicable": true, "coverage": "partial", "reason_code": "byte_cap" } ] },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 5, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" }
+      ],
+      "expect": { "verdict": "likely_attack", "coverage": "partial", "limitations_include": [ "logs_unavailable" ] }
+    },
+    {
+      "name": "logs_unmapped_row_with_family",
+      "about": "An applicable, incomplete log row without a family token cannot be mapped: it blocks scopes whose method has a payment family.",
+      "logs": { "checked": false, "coverage": "unavailable", "reason_code": "source_read_failed", "summaries": [ { "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "source_read_failed" } ] },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "logs_unavailable" ] }
+    },
+    {
+      "name": "logs_unmapped_row_without_family",
+      "about": "The same unmapped row on a store whose card method has no payment family: no log can apply, so nothing is blocked.",
+      "methods": { "blzinstant": { "kind": "instant", "test_mode": false } },
+      "rename": { "stripe": "blzinstant" },
+      "logs": { "checked": false, "coverage": "unavailable", "reason_code": "source_read_failed", "summaries": [ { "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "source_read_failed" } ] },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "no_sign", "coverage": "complete", "limitations_exclude": [ "logs_unavailable" ] }
+    },
+    {
+      "name": "method_cap_at_limit",
+      "about": "Two card methods with the method bound at exactly 2: every scope is tracked, so the assessment total is exact.",
+      "methods": { "stripe": { "kind": "instant", "test_mode": false, "family": "stripe" }, "woocommerce_payments": { "kind": "instant", "test_mode": false, "family": "woopayments" } },
+      "limits": { "methods": 2 },
+      "use": [ "healthy_baseline", "healthy_current", { "template": "healthy_baseline", "rename": { "stripe": "woocommerce_payments" } } ],
+      "expect": { "verdict": "no_sign", "assessments_total": 3, "methods_truncated": false, "methods_total": 2 }
+    },
+    {
+      "name": "method_cap_past_limit",
+      "about": "The same store with the method bound at 1: one method is not tracked, so neither the method total nor the assessment total is exact, and there is no all-clear.",
+      "methods": { "stripe": { "kind": "instant", "test_mode": false, "family": "stripe" }, "woocommerce_payments": { "kind": "instant", "test_mode": false, "family": "woopayments" } },
+      "limits": { "methods": 1 },
+      "use": [ "healthy_baseline", "healthy_current", { "template": "healthy_baseline", "rename": { "stripe": "woocommerce_payments" } } ],
+      "expect": { "verdict": "unknown", "coverage": "partial", "assessments_total": null, "methods_truncated": true, "methods_total": null, "limitations_include": [ "method_cap" ], "assessment": { "method_id": null, "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "method_cap" } }
+    },
+    {
+      "name": "counts_only_burst",
+      "about": "Neither network nor attribution data can be read: a large burst is at most possible.",
+      "signals": { "ip": "unsupported_source_version", "attribution": "unsupported_source_version" },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 150, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ] }
+    },
+    {
+      "name": "missing_origin_burst",
+      "about": "150 failed orders with no record of where they came from: assessed separately, at most possible, never mixed with checkout orders.",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "via": "", "status": "failed", "count": 150, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ], "summary_includes": "no record of where they came from", "assessment": { "method_id": "stripe", "origin_scope": "missing_origin", "verdict": "possible_attack" }, "limitations_include": [ "missing_origin_orders" ] }
+    },
+    {
+      "name": "test_mode_burst",
+      "about": "A burst on a method known to be in test mode: test orders get no real-customer verdict.",
+      "methods": { "stripe": { "kind": "instant", "test_mode": true, "family": "stripe" } },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 150, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "unknown", "never": [ "likely_attack", "possible_attack" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "applicable": false, "reason_code": "method_test_mode" } }
+    },
+    {
+      "name": "unknown_kind_burst",
+      "about": "A burst on a payment method whose way of taking payments is not verified: counts and a contextual finding only.",
+      "methods": { "blzcustom": { "kind": "unknown" } },
+      "rename": { "stripe": "blzcustom" },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "method": "blzcustom", "status": "failed", "count": 150, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "unknown", "never": [ "likely_attack", "possible_attack" ], "findings_include": [ "unassessed_method_failed_orders" ] }
+    },
+    {
+      "name": "partial_scan_absolute",
+      "about": "The scan hit its row bound: 120 observed failed orders in the last hour are a lower bound, enough for a possible warning with an unknown share, never likely or an all-clear.",
+      "stop": "row_cap",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" }
+      ],
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack", "no_sign" ], "coverage": "partial", "limitations_include": [ "row_cap" ] }
+    },
+    {
+      "name": "partial_scan_quiet",
+      "about": "The scan hit its work budget on a quiet store: unknown, never an all-clear.",
+      "stop": "order_scan_budget",
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "coverage": "partial", "limitations_include": [ "order_scan_budget" ] }
+    },
+    {
+      "name": "empty_store",
+      "about": "No orders in the last 28 days.",
+      "orders": [],
+      "expect": { "verdict": "unknown", "coverage": "complete", "limitations_include": [ "empty_store" ] }
+    },
+    {
+      "name": "spread_across_methods",
+      "about": "15 failed orders an hour on each of 2 card methods: neither method alone is a burst, the store-wide aggregate of methods that charge at checkout is.",
+      "methods": { "stripe": { "kind": "instant", "test_mode": false, "family": "stripe" }, "woocommerce_payments": { "kind": "instant", "family": "woopayments" } },
+      "use": [ "healthy_baseline", "healthy_current", { "template": "healthy_baseline", "rename": { "stripe": "woocommerce_payments" } } ],
+      "orders": [
+        { "status": "failed", "count": 15, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "method": "woocommerce_payments", "status": "failed", "count": 15, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 2, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" }
+      ],
+      "expect": { "verdict": "likely_attack", "findings_include": [ "likely_card_testing" ], "assessment": { "method_id": null, "origin_scope": "verified_checkout", "verdict": "likely_attack" }, "store_finding": true }
+    }
+  ]
+}

@@ -341,5 +341,123 @@ delete_option( 'woocommerce_stripe_settings' );
 $unk = PaymentErrors::for_methods( array( 'stripe' => $inv['stripe'] ), $fam, array(), $now, 24, $tz )['stripe']['webhook'];
 blzmcp_it_equals( array( 'unknown', 'mode_unknown' ), array( $unk['status'], $unk['category'] ), 'absent settings: mode unknown' );
 
+// ---------------------------------------------------------------- for_methods() golden bytes (1.3 card logs).
+// The card-testing log summaries share this reader. for_methods() must keep returning exactly the
+// bytes captured before that change, for the same fixtures: a fixed clock (the log fixture's own,
+// 2026-11-15T00:00:00Z), a fixed timezone and a log source token used by nothing else. Run with
+// BLZMCP_PE_CAPTURE=1 to print the current bytes instead of asserting; regenerate them only for a
+// reviewed, intentional change to payment health's output.
+$g_capture = '1' === (string) getenv( 'BLZMCP_PE_CAPTURE' );
+$g_now     = 1794700800;
+$g_tz      = new DateTimeZone( 'Australia/Melbourne' );
+$g_token   = 'blzmcp-golden-' . strtolower( wp_generate_password( 8, false ) );
+$g_fam     = $fam;
+$g_fam['stripe']['log_sources'] = array( $g_token );
+// No job tokens: the jobs block (sampled or exact, by Action Scheduler store) would otherwise depend
+// on the site rather than on the code. Jobs keep their own assertions above; this change never
+// touches them.
+$g_fam['stripe']['hooks']       = array();
+$g_fam['stripe']['hook_groups'] = array();
+$g_file    = rtrim( (string) $dir, '/' ) . '/' . $g_token . '-2026-11-14-blzmcpgolden.log';
+$g_enabled = get_option( 'woocommerce_logs_logging_enabled', null );
+blzmcp_it_cleanup( static fn() => file_exists( $g_file ) && unlink( $g_file ) );
+blzmcp_it_cleanup( static fn() => null === $g_enabled ? delete_option( 'woocommerce_logs_logging_enabled' ) : update_option( 'woocommerce_logs_logging_enabled', $g_enabled ) );
+blzmcp_it_cleanup( static fn() => $wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE source = %s', $wpdb->prefix . 'woocommerce_log', $g_token ) ) );
+update_option( 'woocommerce_stripe_settings', array( 'enabled' => 'yes', 'testmode' => 'no' ) );
+update_option( 'wc_stripe_wh_monitor_began_at', (string) ( $g_now - 30 * DAY_IN_SECONDS ) );
+update_option( 'wc_stripe_wh_last_success_at', (string) ( $g_now - 10 * HOUR_IN_SECONDS ) );
+update_option( 'wc_stripe_wh_last_failure_at', (string) ( $g_now - 2 * HOUR_IN_SECONDS ) );
+update_option( 'wc_stripe_wh_test_last_success_at', (string) ( $g_now - 60 ) );
+update_option( 'wc_stripe_wh_test_last_failure_at', '0' );
+$g_file_handler = 'Automattic\\WooCommerce\\Internal\\Admin\\Logging\\LogHandlerFileV2';
+update_option( 'woocommerce_logs_default_handler', $g_file_handler );
+$g_got = array();
+$g_run = static function ( string $name, int $hours = 24 ) use ( &$g_got, $inv, $g_fam, $g_now, $g_tz ): void {
+	$g_got[ $name ] = (string) wp_json_encode( PaymentErrors::for_methods( $inv, $g_fam, array( 'stripe' => 3 ), $g_now, $hours, $g_tz ) );
+};
+// File handler: the shared fixture lines, unshifted (boundary lines included).
+file_put_contents( $g_file, (string) file_get_contents( __DIR__ . '/../fixtures/payment-log-lines.txt' ) );
+$g_run( 'file_fixture' );
+file_put_contents( $g_file, gmdate( 'c', $g_now - 600 ) . " INFO Webhook received\n" );
+$g_run( 'file_clean' );
+file_put_contents( $g_file, '[' . gmdate( 'd-M-Y H:i:s', $g_now - 900 ) . " UTC] PHP Fatal error: gateway exploded\nStack trace:\n" );
+$g_run( 'file_unparsed' );
+file_put_contents( $g_file, gmdate( 'c', $g_now - 900 ) . " ERROR huge entry\n" . str_repeat( "    continuation line padding the entry past the byte cap\n", intdiv( PaymentErrors::MAX_BYTES, 50 ) + 2000 ) . gmdate( 'c', $g_now - 800 ) . " CRITICAL last entry\n" );
+$g_run( 'file_byte_cap' );
+file_put_contents( $g_file, gmdate( 'c', $g_now - 40 * HOUR_IN_SECONDS ) . " ERROR older entry\n" );
+$g_retain = static fn() => 1;
+add_filter( 'woocommerce_logger_days_to_retain_logs', $g_retain );
+$g_run( 'file_stale_retention', 48 );
+remove_filter( 'woocommerce_logger_days_to_retain_logs', $g_retain );
+update_option( 'woocommerce_logs_logging_enabled', 'no' );
+$g_run( 'logging_disabled' );
+update_option( 'woocommerce_logs_logging_enabled', 'yes' );
+unlink( $g_file );
+$g_run( 'file_none' );
+// Diagnostics denied (shop manager without the toggle).
+wp_set_current_user( (int) $manager );
+$g_run( 'denied' );
+wp_set_current_user( 1 );
+// DB handler: three error-level rows of the source, lower levels and another source ignored; then
+// the 2,000-row cap and its metadata-only sentinel.
+if ( $table === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) ) {
+	update_option( 'woocommerce_logs_default_handler', 'WC_Log_Handler_DB' );
+	foreach ( array( 500, 600, 800, 400, 100 ) as $i => $level ) {
+		$wpdb->insert( $table, array( 'timestamp' => gmdate( 'Y-m-d H:i:s', $g_now - 300 - 60 * $i ), 'level' => $level, 'source' => $g_token, 'message' => 'Synthetic decline for jane.citizen@example.com', 'context' => '{"secret":"x"}' ) );
+	}
+	$wpdb->insert( $table, array( 'timestamp' => gmdate( 'Y-m-d H:i:s', $g_now - 200 ), 'level' => 500, 'source' => $g_token . '-other', 'message' => 'not ours' ) );
+	$g_other = (int) $wpdb->insert_id;
+	$g_run( 'db_rows' );
+	$wpdb->delete( $table, array( 'log_id' => $g_other ) );
+	$g_rows = PaymentErrors::MAX_DB_ROWS + 1; // 3 qualifying rows above, then up to 2,001.
+	for ( $done = 3; $done < $g_rows; $done += 200 ) {
+		$vals = array();
+		$upto = min( $g_rows, $done + 200 );
+		for ( $i = $done; $i < $upto; $i++ ) {
+			$vals[] = $wpdb->prepare( '(%s, %d, %s, %s)', gmdate( 'Y-m-d H:i:s', $g_now - 3600 - $i ), 500, $g_token, 'blzmcp golden row' );
+		}
+		$wpdb->query( "INSERT INTO `{$table}` (timestamp, level, source, message) VALUES " . implode( ', ', $vals ) );
+	}
+	$g_run( 'db_row_cap' );
+	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE source = %s', $table, $g_token ) );
+}
+update_option( 'woocommerce_logs_default_handler', $saved['woocommerce_logs_default_handler'] ?? $g_file_handler );
+if ( $g_capture ) {
+	foreach ( $g_got as $name => $json ) {
+		echo 'GOLDEN' . "\t" . $name . "\t" . hash( 'sha256', $json ) . "\t" . $json . "\n";
+	}
+} else {
+	$golden = blzmcp_pe_golden();
+	blzmcp_it_equals( array_keys( $golden ), array_keys( $g_got ), 'golden: every captured scenario ran' );
+	foreach ( $golden as $name => $want ) {
+		$got_hash = isset( $g_got[ $name ] ) ? hash( 'sha256', $g_got[ $name ] ) : null;
+		blzmcp_it_equals( $want, $got_hash, "golden: for_methods() returns the captured bytes for {$name}" );
+		if ( $got_hash !== $want ) {
+			echo 'GOT ' . $name . ' ' . ( $g_got[ $name ] ?? 'missing' ) . "\n";
+		}
+	}
+}
+
 blzmcp_it_equals( 0, $http_calls, 'no HTTP request from diagnostics' );
 blzmcp_it_finish();
+
+/**
+ * SHA-256 of the exact wp_json_encode() bytes of for_methods(), captured from the 1.2.1 reader
+ * (before the 1.3 card-logs change) with BLZMCP_PE_CAPTURE=1. A mismatch prints the new bytes.
+ *
+ * @return array<string,string>
+ */
+function blzmcp_pe_golden(): array {
+	return array(
+		'file_fixture'         => '4e10c755c1d94de697bc892a4172f494db9de4b94a3d1239e23a14846c778a7e',
+		'file_clean'           => '6aa83f26bcf73ac1a15421f99a7023842526c8585cc81e7ad91c435a75e82ccc',
+		'file_unparsed'        => 'bbbb4a3c24fdd13828e3ec7b6cb78718c91694444186b9c4270139768d9a6417',
+		'file_byte_cap'        => '9d468fb06e9a6f68e7173f29253753e341d23464189b82a567d7a8909e4cc30d',
+		'file_stale_retention' => 'ff97a572c592051a5ecdaed557c66e825760430c1fbf1c9fc58da1ed47ec7a22',
+		'logging_disabled'     => '8be26eb3404feafca94fbc1d4af7403c2c087273dd61054cc89dc8a1160692cc',
+		'file_none'            => '94b92f7a71a581c90125e6b44ae584e5e1dc150001126869a4d3a50261f158b0',
+		'denied'               => '594a21b2d0e7cf59a088a1ac6406a3582cadf3650e569ba0ffcbf853d91c3cee',
+		'db_rows'              => '491e26954d9c681b56150017d71ff2623fff934e4593a602fde5db6f8718d46a',
+		'db_row_cap'           => 'ba00280cb2305f0ab2050d73881d740de7c58dc94b23b0fae639ac135c01aee5',
+	);
+}

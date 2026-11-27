@@ -31,6 +31,8 @@ $expectations = array(
 	'blaze-mcp-toolkit/access-check'        => BLZMCP_PM_ADMIN_ONLY,
 	// Order and configuration checks at manage_woocommerce; logs and jobs are gated again inside.
 	'blaze-mcp-toolkit/payment-health'      => BLZMCP_PM_WOO,
+	// Card testing (1.3): order, configuration and protection facts at manage_woocommerce; logs gated again inside.
+	'blaze-mcp-toolkit/card-testing'        => BLZMCP_PM_WOO,
 	'blaze-mcp-toolkit/store-profile'       => BLZMCP_PM_WOO,
 	'blaze-mcp-toolkit/search-products'     => BLZMCP_PM_WOO,
 	'blaze-mcp-toolkit/product-details'     => BLZMCP_PM_WOO,
@@ -178,6 +180,16 @@ try {
 					}
 					blzmcp_it_assert( ! $leak, "{$label} diagnostics shown only to diagnostics viewers" );
 				}
+				// Card testing: log summaries only for diagnostics viewers, the role gap disclosed otherwise.
+				if ( 'blaze-mcp-toolkit/card-testing' === $name && is_array( $result ) ) {
+					$diag_ok = 'administrator' === $role || ( 'shop_manager' === $role && $sm_diag );
+					$ct_leak = false;
+					foreach ( $result['logs'] as $ct_log ) {
+						$ct_leak = $ct_leak || ( ! $diag_ok && ( ! empty( $ct_log['checked'] ) || null !== $ct_log['count']['value'] ) ) || ( $diag_ok && 'diagnostics_denied' === $ct_log['reason_code'] );
+					}
+					$ct_denied = in_array( 'logs|diagnostics_denied', array_map( static fn( $l ) => $l['scope'] . '|' . $l['code'], $result['limitations'] ), true );
+					blzmcp_it_assert( ! $ct_leak && ( ! $diag_ok ) === $ct_denied, "{$label} card-testing logs only for diagnostics viewers, the role gap disclosed otherwise" );
+				}
 
 				if ( null !== $gateway ) {
 					$out = $gateway->execute(
@@ -248,6 +260,42 @@ try {
 				$leak = $leak || ( ! $diag_ok && ! empty( $pm_method['errors']['logs']['checked'] ) ) || ( $diag_ok && $blocked === $pm_method['errors']['logs']['reason'] );
 			}
 			blzmcp_it_assert( ! $leak, "{$label} diagnostics follow the current permission, never a warm privileged entry" );
+		}
+	}
+
+	// 1.3 card testing: diagnostics off, on, off again for every role. Denied roles never trigger
+	// an order, page or log read; allowed roles see the role gap exactly when diagnostics are off,
+	// never served from another role's or state's warm entry.
+	$ct_ability = $abilities['blaze-mcp-toolkit/card-testing'] ?? wp_get_ability( 'blaze-mcp-toolkit/card-testing' );
+	$ct_sql     = 0;
+	$ct_spy     = static function ( $q ) use ( &$ct_sql ) {
+		$q = (string) $q;
+		if ( str_contains( $q, 'shop_order' ) || str_contains( $q, 'wc_order' ) || str_contains( $q, 'post_content' ) || str_contains( $q, 'woocommerce_log' ) ) {
+			++$ct_sql;
+		}
+		return $q;
+	};
+	foreach ( array( false, true, false ) as $pass => $sm_diag ) {
+		$settings                             = Settings::get();
+		$settings['shop_manager_diagnostics'] = $sm_diag;
+		update_option( 'blzmcp_settings', $settings, false );
+		foreach ( $roles as $ct_role ) {
+			wp_set_current_user( $user_ids[ $ct_role ] );
+			$want   = $allowed_for( 'blaze-mcp-toolkit/card-testing', $ct_role, $sm_diag );
+			$ct_sql = 0;
+			add_filter( 'query', $ct_spy );
+			$result = $ct_ability->execute( array() );
+			remove_filter( 'query', $ct_spy );
+			$label = "[card pass {$pass}, sm_diag " . ( $sm_diag ? 'on' : 'off' ) . "] {$ct_role}";
+			if ( ! $want ) {
+				blzmcp_it_assert( $is_permission_error( $result ), "{$label} denied" );
+				blzmcp_it_equals( 0, $ct_sql, "{$label} denied call reads no orders, pages or logs" );
+				continue;
+			}
+			blzmcp_it_assert( is_array( $result ), "{$label} allowed" );
+			$diag_ok   = 'administrator' === $ct_role || ( 'shop_manager' === $ct_role && $sm_diag );
+			$ct_denied = is_array( $result ) && in_array( 'logs|diagnostics_denied', array_map( static fn( $l ) => $l['scope'] . '|' . $l['code'], $result['limitations'] ), true );
+			blzmcp_it_equals( ! $diag_ok, $ct_denied, "{$label} the role gap follows the current permission, never a warm privileged entry" );
 		}
 	}
 } finally {

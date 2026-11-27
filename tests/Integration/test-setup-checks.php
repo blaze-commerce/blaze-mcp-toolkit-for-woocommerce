@@ -139,7 +139,11 @@ if ( 'recommended' === $state && ! $denylist ) {
 
 	$fixture = json_decode( (string) file_get_contents( dirname( __DIR__ ) . '/fixtures/setup-checks-1.0.json' ), true );
 	blzmcp_it_assert( is_array( $fixture ) && isset( $fixture['_inputs'], $fixture['rows'] ), 'recommended: 1.0 fixture loads' );
-	$restore = blzmcp_fx_set_inputs();
+	// blzmcp_fx_set_inputs() switches HPOS on through blzmcp_it_set_hpos(), which turns compatibility
+	// sync on; its restore puts HPOS back but not the sync option. Keep the raw value (or its absence)
+	// and put it back in the finally below, whether the comparison passes or fails.
+	$sync_was = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null );
+	$restore  = blzmcp_fx_set_inputs();
 	try {
 		$now = json_decode( (string) wp_json_encode( blzmcp_fx_inputs() ), true );
 		// The binding: the 1.0 fixture's inputs plus what is allowed to have moved since. The rows are
@@ -147,10 +151,11 @@ if ( 'recommended' === $state && ! $denylist ) {
 		// WooCommerce 11.3.1, 1.2.1 wave 2) with SetupChecks.php from 8972431, rows byte-identical.
 		// That capture already lists WooCommerce's own woocommerce/order-notes-query, so the earlier
 		// 11.2.2 -> 11.3.0 allowance is gone: the only binding is the toolkit's own abilities added
-		// after 1.0 (blaze-mcp-toolkit/payment-health), on every WooCommerce version. Any other drift
-		// (including the minimum environment, WooCommerce 10.9) still counts as changed.
+		// after 1.0 (blaze-mcp-toolkit/payment-health in 1.2, blaze-mcp-toolkit/card-testing in 1.3), on
+		// every WooCommerce version. Any other drift (including the minimum environment, WooCommerce
+		// 10.9) still counts as changed.
 		$bind = static function ( array $inputs, ?string $live_wc ): array { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter -- the WooCommerce version no longer moves the binding.
-			$required = array( 'blaze-mcp-toolkit/payment-health' );
+			$required = array( 'blaze-mcp-toolkit/payment-health', 'blaze-mcp-toolkit/card-testing' );
 			if ( isset( $inputs['abilities'] ) && is_array( $inputs['abilities'] ) ) {
 				$abilities = array_values( array_unique( array_merge( $inputs['abilities'], $required ) ) );
 				sort( $abilities );
@@ -175,7 +180,7 @@ if ( 'recommended' === $state && ! $denylist ) {
 		blzmcp_it_assert( in_array( 'woocommerce/order-notes-query', (array) ( $fixture_inputs['abilities'] ?? array() ), true ), 'binding: the capture itself lists woocommerce/order-notes-query (no allowance needed)' );
 		foreach ( array( '10.9.0', '11.2.2', '11.3.0', '11.3.1', '11.4.0', null ) as $other ) {
 			list( $o_inputs, $o_required ) = $bind( $fixture_inputs, $other );
-			blzmcp_it_equals( array( 'blaze-mcp-toolkit/payment-health' ), $o_required, 'binding: on WooCommerce ' . ( $other ?? 'none' ) . ' no core ability is expected, only the toolkit\'s own' );
+			blzmcp_it_equals( array( 'blaze-mcp-toolkit/payment-health', 'blaze-mcp-toolkit/card-testing' ), $o_required, 'binding: on WooCommerce ' . ( $other ?? 'none' ) . ' no core ability is expected, only the toolkit\'s own' );
 			blzmcp_it_equals( $captured_wc, $o_inputs['plugins']['woocommerce/woocommerce.php'] ?? null, 'binding: on WooCommerce ' . ( $other ?? 'none' ) . ' the bound version stays the captured one' );
 		}
 		// Strictness: a store missing a captured ability, with one more unknown ability, or on another
@@ -235,7 +240,13 @@ if ( 'recommended' === $state && ! $denylist ) {
 		}
 	} finally {
 		$restore();
+		if ( null === $sync_was ) {
+			delete_option( 'woocommerce_custom_orders_table_data_sync_enabled' );
+		} else {
+			update_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync_was );
+		}
 	}
+	blzmcp_it_equals( $sync_was, get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null ), 'recommended: compatibility sync is back to its earlier value after the fixture comparison' );
 	blzmcp_it_assert( str_contains( $by['edge_guidance']['fix'] ?? '', '/.well-known/oauth-' ) && str_contains( $by['edge_guidance']['fix'] ?? '', '/wp-json/mcp/' ), 'recommended: edge_guidance lists the path exceptions' );
 }
 
@@ -344,6 +355,19 @@ if ( $easy ) {
 	blzmcp_it_assert( str_contains( $up['easy_tools_on']['fix'] ?? '', $payment ), 'easy 1.1 install: easy_tools_on names payment health' );
 	blzmcp_it_assert( str_contains( $up['tools_visible']['fix'] ?? '', $payment ) && str_contains( $up['tools_visible']['fix'] ?? '', 'not ticked in Easy MCP AI' ), 'easy 1.1 install: tools_visible says payment health is not ticked in Easy MCP AI' );
 	blzmcp_it_equals( $v11, get_option( $enabled_o ), 'easy 1.1 install: setup checks never tick payment health themselves' );
+	blzmcp_sc_set( $enabled_o, $wanted );
+
+	// An existing 1.2 Easy MCP AI install: every 1.2 tool ticked, card testing (new in 1.3) not.
+	// Setup warns and names it; the check never ticks it for the owner.
+	$card = 'blaze-mcp-toolkit/card-testing';
+	$v12  = array_values( array_diff( $wanted, array( $card ) ) );
+	blzmcp_sc_set( $enabled_o, $v12 );
+	$up13 = blzmcp_sc_run( 'easy 1.2 install without card testing' );
+	blzmcp_it_assert( in_array( $card, $wanted, true ), 'easy 1.2 install: card testing is one of ours' );
+	blzmcp_it_equals( 'warn', $up13['easy_tools_on']['status'] ?? null, 'easy 1.2 install: easy_tools_on warns' );
+	blzmcp_it_assert( str_contains( $up13['easy_tools_on']['fix'] ?? '', $card ), 'easy 1.2 install: easy_tools_on names card testing' );
+	blzmcp_it_assert( str_contains( $up13['tools_visible']['fix'] ?? '', $card ) && str_contains( $up13['tools_visible']['fix'] ?? '', 'not ticked in Easy MCP AI' ), 'easy 1.2 install: tools_visible says card testing is not ticked in Easy MCP AI' );
+	blzmcp_it_equals( $v12, get_option( $enabled_o ), 'easy 1.2 install: setup checks never tick card testing themselves' );
 	blzmcp_sc_set( $enabled_o, $wanted );
 
 	// WooCommerce group on, approval on (Round 7 F04/F05). Approval on is a setting, not a

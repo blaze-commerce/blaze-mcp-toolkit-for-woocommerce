@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace Blaze\McpToolkit\Workflows;
 
 use Blaze\McpToolkit\Abilities\AbstractAbility;
+use Blaze\McpToolkit\Abilities\CardTesting;
 use Blaze\McpToolkit\Abilities\PaymentHealth;
 use Blaze\McpToolkit\Bundled\AnalyticsGuard;
 use Blaze\McpToolkit\Connectors\Availability;
@@ -196,6 +197,9 @@ abstract class AbstractWorkflow extends AbstractAbility {
 			'payment_planned' => false,
 			'payment'         => false,
 			'payment_hours'   => 0,
+			'card_planned'    => false,
+			'card'            => false,
+			'card_hours'      => 0,
 			'totals'          => false,
 			'analytics'       => false,
 		);
@@ -203,6 +207,10 @@ abstract class AbstractWorkflow extends AbstractAbility {
 			if ( PaymentHealth::NAME === $step['ability'] ) {
 				$flags['payment_planned'] = true;
 				$flags['payment_hours']   = (int) ( $step['arguments']['since_hours'] ?? 0 );
+			}
+			if ( CardTesting::NAME === $step['ability'] ) {
+				$flags['card_planned'] = true;
+				$flags['card_hours']   = (int) ( $step['arguments']['since_hours'] ?? 0 );
 			}
 			if ( null !== $analytics_reason && str_starts_with( $step['ability'], 'wc-analytics/' ) ) {
 				continue;
@@ -213,6 +221,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 				$has_profile = $has_profile || self::STORE_PROFILE_TOOL === $step['ability'];
 				// Selected by ability and subject, never by position (F02).
 				$flags['payment']   = $flags['payment'] || PaymentHealth::NAME === $step['ability'];
+				$flags['card']      = $flags['card'] || CardTesting::NAME === $step['ability'];
 				$flags['totals']    = $flags['totals'] || ( 'wc-analytics/totals' === $step['ability'] && 'orders' === ( $step['arguments']['subject'] ?? null ) );
 				$flags['analytics'] = $flags['analytics'] || str_starts_with( $step['ability'], 'wc-analytics/' );
 				// An object, so empty arguments encode as {} rather than [].
@@ -231,7 +240,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 		if ( null !== $analytics_reason ) {
 			// Analytics-only stop (F03, R5): the payment and other non-Analytics steps still run.
 			$instructions = AnalyticsGuard::MESSAGE_TOKEN . ' ' . AnalyticsGuard::message( $analytics_reason )
-				. "\n\nSTOP THE ANALYTICS WORK: WooCommerce Analytics data for this period is not complete (or could not be checked) on this store, so the Analytics steps were left out. Explain the message above to the merchant in plain words and say the sales figures would be incomplete until it is fixed. Do not report Analytics figures, run optional Analytics follow-ups or draw conclusions about sales. Still run the steps below, if any, and report what they return, payment health findings first; stop the review only if no step remains.\n\n"
+				. "\n\nSTOP THE ANALYTICS WORK: WooCommerce Analytics data for this period is not complete (or could not be checked) on this store, so the Analytics steps were left out. Explain the message above to the merchant in plain words and say the sales figures would be incomplete until it is fixed. Do not report Analytics figures, run optional Analytics follow-ups or draw conclusions about sales. Still run the steps below, if any, and report what they return (the card-testing result and its protection advice included), likely or possible card-testing findings first, then payment health findings; stop the review only if no step remains.\n\n"
 				. $instructions;
 		}
 
@@ -358,6 +367,23 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	}
 
 	/**
+	 * Card-testing step, listed straight after payment health by the payment workflows. Its window
+	 * is the same shared window_hours() (today 24, yesterday 48, last_7_days 168, longer periods
+	 * capped at 168): a current rolling look-back, never a reconstruction of the period.
+	 *
+	 * @param string $period One of PERIODS.
+	 * @return array{tool: string, ability: string, arguments: array<string, mixed>, why: string}
+	 */
+	protected static function card_testing_step( string $period ): array {
+		$hours = min( CardTesting::MAX_HOURS, static::window_hours( $period ) );
+		return static::step(
+			CardTesting::NAME,
+			array( 'since_hours' => $hours ),
+			'Card testing second: whether the failed orders created over the last ' . $hours . ' hours look like card testing, compared with this store\'s own earlier orders over 28 days, and which checkout paths have a protection setting configured. A current rolling look-back, not the selected period. Whatever it returns, carry on with the review.'
+		);
+	}
+
+	/**
 	 * Days the period covers, counted back from now in the site's timezone, capped at the
 	 * update-history maximum.
 	 *
@@ -419,7 +445,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * @param array<int, array{0: array{tool: string, why: string}, 1: Availability}>                        $switched    Steps dropped with a diagnosis (switched off, or not confirmed on).
 	 * @param array<int, array{tool: string, ability: string, arguments: array<string, mixed>, why: string}> $denied      Steps dropped because the user's role may not use them.
 	 * @param bool                                                                                           $has_profile Whether a store profile step remains.
-	 * @param array{payment_planned: bool, payment: bool, payment_hours: int, totals: bool, analytics: bool}  $flags       Which key steps survived (selected by ability and subject).
+	 * @param array{payment_planned: bool, payment: bool, payment_hours: int, card_planned: bool, card: bool, card_hours: int, totals: bool, analytics: bool} $flags Which key steps survived (selected by ability and subject).
 	 * @param bool                                                                                           $has_steps   Whether any step remains.
 	 */
 	private static function preamble( Connector $c, array $missing, array $switched, array $denied, bool $has_profile, array $flags, bool $has_steps ): string {
@@ -440,10 +466,27 @@ abstract class AbstractWorkflow extends AbstractAbility {
 			)
 		);
 
+		if ( $flags['card'] ) {
+			$text .= "\n\nCARD TESTING CHECK\n"
+				. 'The card-testing step looks back over the last ' . $flags['card_hours'] . ' hours from now and compares the failed orders created in that time with this store\'s own earlier orders over 28 days. It is a current rolling look-back, not a reconstruction of the period being reviewed (for yesterday it covers the last 48 hours, not yesterday alone).' . "\n"
+				. '- If its verdict is likely_attack or possible_attack, lead the answer with it, before any payment health finding or sales figure. Use its summary and findings (what and check_next) exactly as returned for how many failed orders were created, when, and its caveats; say whether it was still recent or earlier in the window, as its activity says; keep its own wording ("consistent with likely card testing" or "could be card testing") and its caveat that a payment fault is still possible. Never call it confirmed, never say an attack is happening now and never make it stronger than returned. Then name each checkout path in its protection list whose protection_state is not_configured or unknown, with that path\'s check_next.' . "\n"
+				. '- Report payment health\'s red or amber findings after that, as separate findings. Never link them to card testing, or card testing to a sales movement, unless a returned result itself does.' . "\n"
+				. '- If its verdict is unknown, say in one sentence that card testing could not be assessed, why (its summary and limitations say so) and its manual next step. Unknown means not assessed, never a sign that checkout is fine.' . "\n"
+				. '- If its verdict is no_sign, say in one line that no sign of a card-testing burst was found in the order records checked, and what it cannot see (its summary says so). Never say the checkout is safe or protected.' . "\n"
+				. '- Quote its counts exactly as returned. Never add up counts from different assessments, hours, logs or examples, never build a total or a rate from its examples, and never judge card testing by comparing failed orders with paid orders or with Analytics figures.' . "\n"
+				. '- Its protection rows describe settings only: enforcement is never verified, unknown does not mean unprotected, and any suggested protection is for the merchant to switch on, never for you to change.' . "\n"
+				. '- Keep it apart from payment health: a card-testing result never changes payment health\'s counts or statuses, and payment health\'s inventory_only methods and orders outside verified checkout are never described as card testing.' . "\n"
+				. '- If the step returns an error, mention once that the card-testing check could not run, and carry on with the rest of the review.';
+		} elseif ( $flags['card_planned'] ) {
+			$text .= "\n\nCARD TESTING CHECK\nThe card-testing check is not in this plan (the skipped steps below say why). Mention once, in one sentence, that card testing was not checked, and carry on with the rest of the review. Never judge card testing from failed and paid order counts instead.";
+		}
+
 		if ( $flags['payment'] ) {
 			$text .= "\n\nPAYMENT CHECK\n"
 				. 'The payment health step looks back over the last ' . $flags['payment_hours'] . ' hours for unpaid and failed checkouts and payment errors, and over the last 28 days for whether each payment method is still taking orders. It is a current rolling look-back, not a reconstruction of the period being reviewed.' . "\n"
-				. '- If its overall is red or amber, lead the answer with its findings, before any sales figures: say what each one is and what to check next, in plain words, from its what and check_next text. Only its findings are payment problems.' . "\n"
+				. ( $flags['card']
+					? '- If its overall is red or amber, report its findings straight after any likely or possible card-testing result and before any sales figures: say what each one is and what to check next, in plain words, from its what and check_next text. Only its findings are payment problems.'
+					: '- If its overall is red or amber, lead the answer with its findings, before any sales figures: say what each one is and what to check next, in plain words, from its what and check_next text. Only its findings are payment problems.' ) . "\n"
 				. '- If its overall is unknown, say in one sentence which payment checks could not be run (its notes and each check\'s reason say why). Never describe payments as healthy when a check is unknown.' . "\n"
 				. '- If it is green, say in one line that no payment problem was found in the checks it assessed. Green never covers a method whose assessment is inventory_only.' . "\n"
 				. '- A method whose assessment is inventory_only was seen only on orders outside verified checkout activity (their recorded origin is missing or is not checkout, which does not show how they were created), so its checkout health was not assessed. Mention such methods separately, after any real findings, in one plain sentence as unassessed methods for the merchant to confirm: whether the method is meant for checkout, and how those orders were created. Never call them a payment problem, a checkout failure, a lost sale, a charge or money at risk, never count their orders as accepted, unpaid or failed checkouts or as sales, and never suggest switching a method back on. If a method\'s reason says checkout activity may be missing from the result, say that and never say it was used only outside checkout. If inventory methods_truncated is true, say more payment methods may exist than are listed.' . "\n"
@@ -482,7 +525,7 @@ abstract class AbstractWorkflow extends AbstractAbility {
 	 * The run-order sentence, built from the steps that survived so it never names a step that is
 	 * not in the plan (F03).
 	 *
-	 * @param array{payment_planned: bool, payment: bool, payment_hours: int, totals: bool, analytics: bool} $flags     Surviving key steps.
+	 * @param array{payment_planned: bool, payment: bool, payment_hours: int, card_planned: bool, card: bool, card_hours: int, totals: bool, analytics: bool} $flags Surviving key steps.
 	 * @param bool                                                                                          $has_steps Whether any step remains.
 	 */
 	private static function run_order( array $flags, bool $has_steps ): string {
@@ -490,23 +533,35 @@ abstract class AbstractWorkflow extends AbstractAbility {
 		if ( ! $has_steps ) {
 			return 'No step in this plan can run here. Do not call any tool for this review: explain the skipped checks below to the merchant in plain words and report no figures.';
 		}
-		if ( $flags['payment'] && $flags['totals'] ) {
-			return 'Run the first step alone: it is the payment health check. Whatever it returns, carry on. Then run the order totals step alone. If it succeeds, ' . $rest . ' If it fails, follow the ANALYTICS CHECK below.';
-		}
+		// The diagnostic checks that run alone, in plan order: payment health, then card testing.
+		$alone = array();
 		if ( $flags['payment'] ) {
-			return 'Run the first step alone: it is the payment health check. Whatever it returns, carry on: ' . $rest;
+			$alone[] = 'the payment health check';
+		}
+		if ( $flags['card'] ) {
+			$alone[] = 'the card-testing check';
+		}
+		if ( array() === $alone ) {
+			if ( $flags['totals'] ) {
+				return 'Run the first step alone. If it succeeds, ' . $rest . ' If it fails, follow the ANALYTICS CHECK below.';
+			}
+			return 'Run the unconditional steps (in parallel if you can), then any "Only if" steps whose condition holds. When the steps are done, write the answer described below.';
+		}
+		$text = 'Run the first step alone: it is ' . $alone[0] . '. Whatever it returns, carry on';
+		if ( isset( $alone[1] ) ) {
+			$text .= '. Then run the second step alone: it is ' . $alone[1] . '. Whatever it returns, carry on';
 		}
 		if ( $flags['totals'] ) {
-			return 'Run the first step alone. If it succeeds, ' . $rest . ' If it fails, follow the ANALYTICS CHECK below.';
+			return $text . '. Then run the order totals step alone. If it succeeds, ' . $rest . ' If it fails, follow the ANALYTICS CHECK below.';
 		}
-		return 'Run the unconditional steps (in parallel if you can), then any "Only if" steps whose condition holds. When the steps are done, write the answer described below.';
+		return $text . ': ' . $rest;
 	}
 
 	/**
 	 * Analytics handling for the steps that survived. Analytics unavailable stops only the
 	 * Analytics work, never the payment or other non-Analytics checks (R5).
 	 *
-	 * @param array{payment_planned: bool, payment: bool, payment_hours: int, totals: bool, analytics: bool} $flags Surviving key steps.
+	 * @param array{payment_planned: bool, payment: bool, payment_hours: int, card_planned: bool, card: bool, card_hours: int, totals: bool, analytics: bool} $flags Surviving key steps.
 	 */
 	private static function analytics_check( array $flags ): string {
 		if ( ! $flags['analytics'] ) {

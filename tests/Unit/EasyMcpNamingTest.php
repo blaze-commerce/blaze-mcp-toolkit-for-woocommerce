@@ -24,6 +24,7 @@ final class EasyMcpNamingTest extends TestCase {
 			array( 'blaze-mcp-toolkit/health-summary', 'wp_ability_blaze_mcp_toolkit_health_summary' ),
 			array( 'blaze-mcp-toolkit/weekly-store-review', 'wp_ability_blaze_mcp_toolkit_weekly_store_review' ),
 			array( 'blaze-mcp-toolkit/payment-health', 'wp_ability_blaze_mcp_toolkit_payment_health' ),
+			array( 'blaze-mcp-toolkit/card-testing', 'wp_ability_blaze_mcp_toolkit_card_testing' ),
 			array( 'Blaze-MCP-Toolkit/Store_Profile', 'wp_ability_blaze_mcp_toolkit_store_profile' ),
 			array( 'blaze-mcp-toolkit/a-very-long-ability-name-that-goes-past-the-sixty-four-limit', 'wp_ability_blaze_mcp_toolkit_a_very_long_ability_name_t_2031be6c' ),
 		);
