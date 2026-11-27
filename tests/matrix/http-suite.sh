@@ -327,7 +327,11 @@ if has_transport easy && [ "$PREFLIGHT" != 1 ]; then
 	wpc plugin deactivate easy-mcp-ai >/dev/null
 	wpc option delete easy_mcp_ai_enabled_abilities easy_mcp_ai_abilities_seed_pending >/dev/null
 	wpc plugin activate easy-mcp-ai >/dev/null
-	wpc eval 'echo 1;' >/dev/null # the first request after activation runs Easy MCP AI's seed
+	wpc eval 'echo 1;' >/dev/null # up to 2.5.0, the first request after activation runs Easy MCP AI's seed
+	# From 2.5.1 the seed waits for the first request to Easy MCP AI's own routes. An unauthenticated
+	# initialize is one (it answers 401); before 2.5.1 the seed has already run and this changes nothing.
+	curl -sS -o /dev/null --max-time 60 -X POST -H 'Content-Type: application/json' \
+		--data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "$EASY_URL" 2>/dev/null || true
 	seeded=$(option_json easy_mcp_ai_enabled_abilities)
 	missing=()
 	for a in "${BLAZE_ABILITIES[@]}" "${ANALYTICS[@]}"; do

@@ -47,12 +47,12 @@ set -uo pipefail
 # timing and a query plan, and the 1,000 and 1,001 distinct-ID cap cases passed per storage. The
 # transport receipt (BLZMCP_TRANSPORT_OUT, default <record>-transport.md) lists every row.
 #
-# Wave 3 (REVIEW-pass4a R4, ruling Q3), also exit 5 / FAILED: the release matrix is 6 states
-# (Easy MCP AI 2.5.0 added); the required set must come to exactly 40 storage rows (5 connected
-# states x 4 authority/sync combinations x 2 suites) and 164 transport rows (27 per connected route
-# x 6 routes + 2 for none), so narrowing BLZMCP_REQUIRED_STATES can never shrink the gate into a
-# pass; and the HTTP suite's offline fail-closed self-test (tests/matrix/test-http-checks.sh) must
-# have run in this matrix with 0 failures (HTTP_CHECKS line).
+# Wave 3 (REVIEW-pass4a R4, ruling Q3), also exit 5 / FAILED: the release matrix is 7 states
+# (Easy MCP AI 2.5.0 added in 1.2.1, 2.5.1 in 1.3); the required set must come to exactly 48
+# storage rows (6 connected states x 4 authority/sync combinations x 2 suites) and 191 transport
+# rows (27 per connected route x 7 routes + 2 for none), so narrowing BLZMCP_REQUIRED_STATES can
+# never shrink the gate into a pass; and the HTTP suite's offline fail-closed self-test
+# (tests/matrix/test-http-checks.sh) must have run in this matrix with 0 failures (HTTP_CHECKS line).
 #
 # Wave 6 (ruling Q8, REVIEW-pass4e), also exit 5 / FAILED: the summary must carry the host
 # identity (HOST: hostname, logical CPU count N, CPU model and a standard load source), an
@@ -71,10 +71,10 @@ SUMMARY=${1:?summary file}
 VERDICT=${2:?PASSED or FAILED}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT_DIR=${BLZMCP_REPORTS_DIR:-$REPO/../reports}
-REQUIRED_STATES=${BLZMCP_REQUIRED_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none}
+REQUIRED_STATES=${BLZMCP_REQUIRED_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 both none}
 # The release gate's partition counts (wave 3, ruling Q3). Not overridable.
-GATE_STORAGE_ROWS=40
-GATE_TRANSPORT_ROWS=164
+GATE_STORAGE_ROWS=48
+GATE_TRANSPORT_ROWS=191
 STORAGE_COMBOS="hpos:no hpos:yes legacy:yes legacy:no"
 STORAGE_SUITES="test-payment-orders.php test-payment-health.php"
 # Ruling Q6 (REVIEW-pass4c): the recorder's own budget decision, from each partition's raw trials

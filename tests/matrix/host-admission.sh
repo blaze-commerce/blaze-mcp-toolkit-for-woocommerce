@@ -12,7 +12,7 @@
 # - ha_sampler_start appends `<UTC> host=<hostname> ncpu=<N> load1=<x> load5=<y>` every 60 s to a
 #   file until ha_sampler_stop (or until the matrix process is gone).
 # - ha_foreign_wpenv refuses any running wp-env WordPress container on a host port outside the
-#   matrix states' own 8890-8901 (Q8: the owner's 8888 environment counts; a separate checkout or
+#   matrix states' own 8890-8903 (Q8: the owner's 8888 environment counts; a separate checkout or
 #   port is not an exemption, and a container does not say which checkout it serves).
 #
 # Load average divided by logical CPUs is not CPU utilisation and does not prove timing isolation;
@@ -24,7 +24,7 @@
 HA_INTERVAL_DEFAULT=60
 HA_MAX_WAIT_DEFAULT=43200 # 12 hours
 HA_MATRIX_PORT_MIN=8890
-HA_MATRIX_PORT_MAX=8901
+HA_MATRIX_PORT_MAX=8903
 # Linux load source; the self-test points it at a stub file. The recorder only accepts evidence
 # whose load source is `sysctl vm.loadavg` or `/proc/loadavg`.
 HA_PROC_LOADAVG=${HA_PROC_LOADAVG:-/proc/loadavg}
@@ -204,7 +204,7 @@ ha_samples_stats() {
 	echo "$count $m1 $m5 $over"
 }
 
-# ha_foreign_wpenv: 0 when no wp-env WordPress container listens on a host port outside 8890-8901.
+# ha_foreign_wpenv: 0 when no wp-env WordPress container listens on a host port outside 8890-8903.
 # 1 with "<container>:<port> ..." on stdout when one does; 2 when the containers cannot be listed.
 ha_foreign_wpenv() {
 	local out name ports p bad=''

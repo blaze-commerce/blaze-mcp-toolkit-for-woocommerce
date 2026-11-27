@@ -201,8 +201,8 @@ check() {
 		[ "$mut" == ha-no-samples ] && echo 'LOAD_SAMPLES=0' || echo 'LOAD_SAMPLES=180'
 		echo 'LOAD_MAX=5.10|3.40'
 		echo 'LOAD_OVER=4'
-		for state in recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none; do
-			[ "$mut" == drop-easy-2.5.0 ] && [ "$state" == easy-2.5.0 ] && continue
+		for state in recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 both none; do
+			[ "$mut" == drop-easy-2.5.1 ] && [ "$state" == easy-2.5.1 ] && continue
 			if [ "$mut" == state-not-run ] && [ "$state" == both ]; then
 				echo "STATE=$state|NOT RUN|0|1|||[]"
 				continue
@@ -267,7 +267,7 @@ check() {
 	[ "$mut" == log-path ] && echo "FAIL  [both] wp-env start (log: $HOME/private/blzmcp-matrix-logs.XYZ/both-start.log)" >"$WORK/both-http.log"
 	LAST_OUT=$out
 	local states_env=()
-	[ "$mut" == drop-easy-2.5.0 ] && states_env=(BLZMCP_REQUIRED_STATES='recommended easy-2.3.1 easy-2.4.0 both none')
+	[ "$mut" == drop-easy-2.5.1 ] && states_env=(BLZMCP_REQUIRED_STATES='recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none')
 	env ${states_env[@]+"${states_env[@]}"} BLZMCP_MATRIX_OUT=$out BLZMCP_TRANSPORT_OUT="${out%.md}-t.md" BLZMCP_REPORTS_DIR=$WORK "$BASH" "$REPO/tests/matrix/record.sh" "$WORK/summary.txt" PASSED >"$WORK/log" 2>&1
 	local got=$?
 	if [ "$got" -eq "$want" ]; then
@@ -372,17 +372,17 @@ check 'a state that did not run is refused' 5 "$WORK/good" state-not-run
 check 'a duplicated STATE line is refused' 5 "$WORK/good" state-dup
 check 'a duplicated STORAGE line is refused' 5 "$WORK/good" storage-dup
 check 'faithful transport rows are accepted' 0 "$WORK/good"
-assert 'the transport receipt is written with every row and a TRANSPORT PASSED result' "$(grep -q '^- Result: \*\*TRANSPORT PASSED\*\*' "${LAST_OUT%.md}-t.md" && [ "$(grep -cE '^\| [a-z0-9.-]+ \| (rec|easy) \|' "${LAST_OUT%.md}-t.md")" == 164 ] && echo true)"
-assert 'the matrix record has the transport summary (required 164, received 164, passed 164)' "$(grep -q '^- Required 164 (gate 164), received 164, passed 164; missing 0' "$LAST_OUT" && grep -q '^| both | easy | hpos | 11 | 11 |' "$LAST_OUT" && grep -q '^| easy-2.5.0 | easy | legacy | 11 | 11 |' "$LAST_OUT" && echo true)"
-assert 'the matrix record has 40 storage rows (gate 40) and the HTTP safety-check self-test line' "$(grep -qxF -- '- Storage rows: required 40 (gate 40), received 40' "$LAST_OUT" && grep -qxF -- '- HTTP safety-check self-test (tests/matrix/test-http-checks.sh, offline injected replies): 71 passed, 0 failed' "$LAST_OUT" && echo true)"
-check 'a matrix narrowed to the 5 wave 2 states (no easy-2.5.0) is refused' 5 "$WORK/good" drop-easy-2.5.0
-assert '  ... the record names both gate counts' "$(grep -qF 'required transport partitions come to 137, the release matrix needs 164' "$LAST_OUT" && grep -qF 'required storage partitions come to 32, the release matrix needs 40' "$LAST_OUT" && echo true)"
+assert 'the transport receipt is written with every row and a TRANSPORT PASSED result' "$(grep -q '^- Result: \*\*TRANSPORT PASSED\*\*' "${LAST_OUT%.md}-t.md" && [ "$(grep -cE '^\| [a-z0-9.-]+ \| (rec|easy) \|' "${LAST_OUT%.md}-t.md")" == 191 ] && echo true)"
+assert 'the matrix record has the transport summary (required 191, received 191, passed 191)' "$(grep -q '^- Required 191 (gate 191), received 191, passed 191; missing 0' "$LAST_OUT" && grep -q '^| both | easy | hpos | 11 | 11 |' "$LAST_OUT" && grep -q '^| easy-2.5.0 | easy | legacy | 11 | 11 |' "$LAST_OUT" && grep -q '^| easy-2.5.1 | easy | legacy | 11 | 11 |' "$LAST_OUT" && echo true)"
+assert 'the matrix record has 48 storage rows (gate 48) and the HTTP safety-check self-test line' "$(grep -qxF -- '- Storage rows: required 48 (gate 48), received 48' "$LAST_OUT" && grep -qxF -- '- HTTP safety-check self-test (tests/matrix/test-http-checks.sh, offline injected replies): 71 passed, 0 failed' "$LAST_OUT" && echo true)"
+check 'a matrix narrowed to the 6 states before 1.3 (no easy-2.5.1) is refused' 5 "$WORK/good" drop-easy-2.5.1
+assert '  ... the record names both gate counts' "$(grep -qF 'required transport partitions come to 164, the release matrix needs 191' "$LAST_OUT" && grep -qF 'required storage partitions come to 40, the release matrix needs 48' "$LAST_OUT" && echo true)"
 check 'a run without the HTTP safety-check self-test is refused' 5 "$WORK/good" http-checks-missing
 assert '  ... recorded as not run, TRANSPORT FAILED' "$(grep -qF 'test-http-checks.sh) did not run (no HTTP_CHECKS line)' "$LAST_OUT" && grep -q 'TRANSPORT FAILED' "${LAST_OUT%.md}-t.md" && echo true)"
 check 'a run whose HTTP safety-check self-test failed is refused' 5 "$WORK/good" http-checks-failed
 assert '  ... recorded with its summary' "$(grep -qF 'test-http-checks.sh) did not pass: 68 passed, 3 failed' "$LAST_OUT" && echo true)"
 check 'a missing transport row is refused' 5 "$WORK/good" transport-missing
-assert '  ... the record names the missing partition' "$(grep -qF 'transport rows missing: 1 of 164 (first: easy-2.3.1|easy|legacy|anonymous|denied)' "$LAST_OUT" && echo true)"
+assert '  ... the record names the missing partition' "$(grep -qF 'transport rows missing: 1 of 191 (first: easy-2.3.1|easy|legacy|anonymous|denied)' "$LAST_OUT" && echo true)"
 check 'a duplicated transport row is refused' 5 "$WORK/good" transport-dup
 check 'a transport row outside the required set is refused' 5 "$WORK/good" transport-unknown
 check 'a state with no transport rows is refused' 5 "$WORK/good" transport-none

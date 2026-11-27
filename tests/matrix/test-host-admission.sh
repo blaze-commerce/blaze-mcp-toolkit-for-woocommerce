@@ -179,12 +179,12 @@ out=$(ha_foreign_wpenv)
 rc=$?
 eq "the owner's port-8888 wp-env is refused (rc 1)" 1 "$rc"
 eq '  ... named with its port (and its tests container on 8889), each once' '86c7-wordpress-1:8888 86c7-tests-wordpress-1:8889' "$out"
-printf '%s\n' 'a1-wordpress-1|0.0.0.0:8896->80/tcp' 'a1-tests-wordpress-1|0.0.0.0:8897->80/tcp' 'b2-wordpress-1|0.0.0.0:8890->80/tcp' 'c3-tests-wordpress-1|0.0.0.0:8901->80/tcp' 'a1-mysql-1|0.0.0.0:55001->3306/tcp' 'a1-cli-1|' 'other-db|0.0.0.0:5432->5432/tcp' >"$STUB/docker-ps"
+printf '%s\n' 'a1-wordpress-1|0.0.0.0:8896->80/tcp' 'a1-tests-wordpress-1|0.0.0.0:8897->80/tcp' 'b2-wordpress-1|0.0.0.0:8890->80/tcp' 'c3-tests-wordpress-1|0.0.0.0:8901->80/tcp' 'd4-tests-wordpress-1|0.0.0.0:8903->80/tcp' 'a1-mysql-1|0.0.0.0:55001->3306/tcp' 'a1-cli-1|' 'other-db|0.0.0.0:5432->5432/tcp' >"$STUB/docker-ps"
 out=$(ha_foreign_wpenv)
-eq "the matrix states' own ports 8890-8901 are allowed; mysql, cli and other containers ignored" '0 []' "$? [$out]"
-printf '%s\n' 'x-wordpress-1|0.0.0.0:8902->80/tcp' >"$STUB/docker-ps"
+eq "the matrix states' own ports 8890-8903 are allowed; mysql, cli and other containers ignored" '0 []' "$? [$out]"
+printf '%s\n' 'x-wordpress-1|0.0.0.0:8904->80/tcp' >"$STUB/docker-ps"
 out=$(ha_foreign_wpenv)
-eq 'port 8902 (just outside the matrix range) is refused' '1 x-wordpress-1:8902' "$? $out"
+eq 'port 8904 (just outside the matrix range) is refused' '1 x-wordpress-1:8904' "$? $out"
 printf '%s\n' 'y_wordpress_1|127.0.0.1:8889->80/tcp' >"$STUB/docker-ps"
 out=$(ha_foreign_wpenv)
 eq 'port 8889 (just below, older underscore naming) is refused' '1 y_wordpress_1:8889' "$? $out"

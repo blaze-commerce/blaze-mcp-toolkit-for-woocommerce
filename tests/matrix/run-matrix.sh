@@ -23,14 +23,14 @@
 # Every state runs inside one site-local reporting date (tests/matrix/.window). If a state seeds
 # on a different date than the first one, the whole matrix is reseeded once from the start.
 #
-# Env: BLZMCP_MATRIX_STATES  space-separated subset (default: all six, in order; record.sh fails a
+# Env: BLZMCP_MATRIX_STATES  space-separated subset (default: all seven, in order; record.sh fails a
 #                            subset as incomplete evidence)
 #      BLZMCP_MATRIX_KEEP=1  leave the environments running afterwards (default: wp-env stop)
 #      BLZMCP_MATRIX_TZ      site timezone for every state (default Australia/Melbourne)
 #
 # Host admission (ruling Q8, REVIEW-pass4e; tests/matrix/host-admission.sh), always on, no switch:
 # the matrix refuses to start while a wp-env WordPress container runs on a host port outside the
-# states' own 8890-8901; a background sampler appends `<UTC> host= ncpu= load1= load5=` every 60 s
+# states' own 8890-8903; a background sampler appends `<UTC> host= ncpu= load1= load5=` every 60 s
 # to $LOG_DIR/load-samples.txt for the whole run; before the first state and again immediately
 # before the performance phase it waits, sampling every 60 s inside this same run, until
 # load5 < 0.25 x N and load1 < 0.33 x N (N logical CPUs). It gives up after 12 hours with
@@ -45,7 +45,7 @@ case "$ZIP" in /*) ;; *) ZIP="$REPO/$ZIP" ;; esac
 WPE="$REPO/node_modules/.bin/wp-env"
 [ -x "$WPE" ] || { echo "MATRIX FAILED: $WPE missing (npm install)"; exit 1; }
 MATRIX_DIR=${BLZMCP_MATRIX_DIR:-$HOME/.blzmcp-matrix}
-STATES=${BLZMCP_MATRIX_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none}
+STATES=${BLZMCP_MATRIX_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 both none}
 TZ_NAME=${BLZMCP_MATRIX_TZ:-Australia/Melbourne}
 SLUG=blaze-mcp-toolkit-for-woocommerce
 T=wp-content/blzmcp-tests
