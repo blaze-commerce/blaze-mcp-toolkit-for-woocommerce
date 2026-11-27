@@ -68,6 +68,9 @@ final class CardTestingOrders {
 	public const SUPPORTED_WC_MIN   = '10.9.0';
 	public const SUPPORTED_WC_BELOW = '11.4.0';
 
+	/** The exact releases whose source was read for these signals (ruling Q3 disclosure). */
+	public const SOURCE_PINS = array( '10.9.0', '11.3.1' );
+
 	/** Mutually exclusive outcome classes (C3). */
 	public const CLASSES = array( 'failed_unpaid', 'accepted', 'cancelled_unpaid', 'pending_unpaid', 'checkout_draft', 'other_status' );
 
@@ -110,6 +113,13 @@ final class CardTestingOrders {
 	 * @var array<string,array{supported:bool,reason:?string}>
 	 */
 	private array $signals;
+
+	/**
+	 * Installed WooCommerce version (safe display text) and whether it is inside the verified range.
+	 *
+	 * @var array{wc_version:?string,wc_supported:bool}
+	 */
+	private array $version;
 
 	/**
 	 * Bounds for this call.
@@ -207,6 +217,10 @@ final class CardTestingOrders {
 			'ip'          => self::signal( $signals['ip'] ?? null ),
 			'attribution' => self::signal( $signals['attribution'] ?? null ),
 		);
+		$this->version = array(
+			'wc_version'   => self::display_version( $signals['wc_version'] ?? null ),
+			'wc_supported' => true === ( $signals['wc_supported'] ?? false ),
+		);
 		$this->limits  = array(
 			'methods'       => self::positive( $limits['methods'] ?? null, self::MAX_METHODS ),
 			'networks'      => self::positive( $limits['networks'] ?? null, self::MAX_NETWORKS ),
@@ -248,11 +262,23 @@ final class CardTestingOrders {
 	 * @param string|null $version WooCommerce version string.
 	 */
 	public static function version_supported( ?string $version ): bool {
-		if ( null === $version || 1 !== preg_match( '/^(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?![0-9])/', $version, $m ) ) {
+		// Ruling Q3: stable releases only, written exactly major.minor.patch. A prerelease, build
+		// suffix, leading zero, extra part or any other malformed value is unsupported, never
+		// stripped down to a matching release.
+		if ( null === $version || 1 !== preg_match( '/^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$/', $version ) ) {
 			return false;
 		}
-		$v = $m[1] . '.' . $m[2] . '.' . $m[3];
-		return version_compare( $v, self::SUPPORTED_WC_MIN, '>=' ) && version_compare( $v, self::SUPPORTED_WC_BELOW, '<' );
+		return version_compare( $version, self::SUPPORTED_WC_MIN, '>=' ) && version_compare( $version, self::SUPPORTED_WC_BELOW, '<' );
+	}
+
+	/**
+	 * The installed WooCommerce version as safe display text (digits, dots and a short prerelease
+	 * tag only), or null when WC_VERSION is missing or not in that form. Never raw constant text.
+	 *
+	 * @param mixed $raw WC_VERSION value.
+	 */
+	public static function display_version( $raw ): ?string {
+		return is_string( $raw ) && 1 === preg_match( '/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(-[0-9A-Za-z.]{1,24})?$/', $raw ) ? $raw : null;
 	}
 
 	/**
@@ -262,10 +288,23 @@ final class CardTestingOrders {
 	 * the source type and so manufacture missing attribution.
 	 *
 	 * @param array{ip:bool,meta:bool} $storage IP storage and attribution meta storage present.
-	 * @return array{wc_version:?string,ip:array{supported:bool,reason:?string},attribution:array{supported:bool,reason:?string}}
+	 * @return array{wc_version:?string,wc_supported:bool,ip:array{supported:bool,reason:?string},attribution:array{supported:bool,reason:?string}}
 	 */
 	public static function signal_support( array $storage ): array {
-		$version  = defined( 'WC_VERSION' ) && is_string( constant( 'WC_VERSION' ) ) ? (string) constant( 'WC_VERSION' ) : null;
+		return self::signals_for( $storage, defined( 'WC_VERSION' ) ? constant( 'WC_VERSION' ) : null );
+	}
+
+	/**
+	 * signal_support() for a given WC_VERSION value. `wc_version` is the safe display text of the
+	 * installed version (display_version()), whether or not it is supported; `wc_supported` says
+	 * whether it is a stable release inside the source-verified range.
+	 *
+	 * @param array{ip:bool,meta:bool} $storage     Storage facts.
+	 * @param mixed                    $raw_version WC_VERSION value (null when undefined).
+	 * @return array{wc_version:?string,wc_supported:bool,ip:array{supported:bool,reason:?string},attribution:array{supported:bool,reason:?string}}
+	 */
+	public static function signals_for( array $storage, $raw_version ): array {
+		$version  = is_string( $raw_version ) ? $raw_version : null;
 		$verified = self::version_supported( $version );
 
 		$ip = array(
@@ -304,9 +343,10 @@ final class CardTestingOrders {
 		}
 
 		return array(
-			'wc_version'  => $verified ? $version : null,
-			'ip'          => $ip,
-			'attribution' => $attr,
+			'wc_version'   => self::display_version( $version ),
+			'wc_supported' => $verified,
+			'ip'           => $ip,
+			'attribution'  => $attr,
 		);
 	}
 
@@ -336,6 +376,8 @@ final class CardTestingOrders {
 				'ip'          => self::signal( $signals['ip'] ?? null ),
 				'attribution' => self::signal( $signals['attribution'] ?? null ),
 			),
+			'wc_version'        => self::display_version( $signals['wc_version'] ?? null ),
+			'wc_supported'      => true === ( $signals['wc_supported'] ?? false ),
 			'totals'            => null,
 			'method_orders'     => array(),
 			'method_ids'        => array(),
@@ -640,7 +682,10 @@ final class CardTestingOrders {
 	}
 
 	/**
-	 * Track a method ID within the identity bound.
+	 * Admit a method ID to the one shared identity budget (C4 MAX_METHODS), whether it first comes
+	 * from a valid row or an invalid one. Past the budget the identity is omitted: the row still
+	 * counts in the store-wide totals, and the read reports methods_truncated so no exact distinct
+	 * total is published.
 	 *
 	 * @param string $method Safe method ID.
 	 */
@@ -658,7 +703,12 @@ final class CardTestingOrders {
 	}
 
 	/**
-	 * Tally an invalid row: excluded, and its scope (if it ever exists) is partial.
+	 * Tally an invalid row: excluded, and its scope (if it ever exists) is partial. Its method takes
+	 * an identity from the same shared budget as valid rows, but an invalid row never creates a
+	 * scope or any positive evidence. An identity omitted past the budget also marks the
+	 * invalid-row map incomplete (invalid_overflow). That row belongs to the omitted method only, so
+	 * tracked scopes keep their exact counts; the result, the store-wide aggregates and the distinct
+	 * totals carry the gap instead.
 	 *
 	 * @param string $origin checkout|store_api|missing|other.
 	 * @param string $method Safe method ID ('' when empty).
@@ -668,11 +718,11 @@ final class CardTestingOrders {
 		if ( 'other' === $origin || '' === $method ) {
 			return;
 		}
-		$o = 'missing' === $origin ? 'missing_origin' : 'verified_checkout';
-		if ( ! isset( $this->invalid[ $o ][ $method ] ) && count( $this->invalid['verified_checkout'] ) + count( $this->invalid['missing_origin'] ) >= $this->limits['methods'] ) {
+		if ( ! $this->track_method( $method ) ) {
 			$this->flags['invalid_overflow'] = true;
 			return;
 		}
+		$o                              = 'missing' === $origin ? 'missing_origin' : 'verified_checkout';
 		$this->invalid[ $o ][ $method ] = ( $this->invalid[ $o ][ $method ] ?? 0 ) + 1;
 	}
 
@@ -755,7 +805,9 @@ final class CardTestingOrders {
 					'baseline'           => $s['b'],
 					'invalid_rows'       => $invalid,
 					'anomalies'          => $s['anomalies'],
-					'counts_complete'    => $scan_complete && 0 === $invalid && 0 === $s['anomalies'] && ! $this->flags['invalid_overflow'],
+					// invalid_overflow is not a gap here: with one shared identity budget, an invalid row is
+					// omitted only when its method is itself omitted, so it never belongs to a tracked scope.
+					'counts_complete'    => $scan_complete && 0 === $invalid && 0 === $s['anomalies'],
 					'series_complete'    => $s['series_complete'],
 					'networks_complete'  => $s['networks_complete'],
 					'example_candidates' => $s['examples'],
@@ -776,7 +828,8 @@ final class CardTestingOrders {
 				}
 			}
 		}
-		$method_ids = array_map( 'strval', array_keys( $this->method_index + array_fill_keys( array_map( 'strval', array_keys( $this->invalid['verified_checkout'] + $this->invalid['missing_origin'] ) ), true ) ) );
+		// One identity budget: every valid and invalid-only method ID is already in method_index.
+		$method_ids = array_map( 'strval', array_keys( $this->method_index ) );
 		sort( $method_ids, SORT_STRING );
 		ksort( $this->method_orders, SORT_STRING );
 		$partial = ! $scan_complete || $this->totals['invalid_rows'] > 0 || $this->flags['methods_truncated'] || $this->flags['invalid_overflow']
@@ -792,6 +845,8 @@ final class CardTestingOrders {
 			'history_start'     => $this->h_start,
 			'window_start'      => $this->w_start,
 			'signals'           => $this->signals,
+			'wc_version'        => $this->version['wc_version'],
+			'wc_supported'      => $this->version['wc_supported'],
 			'totals'            => $this->totals,
 			'method_orders'     => $this->method_orders,
 			'method_ids'        => $method_ids,

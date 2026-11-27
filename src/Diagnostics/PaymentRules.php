@@ -103,6 +103,7 @@ final class PaymentRules {
 		'byte_cap',
 		'log_row_cap',
 		'unparsed_entries',
+		'shared_log_source',
 		// Log and job categories (PaymentErrors::LOG_CATEGORIES, ::JOB_CATEGORIES).
 		'gateway_error',
 		'gateway_fatal',

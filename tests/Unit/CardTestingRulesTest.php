@@ -206,9 +206,13 @@ namespace Blaze\McpToolkit\Tests\Unit {
 			}
 			$reads[] = array( (array) ( $v['orders'] ?? array() ), array() );
 			$since   = (int) ( $v['since_hours'] ?? 48 );
-			$signals = array(
-				'ip'          => self::sig( $v['signals']['ip'] ?? true ),
-				'attribution' => self::sig( $v['signals']['attribution'] ?? true ),
+			// A full signal_support() array is used as given; a vector spec (true or a reason code per
+			// signal) runs as WooCommerce 11.3.1, the current source pin.
+			$signals = isset( $v['signals']['wc_supported'] ) ? $v['signals'] : array(
+				'wc_version'   => '11.3.1',
+				'wc_supported' => true,
+				'ip'           => self::sig( $v['signals']['ip'] ?? true ),
+				'attribution'  => self::sig( $v['signals']['attribution'] ?? true ),
 			);
 			$acc     = new CardTestingOrders( $now, $since, $signals, (array) ( $v['limits'] ?? array() ) );
 			$count   = 0;
@@ -360,6 +364,9 @@ namespace Blaze\McpToolkit\Tests\Unit {
 			if ( isset( $e['summary_includes'] ) ) {
 				$this->assertStringContainsString( $e['summary_includes'], $out['summary'], $v['name'] . ': summary' );
 			}
+			if ( isset( $e['summary_excludes'] ) ) {
+				$this->assertStringNotContainsString( $e['summary_excludes'], $out['summary'], $v['name'] . ': summary excludes' );
+			}
 			if ( ! empty( $e['store_finding'] ) ) {
 				$store = array_filter( $out['findings'], static fn( array $f ): bool => null === $f['method_id'] && 'warning' === $f['severity'] );
 				$this->assertNotEmpty( $store, $v['name'] . ': the store-wide finding is reported when no single method shows it' );
@@ -367,7 +374,7 @@ namespace Blaze\McpToolkit\Tests\Unit {
 			foreach ( array_merge( isset( $e['assessment'] ) ? array( $e['assessment'] ) : array(), (array) ( $e['assessments'] ?? array() ) ) as $want ) {
 				$a = self::assessment( $out, $want['method_id'], $want['origin_scope'] );
 				$this->assertNotNull( $a, $v['name'] . ': assessment ' . ( $want['method_id'] ?? 'store' ) . ' present' );
-				foreach ( array( 'verdict', 'activity', 'applicable', 'baseline_sufficient', 'reason_code', 'episodes_truncated' ) as $k ) {
+				foreach ( array( 'verdict', 'activity', 'applicable', 'coverage', 'baseline_sufficient', 'reason_code', 'episodes_truncated' ) as $k ) {
 					if ( array_key_exists( $k, $want ) ) {
 						$this->assertSame( $want[ $k ], $a[ $k ], $v['name'] . ": assessment {$k}" );
 					}
@@ -377,6 +384,31 @@ namespace Blaze\McpToolkit\Tests\Unit {
 				}
 				if ( isset( $want['episodes'] ) ) {
 					$this->assertCount( $want['episodes'], $a['episodes'], $v['name'] . ': episodes' );
+				}
+				foreach ( (array) ( $want['latest_hour'] ?? array() ) as $k => $x ) {
+					$this->assertSame( $x, $a['latest_hour'][ $k ], $v['name'] . ': latest_hour ' . $k );
+				}
+			}
+			// C5 on every public negative verdict (wave 2): no nested check reads no_sign where its
+			// assessment does not, and no nested hour reads complete under an incomplete assessment.
+			foreach ( $out['assessments'] as $a ) {
+				$label = $v['name'] . ': ' . ( $a['method_id'] ?? 'store' ) . '/' . $a['origin_scope'];
+				foreach ( array_merge( array( $a['latest_hour'] ), $a['episodes'] ) as $b ) {
+					// Under a positive assessment a quiet hour may read no_sign (its checks are complete);
+					// under an unknown one no nested check may.
+					if ( 'unknown' === $a['verdict'] ) {
+						$this->assertNotSame( 'no_sign', $b['verdict'], "{$label}: no nested no_sign under an unknown assessment" );
+					}
+					if ( $a['applicable'] && 'complete' !== $a['coverage'] ) {
+						$this->assertNotSame( 'complete', $b['coverage'], "{$label}: nested hour coverage follows the assessment's gap" );
+						$this->assertNotNull( $b['reason_code'], "{$label}: nested hour names the gap" );
+					}
+					if ( 'unknown' === $b['verdict'] && $a['applicable'] ) {
+						$this->assertNotNull( $b['reason_code'], "{$label}: an unknown hour says why" );
+					}
+				}
+				if ( 'no_sign' === $a['verdict'] ) {
+					$this->assertSame( 'no_sign', $a['latest_hour']['verdict'], "{$label}: a no_sign assessment's latest hour is no_sign" );
 				}
 			}
 			// Invariants on every vector.
@@ -523,6 +555,25 @@ namespace Blaze\McpToolkit\Tests\Unit {
 			$this->assertSame( $verdict, $out['verdict'], $name );
 			if ( null !== $activity ) {
 				$this->assertSame( $activity, $out['activity'], $name . ' (activity)' );
+			}
+		}
+
+		public function test_network_explanation_matches_the_evidence(): void {
+			$b     = self::boundaries();
+			$cases = array(
+				// Too low a share with a usable saved network: insufficient evidence, not dispersion.
+				'MIN_IP_COMPLETENESS 63/80'    => array( 'Only 63 of these 80 failed orders had a usable saved network, too few to judge whether they came from a few recorded networks.', 'not concentrated' ),
+				// Too few orders with a usable saved network: insufficient evidence, not dispersion.
+				'MIN_NETWORK_ORDERS 19'        => array( 'Only 19 of these 20 failed orders had a usable saved network, too few to judge whether they came from a few recorded networks.', 'not concentrated' ),
+				// Enough evidence, really spread out: the dispersion sentence with its figures.
+				'MIN_TOP_NETWORK_SHARE 79/100' => array( 'The 3 largest recorded networks held 79 of the 100 failed orders with a saved network, so these orders were not concentrated in a few recorded networks.', 'too few to judge' ),
+			);
+			foreach ( $cases as $name => $c ) {
+				list( $out ) = self::scenario( $b[ $name ][0] );
+				$this->assertSame( $b[ $name ][1], $out['verdict'], "{$name}: numerical verdict unchanged" );
+				$this->assertStringContainsString( $c[0], $out['summary'], "{$name}: truthful network sentence" );
+				$this->assertStringNotContainsString( $c[1], $out['summary'], "{$name}: no claim the evidence does not support" );
+				$this->assertFalse( self::assessment( $out, 'stripe' )['latest_hour']['networks']['signal'] );
 			}
 		}
 
@@ -873,6 +924,93 @@ namespace Blaze\McpToolkit\Tests\Unit {
 			$this->assertContains( 'invalid_timestamps', array_column( $past['limitations'], 'code' ) );
 		}
 
+		public function test_one_shared_identity_budget(): void {
+			$facts = array();
+			foreach ( array( 'blz_v0', 'blz_v1', 'blz_v2', 'blz_i0', 'blz_i1', 'blz_i2', 'blz_i3', 'blz_x' ) as $id ) {
+				$facts[ $id ] = array(
+					'kind'      => 'instant',
+					'test_mode' => false,
+				);
+			}
+			$valid   = static fn( array $ids ): array => array_map(
+				static fn( string $id ): array => array(
+					'created' => self::NOW - 60,
+					'method'  => $id,
+				),
+				$ids
+			);
+			$invalid = static fn( array $ids ): array => array_map(
+				static fn( string $id ): array => array(
+					'created' => self::NOW + 60,
+					'method'  => $id,
+				),
+				$ids
+			);
+			$eval    = static fn( array $r ): array => CardTestingRules::evaluate( $r, $facts, array(), self::NOW, 48, new \DateTimeZone( 'UTC' ) );
+			$bounded = function ( array $r, array $out, int $limit, string $label ): void {
+				$this->assertLessThanOrEqual( $limit, count( $r['method_ids'] ), "{$label}: reader identities within the bound" );
+				$this->assertSame( count( $r['method_ids'] ), $r['usage']['methods'], "{$label}: usage counts every admitted identity" );
+				$this->assertLessThanOrEqual( $limit, count( $out['methods'] ), "{$label}: public method facts (the cached method dependencies) within the bound" );
+			};
+
+			// Mixed valid and invalid-only identities at the bound, then one past it.
+			$r   = self::fold( array_merge( $valid( array( 'blz_v0', 'blz_v1' ) ), $invalid( array( 'blz_i0' ) ) ), array( 'methods' => 3 ) );
+			$out = $eval( $r );
+			$bounded( $r, $out, 3, 'mixed at the bound' );
+			$this->assertSame( array( false, false, 3, 3 ), array( $r['methods_truncated'], $r['invalid_overflow'], $out['methods_total'], $out['assessments_total'] ), 'mixed at the bound: exact totals (3 method facts; 2 method scopes and 1 aggregate assessed, the invalid-only identity has no scope)' );
+			$this->assertSame( array( 'blz_i0' ), array_column( $r['invalid_only'], 'method_id' ), 'mixed at the bound: the invalid-only identity is disclosed, never a scope' );
+			$this->assertSame( array( 'blz_v0', 'blz_v1' ), array_column( $r['scopes'], 'method_id' ), 'invalid rows never create positive evidence' );
+			$r   = self::fold( array_merge( $valid( array( 'blz_v0', 'blz_v1' ) ), $invalid( array( 'blz_i0', 'blz_i1' ) ) ), array( 'methods' => 3 ) );
+			$out = $eval( $r );
+			$bounded( $r, $out, 3, 'mixed one past the bound' );
+			$this->assertSame( array( true, true, null, null ), array( $r['methods_truncated'], $r['invalid_overflow'], $out['methods_total'], $out['assessments_total'] ), 'mixed one past the bound: truncated, no exact totals' );
+			$this->assertTrue( $out['methods_truncated'] );
+			$this->assertNotSame( 'no_sign', $out['verdict'], 'an omitted identity forbids an all-clear' );
+			$this->assertContains( 'method_cap', array_column( $out['limitations'], 'code' ) );
+			$this->assertSame( array( true, true ), array_column( $r['scopes'], 'counts_complete' ), 'mixed one past the bound: the omitted identity\'s invalid row never makes a tracked scope partial' );
+
+			// The review's case: 3 valid plus 3 different invalid-only identities at a bound of 3.
+			$r   = self::fold( array_merge( $valid( array( 'blz_v0', 'blz_v1', 'blz_v2' ) ), $invalid( array( 'blz_i0', 'blz_i1', 'blz_i2' ) ) ), array( 'methods' => 3 ) );
+			$out = $eval( $r );
+			$bounded( $r, $out, 3, '3 valid + 3 invalid-only' );
+			$this->assertSame( array( true, null, null ), array( $r['methods_truncated'], $out['methods_total'], $out['assessments_total'] ), '3 valid + 3 invalid-only: never 6 facts, never an exact total' );
+			$this->assertSame( array( true, true, true ), array_column( $r['scopes'], 'counts_complete' ), '3 valid + 3 invalid-only: the 3 tracked scopes keep exact counts' );
+			$this->assertSame( array( 'blz_v0', 'blz_v1', 'blz_v2' ), array_column( $r['scopes'], 'method_id' ) );
+			$this->assertSame( 3, $r['totals']['invalid_rows'], '3 valid + 3 invalid-only: every invalid row still counted store-wide' );
+
+			// Invalid-only identities alone: at the bound, then one past it.
+			$r   = self::fold( $invalid( array( 'blz_i0', 'blz_i1', 'blz_i2' ) ), array( 'methods' => 3 ) );
+			$out = $eval( $r );
+			$this->assertSame( array( false, 3, array() ), array( $r['methods_truncated'], $out['methods_total'], $r['scopes'] ), 'invalid-only at the bound: exact, no scope' );
+			$r   = self::fold( $invalid( array( 'blz_i0', 'blz_i1', 'blz_i2', 'blz_i3' ) ), array( 'methods' => 3 ) );
+			$out = $eval( $r );
+			$bounded( $r, $out, 3, 'invalid-only overflow' );
+			$this->assertSame( array( true, true, null, null, 4 ), array( $r['methods_truncated'], $r['invalid_overflow'], $out['methods_total'], $out['assessments_total'], $r['totals']['invalid_rows'] ), 'invalid-only overflow: truncated, null totals, every invalid row still counted' );
+
+			// One method across every origin, valid and invalid: one identity.
+			$rows = array(
+				array( 'created' => self::NOW - 60, 'method' => 'blz_x', 'via' => 'checkout' ),
+				array( 'created' => self::NOW - 70, 'method' => 'blz_x', 'via' => 'store-api' ),
+				array( 'created' => self::NOW - 80, 'method' => 'blz_x', 'via' => '' ),
+				array( 'created' => self::NOW - 90, 'method' => 'blz_x', 'via' => 'admin' ),
+				array( 'created' => self::NOW + 60, 'method' => 'blz_x', 'via' => 'checkout' ),
+				array( 'created' => self::NOW + 60, 'method' => 'blz_x', 'via' => '' ),
+			);
+			$r    = self::fold( $rows, array( 'methods' => 1 ) );
+			$out  = $eval( $r );
+			$this->assertSame( array( false, array( 'blz_x' ), 1, 1 ), array( $r['methods_truncated'], $r['method_ids'], $r['usage']['methods'], $out['methods_total'] ), 'overlapping origins and invalid rows: one identity within a bound of 1' );
+			$this->assertSame( array( 'blz_x|verified_checkout', 'blz_x|missing_origin' ), array_map( static fn( $s ) => $s['method_id'] . '|' . $s['origin_scope'], $r['scopes'] ) );
+			$this->assertSame( array( 1, 1 ), array_column( $r['scopes'], 'invalid_rows' ), 'invalid rows mark their own scope partial' );
+			$r = self::fold( array_merge( $rows, $valid( array( 'blz_v0' ) ) ), array( 'methods' => 1 ) );
+			$this->assertSame( array( true, array( 'blz_x' ) ), array( $r['methods_truncated'], $r['method_ids'] ), 'a second identity past a bound of 1 is omitted' );
+
+			// A reader result over the shared budget is cut by the rules, never published whole.
+			$big               = self::fold( $valid( array( 'blz_v0' ) ) );
+			$big['method_ids'] = array_map( static fn( int $i ): string => sprintf( 'blz_%04d', $i ), range( 0, CardTestingOrders::MAX_METHODS ) );
+			$out               = $eval( $big );
+			$this->assertSame( array( CardTestingOrders::MAX_METHODS, true, null, null ), array( count( $out['methods'] ), $out['methods_truncated'], $out['methods_total'], $out['assessments_total'] ), 'rules cap method facts at MAX_METHODS and publish no exact total' );
+		}
+
 		public function test_log_gaps_block_only_their_own_family(): void {
 			$denied = static fn( ?string $family, bool $applicable = true, string $coverage = 'unavailable' ): array => array_filter(
 				array(
@@ -984,14 +1122,66 @@ namespace Blaze\McpToolkit\Tests\Unit {
 		}
 
 		public function test_version_gate(): void {
-			$this->assertTrue( CardTestingOrders::version_supported( '10.9.0' ) );
-			$this->assertTrue( CardTestingOrders::version_supported( '11.3.1' ) );
-			$this->assertTrue( CardTestingOrders::version_supported( '11.3.9-rc.1' ) );
-			$this->assertFalse( CardTestingOrders::version_supported( '10.8.9' ) );
-			$this->assertFalse( CardTestingOrders::version_supported( '11.4.0' ) );
-			$this->assertFalse( CardTestingOrders::version_supported( '11.4.0-beta.1' ) );
+			// Ruling Q3: one range 10.9.0 <= WC < 11.4.0, stable releases only, no suffix stripping.
+			foreach ( array( '10.9.0', '10.9.1', '11.0.0', '11.3.1', '11.3.9' ) as $v ) {
+				$this->assertTrue( CardTestingOrders::version_supported( $v ), $v );
+			}
+			foreach ( array( '10.8.9', '11.4.0', '12.0.0', '11.3.9-rc.1', '11.3.1-beta.2', '10.9.0-dev', '11.4.0-beta.1', '11.3.1+build', '11.3', '11.3.1.1', 'v11.3.1', '011.3.1', '11.03.1', ' 11.3.1', '11.3.1 ', '', 'trunk' ) as $v ) {
+				$this->assertFalse( CardTestingOrders::version_supported( $v ), "'{$v}' is not a supported stable release" );
+			}
 			$this->assertFalse( CardTestingOrders::version_supported( null ) );
-			$this->assertFalse( CardTestingOrders::version_supported( 'trunk' ) );
+			$storage = array(
+				'ip'   => true,
+				'meta' => true,
+			);
+			foreach ( array(
+				'11.3.1'          => array( '11.3.1', true, true ),
+				'11.3.2-rc.1'     => array( '11.3.2-rc.1', false, false ),
+				'11.4.0'          => array( '11.4.0', false, false ),
+				'11.3.1<script>'  => array( null, false, false ),
+				'11.3.1 '         => array( null, false, false ),
+			) as $raw => $want ) {
+				$s = CardTestingOrders::signals_for( $storage, (string) $raw );
+				$this->assertSame( $want, array( $s['wc_version'], $s['wc_supported'], $s['ip']['supported'] ), "signals for WC_VERSION '{$raw}'" );
+				if ( ! $want[1] ) {
+					$this->assertSame( array( 'unsupported_source_version', 'unsupported_source_version' ), array( $s['ip']['reason'], $s['attribution']['reason'] ), "'{$raw}': explicit unsupported reason, never a guessed off value" );
+				}
+			}
+			$s = CardTestingOrders::signals_for( $storage, null );
+			$this->assertSame( array( null, false ), array( $s['wc_version'], $s['wc_supported'] ), 'no WC_VERSION' );
+		}
+
+		public function test_installed_version_is_disclosed_safely(): void {
+			foreach ( array(
+				'11.3.1'         => 'WooCommerce 11.3.1 is installed, one of the versions whose source was checked.',
+				'10.9.0'         => 'WooCommerce 10.9.0 is installed, one of the versions whose source was checked.',
+				'11.3.2'         => 'WooCommerce 11.3.2 is installed. It is inside the supported range but its source was not checked separately.',
+				'11.3.2-rc.1'    => 'WooCommerce 11.3.2-rc.1 is installed. Test and pre-release versions are outside the supported range.',
+				'11.4.0'         => 'WooCommerce 11.4.0 is installed, which is outside the supported range.',
+				'11.3.1<script>' => 'The installed WooCommerce version could not be read, so it is treated as outside the supported range.',
+			) as $raw => $tail ) {
+				$v           = array(
+					'use'     => array( 'healthy_baseline', 'healthy_current' ),
+					'signals' => CardTestingOrders::signals_for(
+						array(
+							'ip'   => true,
+							'meta' => true,
+						),
+						$raw
+					),
+				);
+				list( $out ) = self::scenario( $v );
+				$found       = array_values( array_filter( $out['limitations'], static fn( array $l ): bool => 'order_signal_versions' === $l['code'] ) );
+				$this->assertCount( 1, $found, "{$raw}: one version disclosure" );
+				$this->assertSame( CardTestingRules::reason_text( 'order_signal_versions' ) . ' ' . $tail, $found[0]['what'], "{$raw}: source pins, range and the installed version" );
+				$this->assertStringNotContainsString( '<script>', (string) json_encode( $out ) );
+				if ( ! CardTestingOrders::version_supported( $raw ) ) {
+					$this->assertContains( 'unsupported_source_version', array_column( $out['limitations'], 'code' ), "{$raw}: the gate is disclosed" );
+					$this->assertNotSame( 'likely_attack', $out['verdict'] );
+				}
+			}
+			$unread = CardTestingRules::evaluate( CardTestingOrders::unavailable( self::NOW, 48, null, 'read_failed', CardTestingOrders::signals_for( array(), '11.3.1' ) ), array(), array(), self::NOW, 48, new \DateTimeZone( 'UTC' ) );
+			$this->assertContains( 'order_signal_versions', array_column( $unread['limitations'], 'code' ), 'disclosed when orders could not be read too' );
 		}
 	}
 }

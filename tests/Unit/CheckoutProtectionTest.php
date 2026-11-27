@@ -13,6 +13,7 @@ declare( strict_types=1 );
 
 namespace Blaze\McpToolkit\Tests\Unit;
 
+use Blaze\McpToolkit\Diagnostics\CardTestingOrders;
 use Blaze\McpToolkit\Diagnostics\CheckoutProtection;
 use PHPUnit\Framework\TestCase;
 
@@ -104,7 +105,8 @@ final class CheckoutProtectionTest extends TestCase {
 	}
 
 	/**
-	 * Limitations keyed by scope.
+	 * Limitations keyed by scope (the first entry of a scope: for 'protection' that is the
+	 * enforcement limitation, the source-version one follows it).
 	 *
 	 * @param array<string,mixed> $snap Snapshot.
 	 * @return array<string,array<string,mixed>>
@@ -112,7 +114,7 @@ final class CheckoutProtectionTest extends TestCase {
 	private static function lims( array $snap ): array {
 		$out = array();
 		foreach ( CheckoutProtection::limitations( $snap ) as $l ) {
-			$out[ $l['scope'] ] = $l;
+			$out[ $l['scope'] ] = $out[ $l['scope'] ] ?? $l;
 		}
 		return $out;
 	}
@@ -173,7 +175,7 @@ final class CheckoutProtectionTest extends TestCase {
 	private static function matrix(): array {
 		$out = array();
 		foreach ( array( 'yes', 'no', 'absent', 'unrecognised' ) as $rl ) {
-			foreach ( array( '10.9.0', '11.0.0', '11.3.1', '11.4.0', null ) as $v ) {
+			foreach ( array( '10.9.0', '11.0.0', '11.3.1', '11.3.2', '11.4.0', '11.3.1-beta.1', null ) as $v ) {
 				foreach ( array( array(), array( 'rate_limit_options' => true ), array( 'checkout_shortcode_tag' => true, 'rate_limit_id' => true, 'saved_method_delay' => true, 'checkout_page_id' => true ) ) as $filters ) {
 					foreach ( self::page_variants() as $page ) {
 						$out[] = self::snap( array( 'rate_limit' => $rl, 'wc_version' => $v, 'checkout' => $page ), $filters );
@@ -200,7 +202,15 @@ final class CheckoutProtectionTest extends TestCase {
 		$this->assertSame( $c['checkout_page']['max_bytes_read'], CheckoutProtection::MAX_PAGE_BYTES );
 		$this->assertSame( $c['checkout_page']['block_marker']['name'], CheckoutProtection::CHECKOUT_BLOCK );
 		$this->assertSame( $c['checkout_page']['classic_markers']['shortcode'], CheckoutProtection::CLASSIC_SHORTCODE );
-		$this->assertSame( array( $c['verified_range']['min'], $c['verified_range']['max'] ), array( CheckoutProtection::WC_MIN_VERIFIED, CheckoutProtection::WC_MAX_VERIFIED ) );
+		$this->assertSame( array( $c['supported_range']['min'], $c['supported_range']['below'] ), array( CheckoutProtection::WC_MIN_SUPPORTED, CheckoutProtection::WC_BELOW_SUPPORTED ) );
+		$this->assertSame( $c['supported_range']['source_pins'], CheckoutProtection::SOURCE_PINS );
+		$this->assertSame( CheckoutProtection::SOURCE_PINS, array_keys( CheckoutProtection::ROUTE_CASE_INSENSITIVE ), 'letter case is pinned at exactly the source pins' );
+		// Ruling Q3: one range for both readers.
+		$this->assertSame(
+			array( CheckoutProtection::WC_MIN_SUPPORTED, CheckoutProtection::WC_BELOW_SUPPORTED ),
+			array( constant( CardTestingOrders::class . '::SUPPORTED_WC_MIN' ), constant( CardTestingOrders::class . '::SUPPORTED_WC_BELOW' ) ),
+			'the protection facts and the order reader use the same supported range'
+		);
 		$this->assertSame( $c['watched_filters'], CheckoutProtection::WATCHED_FILTERS );
 		$this->assertSame( $c['path_ids'], CheckoutProtection::PATH_IDS );
 		$this->assertSame( array_keys( $c['reason_codes'] ), CheckoutProtection::REASON_CODES );
@@ -354,29 +364,80 @@ final class CheckoutProtectionTest extends TestCase {
 		}
 	}
 
-	// ---------------------------------------------------------------- verified version range.
+	// ---------------------------------------------------------------- supported version range (ruling Q3).
 
-	public function test_version_range_one_release_either_side(): void {
-		$cases = array(
-			'10.8.9'        => array( false, null ),
-			'10.9.0'        => array( true, false ),
-			'10.9.1'        => array( true, null ),
-			'11.0.0'        => array( true, null ),
-			'11.3.0'        => array( true, null ),
-			'11.3.1'        => array( true, true ),
-			'11.3.2'        => array( false, null ),
-			'11.4.0'        => array( false, null ),
-			'9.9.9'         => array( false, null ),
-			'11.3.1-beta.1' => array( false, null ),
-			'10.9.0-rc.1'   => array( false, null ),
+	public function test_version_vectors_one_release_either_side_of_each_end(): void {
+		$sentences = array(
+			'pinned'     => 'one of the versions whose source was checked',
+			'supported'  => 'inside the supported range but its source was not checked separately',
+			'prerelease' => 'Test and pre-release versions are outside the supported range.',
+			'outside'    => 'which is outside the supported range.',
+			'unreadable' => 'The installed WooCommerce version could not be read',
 		);
-		foreach ( $cases as $v => $want ) {
-			$got = CheckoutProtection::version_support( CheckoutProtection::parse_version( (string) $v ) );
-			$this->assertSame( array( 'verified' => $want[0], 'case_insensitive' => $want[1] ), $got, (string) $v );
+		$seen      = array();
+		foreach ( self::contract()['synthetic_cases']['versions'] as $case ) {
+			$raw  = $case['raw'];
+			$want = array(
+				'supported'        => $case['supported'],
+				'pinned'           => $case['pinned'],
+				'case_insensitive' => $case['case_insensitive'],
+			);
+			$this->assertSame( $case['display'], CheckoutProtection::parse_version( $raw ), "display text of '$raw'" );
+			$this->assertSame( $want, CheckoutProtection::version_support( $raw ), "support of '$raw' as given, never suffix-stripped" );
+			$this->assertSame( $want, CheckoutProtection::version_support( CheckoutProtection::parse_version( $raw ) ), "support of '$raw' after display parsing" );
+			$text = CheckoutProtection::installed_version_text( CheckoutProtection::parse_version( $raw ) );
+			$this->assertStringContainsString( $sentences[ $case['sentence'] ], $text, "sentence for '$raw'" );
+			if ( null === $case['display'] ) {
+				$this->assertStringNotContainsString( '' === $raw ? 'WooCommerce  ' : $raw, $text, "malformed '$raw' is never shown" );
+			} else {
+				$this->assertStringContainsString( 'WooCommerce ' . $raw . ' is installed', $text );
+			}
+			$seen[ $case['sentence'] ] = true;
 		}
-		$this->assertSame( array( 'verified' => false, 'case_insensitive' => null ), CheckoutProtection::version_support( null ) );
-		foreach ( array( '11.3', 'abc', '', '11.3.1 ', 11.3, null, '11.3.1-' . str_repeat( 'x', 40 ) ) as $bad ) {
+		$this->assertSame( array_keys( $sentences ), array_values( array_intersect( array_keys( $sentences ), array_keys( $seen ) ) ), 'every sentence kind is exercised' );
+		foreach ( array( 11.3, 1131, null, true, array( '11.3.1' ) ) as $bad ) {
 			$this->assertNull( CheckoutProtection::parse_version( $bad ), self::show( $bad ) );
+		}
+		$this->assertSame( array( 'supported' => false, 'pinned' => false, 'case_insensitive' => null ), CheckoutProtection::version_support( null ) );
+	}
+
+	public function test_one_version_policy_with_the_order_reader(): void {
+		// Ruling Q3: both readers accept and reject exactly the same strings, and show the same text.
+		$this->assertTrue( method_exists( CardTestingOrders::class, 'version_supported' ) && method_exists( CardTestingOrders::class, 'display_version' ), 'the order reader exposes its version gate' );
+		foreach ( self::contract()['synthetic_cases']['versions'] as $case ) {
+			$raw = $case['raw'];
+			$this->assertSame( CardTestingOrders::version_supported( $raw ), CheckoutProtection::version_support( $raw )['supported'], "both readers agree on '$raw'" );
+			$this->assertSame( CardTestingOrders::display_version( $raw ), CheckoutProtection::parse_version( $raw ), "both readers show '$raw' the same way" );
+		}
+	}
+
+	public function test_later_patch_is_covered_by_policy_not_by_a_source_read(): void {
+		$pin   = self::snap( array( 'wc_version' => '11.3.1', 'rate_limit' => 'yes' ) );
+		$patch = self::snap( array( 'wc_version' => '11.3.2', 'rate_limit' => 'yes' ) );
+		$a     = self::rows( $pin );
+		$b     = self::rows( $patch );
+		foreach ( array( 'checkout_page', 'order_pay', 'add_payment_method' ) as $id ) {
+			$this->assertSame( $a[ $id ], $b[ $id ], "$id: identical facts at a later 11.3 patch" );
+		}
+		foreach ( array( 'store_api_checkout', 'store_api_order_pay' ) as $id ) {
+			$this->assertSame( array( 'available_in_core', 'configured', true ), array( $b[ $id ]['exposure'], $b[ $id ]['protection_state'], $b[ $id ]['protections'][0]['configured'] ), "$id at 11.3.2" );
+			$this->assertFalse( $b[ $id ]['protections'][0]['scope_known'], "$id: the letter-case fact that differs between the pins stays unknown" );
+			$this->assertContains( CheckoutProtection::reason( 'rate_limit_scope_unverified' ), $b[ $id ]['limitations'] );
+			$this->assertSame( $a[ $id ]['facts'], $b[ $id ]['facts'], "$id: shared source facts are used by policy" );
+		}
+		$this->assertSame( 'rate_limit_scope_unverified', self::lims( $patch )['store_api_checkout']['code'] );
+		$this->assertStringContainsString( 'WooCommerce 11.3.2 is installed. It is inside the supported range but its source was not checked separately', CheckoutProtection::limitations( $patch )[1]['what'] );
+	}
+
+	public function test_source_versions_are_disclosed_in_the_limitations(): void {
+		foreach ( array( '11.3.1', '10.9.0', '11.3.2', '11.4.0', '11.4.0-beta.1', null ) as $v ) {
+			$lims = CheckoutProtection::limitations( self::snap( array( 'wc_version' => $v ) ) );
+			$this->assertSame( array( 'protection', 'protection_enforcement_unverified' ), array( $lims[0]['scope'], $lims[0]['code'] ) );
+			$this->assertSame( array( 'protection', 'protection_source_versions', null ), array( $lims[1]['scope'], $lims[1]['code'], $lims[1]['check_next'] ), self::show( $v ) );
+			$this->assertSame( CheckoutProtection::reason( 'protection_source_versions' ) . ' ' . CheckoutProtection::installed_version_text( $v ), $lims[1]['what'] );
+			foreach ( array( '10.9.0', '11.3.1', '11.4.0', 'compatibility policy' ) as $needle ) {
+				$this->assertStringContainsString( $needle, $lims[1]['what'], "pins and range disclosed at " . self::show( $v ) );
+			}
 		}
 	}
 
@@ -505,7 +566,7 @@ final class CheckoutProtectionTest extends TestCase {
 			$this->assertStringContainsString( 'cannot confirm it works', $rows[ $id ]['check_next'] );
 			$this->assertContains( 'When it is on, WooCommerce\'s default allows 3 order requests per 60 seconds from each signed-in customer or visitor address.', $rows[ $id ]['facts'] );
 			$this->assertContains( 'Signed-in staff who can edit posts are not limited by it.', $rows[ $id ]['facts'] );
-			$this->assertContains( 'In the WooCommerce versions this check verified, checkout requests sent inside a combined Store API batch request fall outside Rate limit Checkout.', $rows[ $id ]['limitations'] );
+			$this->assertContains( 'In the WooCommerce source this check read (10.9.0 and 11.3.1), checkout requests sent inside a combined Store API batch request fall outside Rate limit Checkout.', $rows[ $id ]['limitations'] );
 		}
 		$this->assertArrayNotHasKey( 'store_api_checkout', self::lims( $snap ), 'a configured path with a known scope needs no gap entry' );
 	}
@@ -522,7 +583,7 @@ final class CheckoutProtectionTest extends TestCase {
 			foreach ( $rows as $id => $row ) {
 				if ( 'configured' === $row['protection_state'] ) {
 					$this->assertSame( 'yes', $snap['rate_limit'], "$id configured only from a saved on value" );
-					$this->assertTrue( CheckoutProtection::version_support( $snap['wc_version'] )['verified'], "$id configured only inside the verified range" );
+					$this->assertTrue( CheckoutProtection::version_support( $snap['wc_version'] )['supported'], "$id configured only inside the supported range" );
 				}
 				if ( 'not_configured' === $row['protection_state'] ) {
 					$this->assertContains( $snap['rate_limit'], array( 'no', 'absent' ) );
@@ -549,20 +610,20 @@ final class CheckoutProtectionTest extends TestCase {
 		$this->assertNotContains( 'When it is on, WooCommerce\'s default allows 3 order requests per 60 seconds from each signed-in customer or visitor address.', $ron['facts'] );
 	}
 
-	public function test_outside_the_verified_range_nothing_is_assumed(): void {
-		foreach ( array( '11.4.0', '11.3.2', '10.8.9', null ) as $v ) {
+	public function test_outside_the_supported_range_nothing_is_assumed(): void {
+		foreach ( array( '11.4.0', '11.4.1', '10.8.9', '11.3.1-beta.1', '11.3.2-rc.1', '011.3.1', null ) as $v ) {
 			foreach ( array( 'yes', 'no', 'absent' ) as $rl ) {
 				$snap = self::snap( array( 'wc_version' => $v, 'rate_limit' => $rl ) );
 				$rows = self::rows( $snap );
 				$lims = self::lims( $snap );
 				foreach ( array( 'store_api_checkout', 'store_api_order_pay', 'order_pay', 'add_payment_method' ) as $id ) {
 					$this->assertSame( array( 'unknown', 'unknown' ), array( $rows[ $id ]['exposure'], $rows[ $id ]['protection_state'] ), "$id at " . self::show( $v ) );
-					$this->assertSame( 'wc_version_unverified', $lims[ $id ]['code'] );
+					$this->assertSame( 'wc_version_unsupported', $lims[ $id ]['code'] );
 					foreach ( $rows[ $id ]['protections'] as $p ) {
 						$this->assertSame( array( null, false ), array( $p['configured'], $p['scope_known'] ), 'no guessed on or off value' );
 					}
 				}
-				$this->assertSame( array( 'unknown', 'wc_version_unverified' ), array( $rows['checkout_page']['checkout_type'], $lims['checkout_page']['code'] ) );
+				$this->assertSame( array( 'unknown', 'wc_version_unsupported' ), array( $rows['checkout_page']['checkout_type'], $lims['checkout_page']['code'] ) );
 				$all = implode( ' ', self::strings( $snap ) );
 				$this->assertStringNotContainsString( 'never been changed', $all, 'an absent option is not read as the source default' );
 				$this->assertStringNotContainsString( '20 seconds', $all );
@@ -572,8 +633,14 @@ final class CheckoutProtectionTest extends TestCase {
 	}
 
 	public function test_letter_case_scope_is_claimed_only_at_the_exact_versions_read(): void {
-		$case_1090 = 'In this WooCommerce version, a request address written in different letter case can fall outside Rate limit Checkout.';
-		$unchecked = 'Which request addresses Rate limit Checkout matches was not checked for this WooCommerce version.';
+		$case_1090 = 'In WooCommerce 10.9.0, a request address written in different letter case can fall outside Rate limit Checkout.';
+		$unchecked = 'Whether Rate limit Checkout matches request addresses written in any letter case was checked only for WooCommerce 10.9.0 and 11.3.1, so it is not known for this version.';
+		foreach ( array( '10.9.1', '11.0.0', '11.3.0', '11.3.2', '11.3.99' ) as $other ) {
+			$r = self::rows( self::snap( array( 'wc_version' => $other, 'rate_limit' => 'yes' ) ) )['store_api_checkout'];
+			$this->assertSame( array( 'configured', false ), array( $r['protection_state'], $r['protections'][0]['scope_known'] ), "$other: configured, scope not known" );
+			$this->assertContains( $unchecked, $r['limitations'], $other );
+			$this->assertNotContains( $case_1090, $r['limitations'], $other );
+		}
 		$r1090     = self::rows( self::snap( array( 'wc_version' => '10.9.0', 'rate_limit' => 'yes' ) ) )['store_api_checkout'];
 		$this->assertContains( $case_1090, $r1090['limitations'] );
 		$this->assertTrue( $r1090['protections'][0]['scope_known'] );
@@ -661,12 +728,17 @@ final class CheckoutProtectionTest extends TestCase {
 	public function test_limitations_cover_every_gap_and_only_known_codes(): void {
 		foreach ( self::matrix() as $snap ) {
 			$lims = CheckoutProtection::limitations( $snap );
-			$this->assertSame( 'protection_enforcement_unverified', $lims[0]['code'] );
-			$this->assertSame( 'protection', $lims[0]['scope'] );
+			$this->assertSame( array( 'protection_enforcement_unverified', 'protection_source_versions' ), array( $lims[0]['code'], $lims[1]['code'] ) );
+			$this->assertSame( array( 'protection', 'protection' ), array( $lims[0]['scope'], $lims[1]['scope'] ) );
 			$by = array();
 			foreach ( $lims as $l ) {
 				$this->assertSame( self::LIMITATION_KEYS, array_keys( $l ) );
 				$this->assertContains( $l['code'], CheckoutProtection::REASON_CODES );
+				if ( 'protection_source_versions' === $l['code'] ) {
+					// The fixed text, then the one fixed sentence naming the installed version.
+					$this->assertSame( CheckoutProtection::reason( $l['code'] ) . ' ' . CheckoutProtection::installed_version_text( $snap['wc_version'] ), $l['what'] );
+					continue;
+				}
 				$this->assertSame( CheckoutProtection::reason( $l['code'] ), $l['what'] );
 				$by[ $l['scope'] ] = $l;
 			}
@@ -721,12 +793,17 @@ final class CheckoutProtectionTest extends TestCase {
 		$snap    = self::snap( array( 'checkout' => self::page( $content ), 'rate_limit' => 'absent' ), array( 'rate_limit_id' => true ) );
 		$facts   = CheckoutProtection::cache_facts( $snap );
 		$this->assertSame(
-			array( 'facts_version', 'permitted', 'wc_version', 'wc_verified', 'checkout_page_id', 'checkout_page_state', 'checkout_page_status', 'checkout_page_bytes', 'checkout_content_sha256', 'checkout_marker', 'checkout_type', 'myaccount_page_id', 'myaccount_page_state', 'rate_limit_checkout', 'order_attribution', 'filters' ),
+			array( 'facts_version', 'permitted', 'wc_version', 'wc_supported', 'wc_source_pinned', 'checkout_page_id', 'checkout_page_state', 'checkout_page_status', 'checkout_page_bytes', 'checkout_content_sha256', 'checkout_marker', 'checkout_type', 'myaccount_page_id', 'myaccount_page_state', 'rate_limit_checkout', 'order_attribution', 'filters' ),
 			array_keys( $facts )
 		);
 		$this->assertSame( hash( 'sha256', $content ), $facts['checkout_content_sha256'] );
 		$this->assertSame( array( 7, 'published', 'publish', strlen( $content ), 'classic', 'classic', 'absent' ), array( $facts['checkout_page_id'], $facts['checkout_page_state'], $facts['checkout_page_status'], $facts['checkout_page_bytes'], $facts['checkout_marker'], $facts['checkout_type'], $facts['rate_limit_checkout'] ) );
 		$this->assertSame( array_keys( CheckoutProtection::WATCHED_FILTERS ), array_keys( $facts['filters'] ) );
+		$this->assertSame( array( '11.3.1', true, true ), array( $facts['wc_version'], $facts['wc_supported'], $facts['wc_source_pinned'] ) );
+		$patch = CheckoutProtection::cache_facts( array_merge( $snap, array( 'wc_version' => '11.3.2' ) ) );
+		$this->assertSame( array( '11.3.2', true, false ), array( $patch['wc_version'], $patch['wc_supported'], $patch['wc_source_pinned'] ), 'a later patch is supported, not a source pin' );
+		$pre = CheckoutProtection::cache_facts( array_merge( $snap, array( 'wc_version' => '11.4.0-beta.1' ) ) );
+		$this->assertSame( array( '11.4.0-beta.1', false, false ), array( $pre['wc_version'], $pre['wc_supported'], $pre['wc_source_pinned'] ) );
 		array_walk_recursive(
 			$facts,
 			function ( $v ) {
@@ -752,8 +829,10 @@ final class CheckoutProtectionTest extends TestCase {
 			array( 'yes', array( 'attribution_prefix' => true ), '11.3.1', true, false, 'attribution_prefix_override' ),
 			array( 'yes', array( 'attribution_fields' => true ), '11.3.1', true, false, 'attribution_fields_override' ),
 			array( 'yes', array( 'attribution_allow_tracking' => true ), '11.3.1', true, true, null ),
-			array( 'yes', array(), '11.4.0', null, false, 'wc_version_unverified' ),
-			array( 'absent', array(), null, null, false, 'wc_version_unverified' ),
+			array( 'yes', array(), '11.3.2', true, true, null ),
+			array( 'yes', array(), '11.4.0', null, false, 'wc_version_unsupported' ),
+			array( 'yes', array(), '11.3.1-beta.1', null, false, 'wc_version_unsupported' ),
+			array( 'absent', array(), null, null, false, 'wc_version_unsupported' ),
 		);
 		foreach ( $cases as $i => $c ) {
 			$snap = self::snap( array( 'attribution' => $c[0], 'wc_version' => $c[2] ), $c[1] );

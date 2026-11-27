@@ -140,8 +140,9 @@ if ( 'recommended' === $state && ! $denylist ) {
 	$fixture = json_decode( (string) file_get_contents( dirname( __DIR__ ) . '/fixtures/setup-checks-1.0.json' ), true );
 	blzmcp_it_assert( is_array( $fixture ) && isset( $fixture['_inputs'], $fixture['rows'] ), 'recommended: 1.0 fixture loads' );
 	// blzmcp_fx_set_inputs() switches HPOS on through blzmcp_it_set_hpos(), which turns compatibility
-	// sync on; its restore puts HPOS back but not the sync option. Keep the raw value (or its absence)
-	// and put it back in the finally below, whether the comparison passes or fails.
+	// sync on; its restore puts HPOS back and, since 1.3, the sync option too. Keep the raw value (or
+	// its absence), check the fixture restored it and put it back in the finally below as well,
+	// whether the comparison passes or fails.
 	$sync_was = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null );
 	$restore  = blzmcp_fx_set_inputs();
 	try {
@@ -240,12 +241,16 @@ if ( 'recommended' === $state && ! $denylist ) {
 		}
 	} finally {
 		$restore();
+		// The fixture library's own restore puts sync back too (its other caller, the capture script,
+		// has no restore of its own); the test's restore below stays as a second guard.
+		$sync_by_fixture = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null );
 		if ( null === $sync_was ) {
 			delete_option( 'woocommerce_custom_orders_table_data_sync_enabled' );
 		} else {
 			update_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync_was );
 		}
 	}
+	blzmcp_it_equals( $sync_was, $sync_by_fixture, 'recommended: the fixture library (blzmcp_fx_set_inputs) restores compatibility sync itself' );
 	blzmcp_it_equals( $sync_was, get_option( 'woocommerce_custom_orders_table_data_sync_enabled', null ), 'recommended: compatibility sync is back to its earlier value after the fixture comparison' );
 	blzmcp_it_assert( str_contains( $by['edge_guidance']['fix'] ?? '', '/.well-known/oauth-' ) && str_contains( $by['edge_guidance']['fix'] ?? '', '/wp-json/mcp/' ), 'recommended: edge_guidance lists the path exceptions' );
 }

@@ -47,10 +47,10 @@ set -uo pipefail
 # timing and a query plan, and the 1,000 and 1,001 distinct-ID cap cases passed per storage. The
 # transport receipt (BLZMCP_TRANSPORT_OUT, default <record>-transport.md) lists every row.
 #
-# Wave 3 (REVIEW-pass4a R4, ruling Q3), also exit 5 / FAILED: the release matrix is 7 states
-# (Easy MCP AI 2.5.0 added in 1.2.1, 2.5.1 in 1.3); the required set must come to exactly 48
-# storage rows (6 connected states x 4 authority/sync combinations x 2 suites) and 191 transport
-# rows (27 per connected route x 7 routes + 2 for none), so narrowing BLZMCP_REQUIRED_STATES can
+# Wave 3 (REVIEW-pass4a R4, ruling Q3), also exit 5 / FAILED: the release matrix has a fixed state
+# list (Easy MCP AI 2.5.0 added in 1.2.1, 2.5.1 and 2.5.2 in 1.3) and the required sets must come to
+# exactly the gate's row counts (1.3: see below; 1.2.1 had 48 storage and 191 transport rows), so
+# narrowing BLZMCP_REQUIRED_STATES can
 # never shrink the gate into a pass; and the HTTP suite's offline fail-closed self-test
 # (tests/matrix/test-http-checks.sh) must have run in this matrix with 0 failures (HTTP_CHECKS line).
 #
@@ -62,6 +62,29 @@ set -uo pipefail
 # N, the bounds, the admission samples, the sample count and the run's maximum load1/load5. In-run
 # excursions above the bounds are shown as diagnostics only; they never excuse a slow valid trial.
 #
+# 1.3 (FEATURE-PLAN items 8 and 9, contract C10), also exit 5 / FAILED: the release matrix is 8
+# states (Easy MCP AI 2.5.2 added); the storage loop has 4 suites (payment orders and health, card-
+# testing orders and the card ability), so exactly 112 storage rows (7 connected states x 4
+# combinations x 4 suites); the existing transport rows come to 218 (27 per connected route x 8
+# routes + 2 for none); the card rows (CARD= lines, their own row type with storage:sync labels)
+# come to 522 (per route 5 authority-independent cases plus 15 cases in each of the 4 storage:sync
+# combinations, x 8 routes, + 2 for none), 740 transport and card rows together. Each required set
+# is enumerated here and its SHA-256 is pinned (GATE_*_SET_SHA256), so neither an environment
+# override nor an edit of the enumeration can shrink it unnoticed; every row is checked for exact
+# membership (missing, duplicated, unknown and FAILED are each their own failure). The summary must
+# name its attempt (ATTEMPT) and end with END=<that attempt> (a truncated summary is incomplete),
+# carry its SCOPE, report no date restart (WINDOW_RESTARTS=0, ruling Q9) and exactly one admission
+# per phase; a candidate named candidate-<commit>.zip must be the evidence commit's. The card
+# performance receipt (CARD_PERF_FILE) is decided by tests/matrix/card-testing-perf-validate.php
+# against this zip's SHA-256, the evidence commit and the attempt; any refusal or a missing PHP
+# fails the evidence.
+#
+# Scope: SCOPE=full is the release matrix (every state of FULL_STATES). SCOPE=subset with
+# SCOPE_STATES (the branch merge gate of owner decision D1: e.g. recommended and one Easy state)
+# is checked the same way against the frozen full enumeration filtered to those states, and is
+# written as v<version>-matrix-subset-<date>.md with the result SUBSET PASSED or SUBSET FAILED,
+# never MATRIX PASSED: a subset can never be read as the full matrix.
+#
 # Privacy: absolute local paths in copied log lines are replaced with <path>; the finished record
 # is then scanned for home directories, host paths, auth headers, secrets and e-mail addresses
 # (other than the fixtures' example.invalid ones). Any hit refuses the record (exit 5, nothing
@@ -71,12 +94,19 @@ SUMMARY=${1:?summary file}
 VERDICT=${2:?PASSED or FAILED}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT_DIR=${BLZMCP_REPORTS_DIR:-$REPO/../reports}
-REQUIRED_STATES=${BLZMCP_REQUIRED_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 both none}
-# The release gate's partition counts (wave 3, ruling Q3). Not overridable.
-GATE_STORAGE_ROWS=48
-GATE_TRANSPORT_ROWS=191
+# The release matrix's states (1.3: Easy MCP AI 2.5.2 added). Not overridable.
+FULL_STATES='recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 easy-2.5.2 both none'
+REQUIRED_STATES=${BLZMCP_REQUIRED_STATES:-$FULL_STATES}
+# The release gate's partition counts (wave 3, ruling Q3; 1.3 item 8) and the SHA-256 of each
+# full required set as enumerated below (one key per line, sorted). Not overridable.
+GATE_STORAGE_ROWS=112
+GATE_TRANSPORT_ROWS=218
+GATE_CARD_ROWS=522
+GATE_STORAGE_SET_SHA256=806abf38d228565653c24b7bd951402c169f2c587936bcc612f4963ce944bf13
+GATE_TRANSPORT_SET_SHA256=af43abac1055b619ea4a103cfda5cb742cdaea9e9ce66869e08d0b1f7f4024c1
+GATE_CARD_SET_SHA256=57170eb243eb6dcc766fdf855906380e5eece343447f18cced9e6c6b236ce4c6
 STORAGE_COMBOS="hpos:no hpos:yes legacy:yes legacy:no"
-STORAGE_SUITES="test-payment-orders.php test-payment-health.php"
+STORAGE_SUITES="test-payment-orders.php test-payment-health.php test-card-testing-orders.php test-card-testing.php"
 # Ruling Q6 (REVIEW-pass4c): the recorder's own budget decision, from each partition's raw trials
 # only (never the receipt's pass, max_ms, rule or trials_ms fields). A trial is valid when it ran
 # ok with all 5 readers true and a numeric elapsed_ms. legacy/24h/db and legacy/168h/db: exactly 5
@@ -105,6 +135,32 @@ run_sha=$(sed -n 's/^ZIP_SHA256=//p' "$SUMMARY")
 run_version=$(sed -n 's/^VERSION=//p' "$SUMMARY")
 perf_file=$(sed -n 's/^PERF_FILE=//p' "$SUMMARY")
 http_checks=$(sed -n 's/^HTTP_CHECKS=//p' "$SUMMARY" | head -1)
+card_perf_file=$(sed -n 's/^CARD_PERF_FILE=//p' "$SUMMARY" | head -1)
+attempt=$(sed -n 's/^ATTEMPT=//p' "$SUMMARY" | head -1)
+end_mark=$(sed -n 's/^END=//p' "$SUMMARY" | tail -1)
+last_line=$(tail -1 "$SUMMARY" 2>/dev/null)
+scope=$(sed -n 's/^SCOPE=//p' "$SUMMARY" | head -1)
+scope_states=$(sed -n 's/^SCOPE_STATES=//p' "$SUMMARY" | head -1)
+window_restarts=$(sed -n 's/^WINDOW_RESTARTS=//p' "$SUMMARY" | head -1)
+# Scope (1.3, owner decision D1): a subset is checked against the frozen full enumeration filtered
+# to its states; an unknown, repeated or empty state list, or no SCOPE line at all, is refused.
+scope_problem=''
+case "$scope" in
+full) ;;
+subset)
+	seen=' '
+	for s in $scope_states; do
+		case " $FULL_STATES " in *" $s "*) ;; *) scope_problem="subset state $s is not a release matrix state" ;; esac
+		case "$seen" in *" $s "*) scope_problem="subset state $s is listed twice" ;; esac
+		seen="$seen$s "
+	done
+	[ -n "$scope_states" ] || scope_problem='subset scope without SCOPE_STATES'
+	case " $scope_states " in *" recommended "*) ;; *) scope_problem='a subset must include recommended (both performance workloads run there)' ;; esac
+	REQUIRED_STATES=$scope_states
+	;;
+*) scope_problem="no SCOPE line (full or subset)" ;;
+esac
+[ "$scope" == subset ] && scope_label=SUBSET || scope_label=MATRIX
 # Host admission (ruling Q8): the helper's exact bound arithmetic, nothing else from it.
 # shellcheck source=tests/matrix/host-admission.sh
 . "$REPO/tests/matrix/host-admission.sh"
@@ -121,7 +177,7 @@ if [ -n "${BLZMCP_MATRIX_OUT:-}" ]; then
 	OUT=$BLZMCP_MATRIX_OUT
 	[ ! -e "$OUT" ] || { echo "MATRIX RECORD REFUSED: $OUT already exists"; exit 4; }
 else
-	base="$OUT_DIR/v$label-matrix-$(date -u +%Y-%m-%d)"
+	base="$OUT_DIR/v$label-matrix-$([ "$scope" == subset ] && echo 'subset-')$(date -u +%Y-%m-%d)"
 	OUT="$base.md"
 	n=2
 	while [ -e "$OUT" ]; do
@@ -195,6 +251,10 @@ for m in ${missing[@]+"${missing[@]}"}; do differ+=("$m (missing from zip)"); do
 [ -n "$run_sha" ] && [ "$run_sha" == "$zip_sha" ] || differ+=("(candidate SHA-256 differs from the run's: run ${run_sha:-none}, zip ${zip_sha:-unreadable})")
 [ -n "$run_version" ] && [ "$run_version" == "$zip_version" ] || differ+=("(run labelled version ${run_version:-none}, candidate header is ${zip_version:-none})")
 [ -n "$zip_version" ] && [ "$zip_version" == "$zip_constant" ] && [ "$zip_version" == "$zip_stable" ] || differ+=("(version mismatch in the zip: header ${zip_version:-none}, BLZMCP_VERSION ${zip_constant:-none}, readme Stable tag ${zip_stable:-none})")
+# 1.3: the evidence names a full source commit, and a candidate named for a commit is that commit's.
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || differ+=("(the evidence commit is not a full 40-character SHA: ${commit:-none})")
+zip_name_commit=$(basename "$zip" .zip | sed -n 's/^candidate-\([0-9a-f]\{7,40\}\)$/\1/p')
+[ -z "$zip_name_commit" ] || [ "${commit#"$zip_name_commit"}" != "$commit" ] || differ+=("(stale candidate: named for commit $zip_name_commit, the evidence commit is ${commit:-none})")
 [ "${#differ[@]}" -eq 0 ] || VERDICT=FAILED
 
 # Evidence completeness: required states ran, storage combinations ran, performance receipt bound.
@@ -207,10 +267,25 @@ dup_lines=$(
 	} | sort | uniq -d | sed 's/^/duplicated /' | paste -sd, - | cut -c1-300
 )
 [ -z "$dup_lines" ] || incomplete+=("summary partitions duplicated: $dup_lines")
-# Transport receipt rows: route x authority x principal x case, each required one exactly once.
+# 1.3: the summary is whole (its last line is END=<its attempt>), named, scoped, and from one
+# admitted pass with no date restart (ruling Q9) and no repeated admission.
+if ! [[ "$attempt" =~ ^[A-Za-z0-9._:-]{8,80}$ ]]; then
+	incomplete+=("the summary names no attempt (ATTEMPT line)")
+elif [ "$end_mark" != "$attempt" ] || [ "$last_line" != "END=$attempt" ]; then
+	incomplete+=("the summary is truncated or not this attempt's (last line ${last_line:0:60})")
+fi
+[ -z "$scope_problem" ] || incomplete+=("scope: $scope_problem")
+[ "$window_restarts" == 0 ] || incomplete+=("a date restart cannot qualify (ruling Q9; WINDOW_RESTARTS ${window_restarts:-not recorded})")
+for ha_phase in start perf; do
+	n=$(grep -c "^ADMISSION=$ha_phase|" "$SUMMARY")
+	[ "$n" -le 1 ] || incomplete+=("repeated $ha_phase admission ($n ADMISSION lines; ruling Q8/Q9)")
+done
+# The frozen enumerations (C10). Each prints one key per line for the states given.
 TRANSPORT_ANY="admin|discovery admin|workflows admin|analytics_off admin|tool_off manager|roles"
 TRANSPORT_AUTH="admin|disclosure admin|diag_off admin|diag_on admin|diag_off_again manager|diag_off manager|diag_on manager|diag_off_again customer|denied subscriber|denied anonymous|denied manager|warm_downgrade"
 TRANSPORT_AUTHORITIES="hpos legacy"
+CARD_ANY="admin|card_discovery admin|card_workflows admin|card_analytics_off admin|card_tool_off manager|card_roles"
+CARD_STORAGE="admin|card_recent admin|card_earlier admin|card_low_volume admin|card_gaps admin|card_protection admin|card_diag_off admin|card_diag_on admin|card_diag_off_again manager|card_diag_off manager|card_diag_on manager|card_diag_off_again customer|card_denied subscriber|card_denied anonymous|card_denied manager|card_warm_downgrade"
 routes_for() {
 	case "$1" in
 	recommended) echo rec ;;
@@ -218,19 +293,95 @@ routes_for() {
 	both | none) echo "rec easy" ;;
 	esac
 }
-tdir=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-record-t.XXXXXX")
-for s in $REQUIRED_STATES; do
-	for r in $(routes_for "$s"); do
-		if [ "$s" == none ]; then
-			echo "$s|$r|any|admin|no_tool"
-			continue
-		fi
-		for c in $TRANSPORT_ANY; do echo "$s|$r|any|$c"; done
-		for a in $TRANSPORT_AUTHORITIES; do
-			for c in $TRANSPORT_AUTH; do echo "$s|$r|$a|$c"; done
+enum_storage() { # states
+	local s c f
+	for s in $1; do
+		[ "$s" == none ] && continue
+		for c in $STORAGE_COMBOS; do
+			for f in $STORAGE_SUITES; do echo "$s|$c|$f"; done
 		done
-	done
-done | sort >"$tdir/required"
+	done | sort
+}
+enum_transport() { # states
+	local s r c a
+	for s in $1; do
+		for r in $(routes_for "$s"); do
+			if [ "$s" == none ]; then
+				echo "$s|$r|any|admin|no_tool"
+				continue
+			fi
+			for c in $TRANSPORT_ANY; do echo "$s|$r|any|$c"; done
+			for a in $TRANSPORT_AUTHORITIES; do
+				for c in $TRANSPORT_AUTH; do echo "$s|$r|$a|$c"; done
+			done
+		done
+	done | sort
+}
+enum_card() { # states
+	local s r c a
+	for s in $1; do
+		for r in $(routes_for "$s"); do
+			if [ "$s" == none ]; then
+				echo "$s|$r|any|admin|card_no_tool"
+				continue
+			fi
+			for c in $CARD_ANY; do echo "$s|$r|any|$c"; done
+			for a in $STORAGE_COMBOS; do
+				for c in $CARD_STORAGE; do echo "$s|$r|$a|$c"; done
+			done
+		done
+	done | sort
+}
+set_sha() { shasum -a 256 | awk '{print $1}'; }
+# The pinned full sets: an edit of the lists or loops above that changes any required key fails.
+for kind in storage transport card; do
+	case $kind in
+	storage) pin=$GATE_STORAGE_SET_SHA256 want=$GATE_STORAGE_ROWS ;;
+	transport) pin=$GATE_TRANSPORT_SET_SHA256 want=$GATE_TRANSPORT_ROWS ;;
+	card) pin=$GATE_CARD_SET_SHA256 want=$GATE_CARD_ROWS ;;
+	esac
+	full_n=$("enum_$kind" "$FULL_STATES" | wc -l | tr -d ' ')
+	full_sha=$("enum_$kind" "$FULL_STATES" | set_sha)
+	[ "$full_n" == "$want" ] && [ "$full_sha" == "$pin" ] || incomplete+=("the frozen $kind enumeration changed: $full_n keys, SHA-256 $full_sha (pinned $want, $pin)")
+done
+# The required sets for this record: the full sets, or for a subset the full sets' own keys for
+# its states (never a smaller enumeration). A full-scope record must require exactly the full sets.
+filter_states() { # states: keep only the full set's keys of these states (stdin -> stdout)
+	awk -F'|' -v s=" $1 " 'index(s, " " $1 " ") > 0'
+}
+tdir=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-record-t.XXXXXX")
+enum_transport "$FULL_STATES" | filter_states "$REQUIRED_STATES" >"$tdir/required"
+enum_card "$FULL_STATES" | filter_states "$REQUIRED_STATES" >"$tdir/card-required"
+enum_storage "$FULL_STATES" | filter_states "$REQUIRED_STATES" >"$tdir/storage-required"
+if [ "$scope" == subset ]; then
+	gate_t=$(wc -l <"$tdir/required" | tr -d ' ')
+	gate_c=$(wc -l <"$tdir/card-required" | tr -d ' ')
+	gate_s=$(wc -l <"$tdir/storage-required" | tr -d ' ')
+else
+	gate_t=$GATE_TRANSPORT_ROWS
+	gate_c=$GATE_CARD_ROWS
+	gate_s=$GATE_STORAGE_ROWS
+fi
+# Card rows (their own row type: route x storage:sync x principal x case), each exactly once.
+grep '^CARD=' "$SUMMARY" | sed 's/^CARD=//' >"$tdir/card-rows"
+cut -d'|' -f1-5 "$tdir/card-rows" | sort >"$tdir/card-keys"
+c_missing=$(sort -u "$tdir/card-keys" | comm -23 "$tdir/card-required" - | wc -l | tr -d ' ')
+c_missing_list=$(sort -u "$tdir/card-keys" | comm -23 "$tdir/card-required" - | head -8 | paste -sd, -)
+c_unknown=$(sort -u "$tdir/card-keys" | comm -13 "$tdir/card-required" - | head -8 | paste -sd, -)
+c_dup=$(uniq -d "$tdir/card-keys" | head -8 | paste -sd, -)
+c_failed=$(awk -F'|' '$6 != "PASSED"' "$tdir/card-rows" | cut -d'|' -f1-5 | head -8 | paste -sd, -)
+c_required=$(wc -l <"$tdir/card-required" | tr -d ' ')
+c_rows=$(wc -l <"$tdir/card-rows" | tr -d ' ')
+c_passed=$(awk -F'|' '$6 == "PASSED"' "$tdir/card-rows" | wc -l | tr -d ' ')
+[ "$c_missing" == 0 ] || incomplete+=("card rows missing: $c_missing of $c_required (first: $c_missing_list)")
+[ -z "$c_dup" ] || incomplete+=("card rows duplicated: $c_dup")
+[ -z "$c_unknown" ] || incomplete+=("card rows not in the required set: $c_unknown")
+[ -z "$c_failed" ] && [ "$c_rows" -gt 0 ] || VERDICT=FAILED
+[ "$c_required" == "$gate_c" ] || incomplete+=("required card partitions come to $c_required, the $([ "$scope" == subset ] && echo subset || echo 'release matrix') needs $gate_c (states: $REQUIRED_STATES)")
+# Storage rows: exact membership too (an unknown STORAGE line is refused, not ignored).
+grep '^STORAGE=' "$SUMMARY" | sed 's/^STORAGE=//' | cut -d'|' -f1-3 | sort -u >"$tdir/storage-keys"
+s_unknown=$(comm -13 "$tdir/storage-required" "$tdir/storage-keys" | head -8 | paste -sd, -)
+[ -z "$s_unknown" ] || incomplete+=("storage rows not in the required set: $s_unknown")
 grep '^TRANSPORT=' "$SUMMARY" | sed 's/^TRANSPORT=//' >"$tdir/rows"
 cut -d'|' -f1-5 "$tdir/rows" | sort >"$tdir/keys"
 t_missing=$(sort -u "$tdir/keys" | comm -23 "$tdir/required" - | wc -l | tr -d ' ')
@@ -246,8 +397,8 @@ rm -rf "$tdir"
 [ -z "$t_dup" ] || incomplete+=("transport rows duplicated: $t_dup")
 [ -z "$t_unknown" ] || incomplete+=("transport rows not in the required set: $t_unknown")
 [ -z "$t_failed" ] && [ -n "$(grep -m1 '^TRANSPORT=' "$SUMMARY")" ] || VERDICT=FAILED
-[ "$t_required" == "$GATE_TRANSPORT_ROWS" ] || incomplete+=("required transport partitions come to $t_required, the release matrix needs $GATE_TRANSPORT_ROWS (states: $REQUIRED_STATES)")
-# Storage rows: every connected state x combination x suite, and that set must be the gate's 40.
+[ "$t_required" == "$gate_t" ] || incomplete+=("required transport partitions come to $t_required, the $([ "$scope" == subset ] && echo subset || echo 'release matrix') needs $gate_t (states: $REQUIRED_STATES)")
+# Storage rows: every connected state x combination x suite, and that set must be the gate's 112.
 s_required=0
 s_rows=0
 for s in $REQUIRED_STATES; do
@@ -259,7 +410,7 @@ for s in $REQUIRED_STATES; do
 		done
 	done
 done
-[ "$s_required" == "$GATE_STORAGE_ROWS" ] || incomplete+=("required storage partitions come to $s_required, the release matrix needs $GATE_STORAGE_ROWS (states: $REQUIRED_STATES)")
+[ "$s_required" == "$gate_s" ] || incomplete+=("required storage partitions come to $s_required, the $([ "$scope" == subset ] && echo subset || echo 'release matrix') needs $gate_s (states: $REQUIRED_STATES)")
 # The HTTP suite's fail-closed safety checks proved themselves offline in this run.
 if [ -z "$http_checks" ]; then
 	incomplete+=("the HTTP safety-check self-test (test-http-checks.sh) did not run (no HTTP_CHECKS line)")
@@ -363,6 +514,25 @@ else
 		perf_ok=1
 	fi
 fi
+# 1.3 item 9: the card performance receipt, decided by its own validator on the raw trials, bound
+# to this zip, the evidence commit and this attempt. No PHP, a refusal or an unreadable receipt
+# fails the evidence; the receipt's own pass flags are never read here.
+card_perf_ok=0
+card_perf_msg=''
+if [ -z "$card_perf_file" ] || [ ! -f "$card_perf_file" ]; then
+	incomplete+=("no card performance receipt (CARD_PERF_FILE)")
+elif ! command -v php >/dev/null 2>&1; then
+	incomplete+=("the card performance receipt could not be validated (no php on this host)")
+else
+	card_perf_out=$(php "$REPO/tests/matrix/card-testing-perf-validate.php" "$card_perf_file" --candidate-sha256="$zip_sha" --source-sha="$commit" --attempt="$attempt" 2>&1)
+	card_perf_rc=$?
+	card_perf_msg=$(printf '%s\n' "$card_perf_out" | grep -E '^CARD PERF (VALID|INVALID)' | tail -1)
+	if [ "$card_perf_rc" -eq 0 ] && [[ "$card_perf_msg" == 'CARD PERF VALID'* ]]; then
+		card_perf_ok=1
+	else
+		incomplete+=("card performance receipt refused (validator exit $card_perf_rc): $(printf '%s' "${card_perf_msg:-$card_perf_out}" | head -c 300)")
+	fi
+fi
 # Host admission (ruling Q8): identity, both admission samples admitted by this recorder's own
 # bound check, and the run's load samples.
 ha_problems=()
@@ -399,12 +569,19 @@ name_commit=$(basename "$zip" .zip | sed -n 's/^candidate-//p')
 dirty=$(git -C "$REPO" status --porcelain -- src blaze-mcp-toolkit-for-woocommerce.php uninstall.php readme.txt vendor-src | wc -l | tr -d ' ')
 TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 {
-	echo "# Blaze MCP Toolkit $label - real-plugin matrix"
-	echo
-	echo "- Result: **MATRIX $VERDICT**"
+	if [ "$scope" == subset ]; then
+		echo "# Blaze MCP Toolkit $label - real-plugin matrix SUBSET (not the release matrix)"
+		echo
+		echo "- Result: **SUBSET $VERDICT** (scope subset: $REQUIRED_STATES; NOT A FULL MATRIX: this record can never qualify a release candidate)"
+	else
+		echo "# Blaze MCP Toolkit $label - real-plugin matrix"
+		echo
+		echo "- Result: **MATRIX $VERDICT**"
+	fi
+	echo "- Scope: ${scope:-not recorded}$([ "$scope" == subset ] && echo " (states $REQUIRED_STATES of $FULL_STATES)"); attempt \`${attempt:-not recorded}\`; source \`${commit:-none}\`; package SHA-256 \`${zip_sha:-unreadable}\`"
 	echo "- Candidate version: $label (header, BLZMCP_VERSION and readme Stable tag: ${zip_version:-none} / ${zip_constant:-none} / ${zip_stable:-none})"
 	if [ "${#incomplete[@]}" -eq 0 ]; then
-		echo "- Evidence: complete (states $REQUIRED_STATES; payment storage loop in every combination; performance receipt bound to this zip)"
+		echo "- Evidence: complete (states $REQUIRED_STATES; payment and card storage loop in every combination; transport and card rows exact; both performance receipts bound to this zip)"
 	else
 		echo "- Evidence: **INCOMPLETE** in ${#incomplete[@]} item(s): ${incomplete[*]:0:20}"
 	fi
@@ -441,7 +618,7 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 	echo
 	echo "## Payment health order storage"
 	echo
-	echo "- Storage rows: required $s_required (gate $GATE_STORAGE_ROWS), received $s_rows"
+	echo "- Storage rows: required $s_required (gate $gate_s), received $s_rows"
 	echo
 	echo "| State | Authority:sync | Suite | Result | Passed | Failed |"
 	echo "|---|---|---|---|---|---|"
@@ -452,7 +629,7 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 	echo "## Transport receipt rows (route x order authority x principal x case)"
 	echo
 	echo "- HTTP safety-check self-test (tests/matrix/test-http-checks.sh, offline injected replies): ${http_checks:-not run}"
-	echo "- Required $t_required (gate $GATE_TRANSPORT_ROWS), received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
+	echo "- Required $t_required (gate $gate_t), received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
 	echo "- Every row is the HTTP suite's own pass/fail for that case on the real transport (no CLI parity); the full list is in \`$(basename "$TRANSPORT_OUT")\`"
 	echo
 	echo "| State | Route | Authority | Rows | Passed |"
@@ -486,6 +663,36 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 		echo "- Forced reader failures (each must fail the trial): $(jq -r '(.forced_failures // []) | map("\(.force)/\(.storage)/\(.logger) \(if .ok == false and .detected == true then "failed as required" else "NOT DETECTED" end)") | join(", ") | if . == "" then "none" else . end' "$perf_file")"
 	else
 		echo "- (no performance receipt)"
+	fi
+	echo
+	echo "## Card-testing rows (route x storage:sync x principal x case)"
+	echo
+	echo "- Required $c_required (gate $gate_c; full release set $GATE_CARD_ROWS, SHA-256 \`$GATE_CARD_SET_SHA256\`), received $c_rows, passed $c_passed; missing $c_missing${c_missing_list:+ (first: $c_missing_list)}; duplicated ${c_dup:-none}; not in the required set ${c_unknown:-none}; not PASSED ${c_failed:-none}"
+	echo "- Transport and card rows together: required $((t_required + c_required)) (full release matrix $((GATE_TRANSPORT_ROWS + GATE_CARD_ROWS))); storage rows $s_required (full $GATE_STORAGE_ROWS, set SHA-256 \`$GATE_STORAGE_SET_SHA256\`); existing transport set SHA-256 \`$GATE_TRANSPORT_SET_SHA256\`"
+	echo "- Every card row is the HTTP suite's own pass/fail for that case (tests/matrix/card-testing-http.sh); the full list is in \`$(basename "$TRANSPORT_OUT")\`"
+	echo
+	echo "| State | Route | Storage | Rows | Passed |"
+	echo "|---|---|---|---|---|"
+	grep '^CARD=' "$SUMMARY" | sed 's/^CARD=//' | awk -F'|' '{k = $1 "|" $2 "|" $3; n[k]++; if ($6 == "PASSED") p[k]++} END {for (k in n) print k "|" n[k] "|" (p[k] + 0)}' | sort | while IFS='|' read -r state route st n p; do
+		echo "| $state | $route | $st | $n | $p |"
+	done
+	echo
+	echo "## Card-testing cold performance"
+	echo
+	if [ -n "$card_perf_file" ] && [ -f "$card_perf_file" ]; then
+		echo "- Receipt SHA-256: \`$(shasum -a 256 "$card_perf_file" | awk '{print $1}')\`; validator (tests/matrix/card-testing-perf-validate.php, on the raw trials, bound to this zip, source and attempt): ${card_perf_msg:-no verdict line}"
+		echo "- Budget: every one of the 5 fresh-process cold trials per partition strictly below 1500 ms; no relaxed rule, no median, no pooling; bound cases and the combined workflow cost are reported apart and never counted as trials"
+		echo
+		echo "| Storage | Window | Logger | Trials (ms) | Max ms |"
+		echo "|---|---|---|---|---|"
+		jq -r '(.partitions // [])[] | "| \(.storage) | \(.window)h | \(.logger) | \((.trials_ms // []) | map(tostring) | join(", ")) | \(.max_ms) |"' "$card_perf_file" 2>/dev/null || echo "| (unreadable receipt) | | | | |"
+		echo
+		echo "- HTTP latency (ms, apart from the trials): $(jq -r '(.http // []) | map("\(.storage)/\(.window)h/\(.kind) \(.total_ms)") | join(", ") | if . == "" then "none" else . end' "$card_perf_file" 2>/dev/null)"
+		echo "- Combined workflow cost (not part of any budget): $(jq -c '.workflow_cost // "not recorded"' "$card_perf_file" 2>/dev/null | head -c 600)"
+		echo "- Bound cases (own assertions, never trials): $(jq -r '(.bound_cases // []) | map("\(.case // .name // "case") \(if .ok then "passed" else "FAILED" end)") | join("; ") | if . == "" then "none" else . end' "$card_perf_file" 2>/dev/null)"
+		echo "- Cleanup and storage restore: $(jq -c '{cleanup: ((.cleanup // []) | map(.ok) | if length == 0 then "not recorded" else (all | tostring) end), storage_restored}' "$card_perf_file" 2>/dev/null)"
+	else
+		echo "- (no card performance receipt)"
 	fi
 	echo
 	echo "## Host admission (ruling Q8)"
@@ -539,15 +746,19 @@ TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-out.XXXXXX")
 TMP_TRANS=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-trans.XXXXXX")
 {
 	t_ok=PASSED
-	[ "$t_missing" == 0 ] && [ -z "$t_dup" ] && [ -z "$t_unknown" ] && [ -z "$t_failed" ] && [ "$t_rows" -gt 0 ] && [ "$t_required" == "$GATE_TRANSPORT_ROWS" ] && [[ "$http_checks" =~ ^[1-9][0-9]*\ passed,\ 0\ failed$ ]] || t_ok=FAILED
-	echo "# Blaze MCP Toolkit $label - origin disclosure transport receipt"
+	[ "$t_missing" == 0 ] && [ -z "$t_dup" ] && [ -z "$t_unknown" ] && [ -z "$t_failed" ] && [ "$t_rows" -gt 0 ] && [ "$t_required" == "$gate_t" ] && [[ "$http_checks" =~ ^[1-9][0-9]*\ passed,\ 0\ failed$ ]] || t_ok=FAILED
+	[ "$c_missing" == 0 ] && [ -z "$c_dup" ] && [ -z "$c_unknown" ] && [ -z "$c_failed" ] && [ "$c_rows" -gt 0 ] && [ "$c_required" == "$gate_c" ] || t_ok=FAILED
+	[ -z "$scope_problem" ] && [ "$scope" == full ] || t_ok="$t_ok (scope ${scope:-unknown}${scope:+: $REQUIRED_STATES}; NOT A FULL MATRIX)"
+	echo "# Blaze MCP Toolkit $label - origin disclosure and card-testing transport receipt"
 	echo
 	echo "- Result: **TRANSPORT $t_ok** (passed only when every required row is present exactly once and PASSED)"
+	echo "- Scope ${scope:-not recorded}, attempt \`${attempt:-not recorded}\`"
+	echo "- Card rows: required $c_required (gate $gate_c; full release set $GATE_CARD_ROWS, SHA-256 \`$GATE_CARD_SET_SHA256\`), received $c_rows, passed $c_passed; missing $c_missing${c_missing_list:+ (first: $c_missing_list)}; duplicated ${c_dup:-none}; not in the required set ${c_unknown:-none}; not PASSED ${c_failed:-none}"
 	echo "- Candidate: \`$(basename "$zip")\`, SHA-256 \`${zip_sha:-unreadable}\`, version ${zip_version:-none}"
 	echo "- Git commit: \`$commit\`"
 	echo "- Matrix record: \`$(basename "$OUT")\`"
 	echo "- HTTP safety-check self-test (tests/matrix/test-http-checks.sh): ${http_checks:-not run}"
-	echo "- Rows: required $t_required (gate $GATE_TRANSPORT_ROWS), received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
+	echo "- Rows: required $t_required (gate $gate_t), received $t_rows, passed $t_passed; missing $t_missing${t_missing_list:+ (first: $t_missing_list)}; duplicated ${t_dup:-none}; not in the required set ${t_unknown:-none}; not PASSED ${t_failed:-none}"
 	echo "- A row is one case of tests/matrix/http-suite.sh over the state's real transport (rec = MCP Adapter with Enable Abilities, easy = Easy MCP AI), under the order authority it names (switched in its own process and read back before the case; any = the case does not depend on the order store), for that principal. PASSED means every check in the case passed. disclosure: the administrator sees schema 2, the mixed, registered-disabled and unregistered inventory-only methods kept apart from checkout counts, and a warm repeat from the cache. diag_off / diag_on / diag_off_again: the shop-manager diagnostics setting off, on, then off after a warm result, for the administrator and the manager (the manager keeps the outside-checkout facts with diagnostics off). denied: a customer, a subscriber or an anonymous caller gets the route's known authentication refusal (HTTP 401/403) or permission refusal and no method facts, with a privileged result warm; no reply, 5xx, a malformed reply, an unknown error and a missing credential fail the row. diag_off / diag_off_again for the manager: every applicable log and job check is not checked, unavailable, with the role reason, null counts, no groups or hooks and no diagnostic finding; diag_on and the administrator: the fixture's failed Stripe payment job is reported with its finding. warm_downgrade: a manager's warm privileged result gets the known permission refusal after the role loses manage_woocommerce. tool_off: the known not-found (rec) or switched-off (easy) answer. no_tool: in none, an absent route answers HTTP 404 rest_no_route, and a route that answers neither lists nor runs payment health."
 	echo
 	echo "| State | Route | Authority | Principal | Case | Result |"
@@ -555,6 +766,22 @@ TMP_TRANS=$(mktemp "${TMPDIR:-/tmp}/blzmcp-record-trans.XXXXXX")
 	grep '^TRANSPORT=' "$SUMMARY" | sed 's/^TRANSPORT=//' | while IFS='|' read -r state route auth who case result; do
 		echo "| $state | $route | $auth | $who | $case | $result |"
 	done
+	echo
+	echo "## Card-testing rows"
+	echo
+	echo "A card row is one case of tests/matrix/card-testing-http.sh over the state's real transport, under the storage:sync combination it names (switched in its own process and read back, the card fixture seeded after it and removed before the next switch; any = the case does not depend on the order store). card_recent: likely card testing still recent, with the exact seeded counts, networks and wording; card_earlier: likely, earlier in the window; card_low_volume: unknown with too little history; card_gaps: no saved IP and no recorded origin never make likely; card_protection: the 5 paths, enforcement never verified; card_diag_*: logs read for the administrator, withheld for the manager without diagnostics; card_denied and card_warm_downgrade: the known refusal and no facts; card_discovery, card_workflows, card_analytics_off, card_tool_off and card_roles: discovery with read-only annotations and the Easy name, payment health then card testing in the 3 payment workflows, Analytics off stopping only Analytics work, a switched-off tool refused (setup warning, never ticked) and the shop manager's access; card_no_tool: in none, no route exposes card testing."
+	echo
+	echo "| State | Route | Storage | Principal | Case | Result |"
+	echo "|---|---|---|---|---|---|"
+	grep '^CARD=' "$SUMMARY" | sed 's/^CARD=//' | while IFS='|' read -r state route st who case result; do
+		echo "| $state | $route | $st | $who | $case | $result |"
+	done
+	echo
+	echo "## Frozen required sets for this scope (C10)"
+	echo
+	echo "- Storage ($(enum_storage "$FULL_STATES" | filter_states "$REQUIRED_STATES" | wc -l | tr -d ' ') keys): $(enum_storage "$FULL_STATES" | filter_states "$REQUIRED_STATES" | paste -sd' ' -)"
+	echo "- Transport ($(enum_transport "$FULL_STATES" | filter_states "$REQUIRED_STATES" | wc -l | tr -d ' ') keys): $(enum_transport "$FULL_STATES" | filter_states "$REQUIRED_STATES" | paste -sd' ' -)"
+	echo "- Card ($(enum_card "$FULL_STATES" | filter_states "$REQUIRED_STATES" | wc -l | tr -d ' ') keys): $(enum_card "$FULL_STATES" | filter_states "$REQUIRED_STATES" | paste -sd' ' -)"
 } >"$TMP_TRANS"
 # Privacy scan of the finished record: nothing local, no auth material, no real e-mail address.
 leaks=$(grep -nE -e "${HOME:-/nonexistent-home}" -e '/(Users|home)/[A-Za-z0-9._-]+' -e 'Authorization:|Bearer [A-Za-z0-9]|SECRET=|password=|app_password|sk_(live|test)_|whsec_' "$TMP_OUT" "$TMP_TRANS" | cut -c1-80)
@@ -568,6 +795,7 @@ mv "$TMP_OUT" "$OUT"
 mv "$TMP_TRANS" "$TRANSPORT_OUT"
 echo "Evidence: $OUT"
 echo "Transport receipt: $TRANSPORT_OUT"
+[ "$scope" == subset ] && echo "SCOPE: subset ($REQUIRED_STATES): $scope_label $VERDICT, not the release matrix"
 if [ "${#differ[@]}" -ne 0 ]; then
 	echo "CANDIDATE DOES NOT MATCH THE EVIDENCE COMMIT: ${#differ[@]} item(s): ${differ[*]:0:20}"
 	exit 3

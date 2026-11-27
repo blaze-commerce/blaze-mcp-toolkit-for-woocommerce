@@ -125,8 +125,11 @@ final class PaymentErrors {
 			}
 		}
 
-		$logs = $allowed ? self::read_logs( $used, $since, $now ) : null;
-		$jobs = $allowed ? self::read_jobs( $used, $since, $now ) : null;
+		// Ruling Q2(b) (1.3): families that share a log source token cannot be told apart, so the
+		// entries are attributed to neither: their logs are not read and both report unknown.
+		$shared = self::shared_sources( $used );
+		$logs   = $allowed ? self::read_logs( array_diff_key( $used, $shared ), $since, $now ) : null;
+		$jobs   = $allowed ? self::read_jobs( $used, $since, $now ) : null;
 
 		$out         = array();
 		$groups_left = self::MAX_GROUPS_TOTAL;
@@ -138,7 +141,7 @@ final class PaymentErrors {
 			$lists      = null !== $family ? ( $families[ $family ] ?? null ) : null;
 			$log_family = is_array( $lists ) && array() !== ( $lists['log_sources'] ?? array() ) ? $family : null;
 			$job_family = is_array( $lists ) && ( array() !== ( $lists['hooks'] ?? array() ) || array() !== ( $lists['hook_groups'] ?? array() ) ) ? $family : null;
-			$log        = self::log_check( $allowed, $manual, $log_family, $logs, $tz, $groups_left );
+			$log        = self::log_check( $allowed, $manual, $log_family, $logs, $tz, $groups_left, null !== $log_family && isset( $shared[ $log_family ] ) );
 			$job        = self::job_check( $allowed, $manual, $job_family, $jobs, $hooks_left );
 			$webhook = self::webhook_check( $m, (int) ( $accepted_7d[ $id ] ?? 0 ), $now, $tz );
 			$out[ $id ] = array(
@@ -222,21 +225,13 @@ final class PaymentErrors {
 		try {
 			$map       = PaymentMethods::token_map();
 			$supported = array();
-			$owners    = array();
 			foreach ( $keys as $family ) {
 				$lists = self::log_lists( $map, $family );
 				if ( null !== $lists ) {
 					$supported[ $family ] = $lists;
-					foreach ( $lists['log_sources'] as $token ) {
-						$owners[ (string) $token ][ $family ] = true;
-					}
 				}
 			}
-			foreach ( $owners as $fams ) {
-				if ( count( $fams ) > 1 ) {
-					$shared += $fams;
-				}
-			}
+			$shared   = self::shared_sources( $supported );
 			$read     = array();
 			$readable = array_diff_key( $supported, $shared );
 			if ( $allowed && array() !== $readable ) {
@@ -271,6 +266,29 @@ final class PaymentErrors {
 			}
 		}
 		return ( $allowed ? self::logs_rollup( $summaries ) : $denied ) + array( 'summaries' => $summaries );
+	}
+
+	/**
+	 * Families whose log source tokens are also another family's (family => true). Their entries
+	 * cannot be attributed to one family, so neither log view reads them (ruling Q2(b)).
+	 *
+	 * @param array<int|string,mixed> $families Family => token-map lists.
+	 * @return array<int|string,bool>
+	 */
+	private static function shared_sources( array $families ): array {
+		$owners = array();
+		foreach ( $families as $family => $lists ) {
+			foreach ( is_array( $lists ) && is_array( $lists['log_sources'] ?? null ) ? $lists['log_sources'] : array() as $token ) {
+				$owners[ (string) $token ][ (string) $family ] = true;
+			}
+		}
+		$shared = array();
+		foreach ( $owners as $holders ) {
+			if ( count( $holders ) > 1 ) {
+				$shared += $holders;
+			}
+		}
+		return $shared;
 	}
 
 	/**
@@ -511,9 +529,10 @@ final class PaymentErrors {
 	 * @param array<string,array<string,mixed>>|null $logs        Per-family results.
 	 * @param \DateTimeZone                          $tz          Store timezone.
 	 * @param int                                    $groups_left Response-wide group budget (by reference).
+	 * @param bool                                   $shared      The family's log source is also another family's (not read).
 	 * @return array<string,mixed>
 	 */
-	private static function log_check( bool $allowed, bool $manual, ?string $family, ?array $logs, \DateTimeZone $tz, int &$groups_left ): array {
+	private static function log_check( bool $allowed, bool $manual, ?string $family, ?array $logs, \DateTimeZone $tz, int &$groups_left, bool $shared = false ): array {
 		$base = array(
 			'count'                => null,
 			'count_is_lower_bound' => false,
@@ -531,6 +550,11 @@ final class PaymentErrors {
 		}
 		if ( ! $allowed ) {
 			return self::check( 'unknown', false, true, 'unavailable', 'diagnostics_not_permitted' ) + $base;
+		}
+		if ( $shared ) {
+			// Ruling Q2(b): entries of a shared source belong to no one family, so this is unknown,
+			// never another family's count and never a complete zero.
+			return self::check( 'unknown', false, true, 'unavailable', 'shared_log_source' ) + $base;
 		}
 		if ( ! isset( $logs[ $family ] ) ) {
 			return self::check( 'unknown', false, true, 'unavailable', 'source_read_failed' ) + $base;

@@ -613,7 +613,12 @@ final class CardTesting extends AbstractAbility {
 			return self::DEFAULT_HOURS;
 		}
 		if ( is_object( $input ) ) {
-			$input = json_decode( (string) wp_json_encode( $input ), true );
+			// Only a plain object, read as it is: a JSON round trip would turn 48.0 into 48. Any other
+			// object form (JsonSerializable, ArrayObject, closures) is not C1 input.
+			if ( \stdClass::class !== get_class( $input ) ) {
+				return null;
+			}
+			$input = get_object_vars( $input );
 		}
 		if ( ! is_array( $input ) ) {
 			return null;

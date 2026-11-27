@@ -810,6 +810,79 @@ final class PaymentErrorsTest extends TestCase {
 		}
 	}
 
+	// ---------------------------------------------------------------- payment health, shared log source (ruling Q2(b)).
+
+	/** Stripe and acme share one log source token; beta has its own. */
+	private static function shared_families( bool $share = true ): array {
+		$list = static fn( string $id, array $sources, array $hooks = array() ): array => array(
+			'plugin'          => array(),
+			'method_ids'      => array( $id ),
+			'method_prefixes' => array(),
+			'log_sources'     => $sources,
+			'hooks'           => $hooks,
+			'hook_groups'     => array(),
+		);
+		return array(
+			'stripe' => self::families()['stripe'],
+			'acme'   => $list( 'acme', $share ? array( 'acme-own-log', 'woocommerce-gateway-stripe' ) : array( 'acme-own-log' ), array( 'acme_job' ) ),
+			'beta'   => $list( 'beta', array( 'beta-log' ) ),
+		);
+	}
+
+	private static function shared_methods(): array {
+		$row = static fn( string $id, ?string $family, string $kind ): array => array( 'id' => $id, 'family' => $family, 'kind' => $kind, 'webhook_adapter' => null, 'webhook_required' => null );
+		return array(
+			'stripe'     => $row( 'stripe', 'stripe', 'instant' ),
+			'stripe_ach' => $row( 'stripe_ach', 'stripe', 'unknown' ),
+			'acme'       => $row( 'acme', 'acme', 'unknown' ),
+			'beta'       => $row( 'beta', 'beta', 'unknown' ),
+			'bacs'       => $row( 'bacs', null, 'manual' ),
+			'othergw'    => $row( 'othergw', null, 'unknown' ),
+		);
+	}
+
+	public function test_payment_health_shared_log_source_is_unknown_for_every_sharing_family(): void {
+		$GLOBALS['blzmcp_test_caps'] = array( 'blzmcp_view_diagnostics' );
+		$tz                          = new \DateTimeZone( 'UTC' );
+		$out                         = PaymentErrors::for_methods( self::shared_methods(), self::shared_families(), array(), self::NOW, 24, $tz );
+		$unknown                     = array(
+			'status'               => 'unknown',
+			'checked'              => false,
+			'applicable'           => true,
+			'coverage'             => 'unavailable',
+			'reason'               => 'shared_log_source',
+			'count'                => null,
+			'count_is_lower_bound' => false,
+			'groups_total'         => null,
+			'groups_truncated'     => false,
+			'groups'               => array(),
+		);
+		foreach ( array( 'stripe', 'stripe_ach', 'acme' ) as $id ) {
+			$this->assertSame( $unknown, $out[ $id ]['logs'], "{$id}: a shared log source is unknown, never a complete zero or another family's count" );
+		}
+		$this->assertSame( 'unknown', $out['acme']['status'], 'a method with only a shared log is unknown, not green' );
+		$this->assertSame( array( 'logging_unavailable', true ), array( $out['beta']['logs']['reason'], $out['beta']['logs']['applicable'] ), 'the unshared family still goes to the reader (WooCommerce logging is not loaded in unit tests)' );
+		$this->assertSame( array( 'manual_method', 'no_verified_mapping' ), array( $out['bacs']['logs']['reason'], $out['othergw']['logs']['reason'] ), 'manual and unmapped rows unchanged' );
+
+		$plain = PaymentErrors::for_methods( self::shared_methods(), self::shared_families( false ), array(), self::NOW, 24, $tz );
+		$this->assertSame( 'logging_unavailable', $plain['stripe']['logs']['reason'], 'without the shared token Stripe goes to the reader again' );
+		$this->assertSame( wp_json_encode( array_column( $plain, 'jobs' ) ), wp_json_encode( array_column( $out, 'jobs' ) ), 'jobs are unchanged by log-source sharing' );
+		$this->assertSame( wp_json_encode( array_intersect_key( $plain, array_flip( array( 'beta', 'bacs', 'othergw' ) ) ) ), wp_json_encode( array_intersect_key( $out, array_flip( array( 'beta', 'bacs', 'othergw' ) ) ) ), 'methods outside the shared families: identical bytes' );
+	}
+
+	public function test_payment_health_shared_log_source_keeps_denial_first(): void {
+		$GLOBALS['blzmcp_test_caps'] = array( 'manage_woocommerce' );
+		$out                         = PaymentErrors::for_methods( self::shared_methods(), self::shared_families(), array(), self::NOW, 24, new \DateTimeZone( 'UTC' ) );
+		foreach ( array( 'stripe', 'acme', 'beta' ) as $id ) {
+			$this->assertSame( 'diagnostics_not_permitted', $out[ $id ]['logs']['reason'], "{$id}: denial comes first" );
+		}
+	}
+
+	public function test_shared_log_source_code_is_listed_for_both_views(): void {
+		$this->assertContains( 'shared_log_source', PaymentErrors::LOG_SUMMARY_REASONS );
+		$this->assertIsString( PaymentErrors::log_reason( 'shared_log_source' ) );
+	}
+
 	public function test_decline_detection_is_unsupported(): void {
 		$this->assertSame( array( 'gateway_error', 'gateway_fatal', 'webhook_signature_failed' ), PaymentErrors::LOG_CATEGORIES, 'no declined-card category' );
 		$c = PaymentErrors::classify_lines(

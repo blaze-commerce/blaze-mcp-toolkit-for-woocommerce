@@ -238,9 +238,20 @@ abstract class AbstractWorkflow extends AbstractAbility {
 
 		$instructions = self::render_tokens( self::preamble( $c, $missing, $switched, $denied, $has_profile, $flags, array() !== $steps ) . "\n\n" . static::guidance( $period ), $c );
 		if ( null !== $analytics_reason ) {
-			// Analytics-only stop (F03, R5): the payment and other non-Analytics steps still run.
+			// Analytics-only stop (F03, R5): the payment and other non-Analytics steps still run. The
+			// report order names only the diagnostic steps that survived (C9): no card text without
+			// the card step, so refund triage and plans that lost it carry none.
+			if ( $flags['card'] && $flags['payment'] ) {
+				$order = ' (the card-testing result and its protection advice included), likely or possible card-testing findings first, then payment health findings';
+			} elseif ( $flags['card'] ) {
+				$order = ' (the card-testing result and its protection advice included), likely or possible card-testing findings first';
+			} elseif ( $flags['payment'] ) {
+				$order = ', payment health findings first';
+			} else {
+				$order = '';
+			}
 			$instructions = AnalyticsGuard::MESSAGE_TOKEN . ' ' . AnalyticsGuard::message( $analytics_reason )
-				. "\n\nSTOP THE ANALYTICS WORK: WooCommerce Analytics data for this period is not complete (or could not be checked) on this store, so the Analytics steps were left out. Explain the message above to the merchant in plain words and say the sales figures would be incomplete until it is fixed. Do not report Analytics figures, run optional Analytics follow-ups or draw conclusions about sales. Still run the steps below, if any, and report what they return (the card-testing result and its protection advice included), likely or possible card-testing findings first, then payment health findings; stop the review only if no step remains.\n\n"
+				. "\n\nSTOP THE ANALYTICS WORK: WooCommerce Analytics data for this period is not complete (or could not be checked) on this store, so the Analytics steps were left out. Explain the message above to the merchant in plain words and say the sales figures would be incomplete until it is fixed. Do not report Analytics figures, run optional Analytics follow-ups or draw conclusions about sales. Still run the steps below, if any, and report what they return" . $order . "; stop the review only if no step remains.\n\n"
 				. $instructions;
 		}
 
@@ -475,10 +486,10 @@ abstract class AbstractWorkflow extends AbstractAbility {
 				. '- If its verdict is no_sign, say in one line that no sign of a card-testing burst was found in the order records checked, and what it cannot see (its summary says so). Never say the checkout is safe or protected.' . "\n"
 				. '- Quote its counts exactly as returned. Never add up counts from different assessments, hours, logs or examples, never build a total or a rate from its examples, and never judge card testing by comparing failed orders with paid orders or with Analytics figures.' . "\n"
 				. '- Its protection rows describe settings only: enforcement is never verified, unknown does not mean unprotected, and any suggested protection is for the merchant to switch on, never for you to change.' . "\n"
-				. '- Keep it apart from payment health: a card-testing result never changes payment health\'s counts or statuses, and payment health\'s inventory_only methods and orders outside verified checkout are never described as card testing.' . "\n"
+				. '- Keep it apart from payment health: a card-testing result never changes payment health\'s counts, statuses or inventory_only rules, and payment health on its own never shows card testing, so never infer card testing from payment health\'s inventory_only methods or its orders outside verified checkout. Only the card-testing step\'s own result says whether failed orders look like card testing. When that result is a possible_attack for orders with no record of where they came from, report and lead with it like any other possible result, keeping its caveat that whether those orders came through the checkout could not be established.' . "\n"
 				. '- If the step returns an error, mention once that the card-testing check could not run, and carry on with the rest of the review.';
 		} elseif ( $flags['card_planned'] ) {
-			$text .= "\n\nCARD TESTING CHECK\nThe card-testing check is not in this plan (the skipped steps below say why). Mention once, in one sentence, that card testing was not checked, and carry on with the rest of the review. Never judge card testing from failed and paid order counts instead.";
+			$text .= "\n\nCARD TESTING CHECK\nThe card-testing check is not in this plan (the skipped steps below say why). Mention once, in one sentence, that card testing was not checked, and carry on with the rest of the review. Never judge card testing from failed and paid order counts, or from payment health's inventory_only methods or orders outside verified checkout, instead.";
 		}
 
 		if ( $flags['payment'] ) {

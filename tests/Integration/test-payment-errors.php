@@ -375,9 +375,26 @@ $g_got = array();
 $g_run = static function ( string $name, int $hours = 24 ) use ( &$g_got, $inv, $g_fam, $g_now, $g_tz ): void {
 	$g_got[ $name ] = (string) wp_json_encode( PaymentErrors::for_methods( $inv, $g_fam, array( 'stripe' => 3 ), $g_now, $hours, $g_tz ) );
 };
+// Ruling Q2(b): a second family mapped to Stripe's (fixture) log source through the tokens map,
+// listed after Stripe, so the 1.2.1 database reader gave all rows to it and a complete zero to Stripe.
+$g_fam_shared              = $g_fam;
+$g_fam_shared['blzshared'] = array(
+	'plugin'          => array(),
+	'method_ids'      => array( 'blzshared' ),
+	'method_prefixes' => array(),
+	'log_sources'     => array( $g_token ),
+	'hooks'           => array(),
+	'hook_groups'     => array(),
+);
+$g_inv_shared              = $inv;
+$g_inv_shared['blzshared'] = array( 'id' => 'blzshared', 'family' => 'blzshared', 'kind' => 'unknown', 'webhook_adapter' => null, 'webhook_required' => null );
+$g_run_shared              = static function ( string $name ) use ( &$g_got, $g_inv_shared, $g_fam_shared, $g_now, $g_tz ): void {
+	$g_got[ $name ] = (string) wp_json_encode( PaymentErrors::for_methods( $g_inv_shared, $g_fam_shared, array( 'stripe' => 3 ), $g_now, 24, $g_tz ) );
+};
 // File handler: the shared fixture lines, unshifted (boundary lines included).
 file_put_contents( $g_file, (string) file_get_contents( __DIR__ . '/../fixtures/payment-log-lines.txt' ) );
 $g_run( 'file_fixture' );
+$g_run_shared( 'shared_file' );
 file_put_contents( $g_file, gmdate( 'c', $g_now - 600 ) . " INFO Webhook received\n" );
 $g_run( 'file_clean' );
 file_put_contents( $g_file, '[' . gmdate( 'd-M-Y H:i:s', $g_now - 900 ) . " UTC] PHP Fatal error: gateway exploded\nStack trace:\n" );
@@ -408,6 +425,7 @@ if ( $table === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->es
 	$wpdb->insert( $table, array( 'timestamp' => gmdate( 'Y-m-d H:i:s', $g_now - 200 ), 'level' => 500, 'source' => $g_token . '-other', 'message' => 'not ours' ) );
 	$g_other = (int) $wpdb->insert_id;
 	$g_run( 'db_rows' );
+	$g_run_shared( 'shared_db' );
 	$wpdb->delete( $table, array( 'log_id' => $g_other ) );
 	$g_rows = PaymentErrors::MAX_DB_ROWS + 1; // 3 qualifying rows above, then up to 2,001.
 	for ( $done = 3; $done < $g_rows; $done += 200 ) {
@@ -438,18 +456,117 @@ if ( $g_capture ) {
 	}
 }
 
+// ---------------------------------------------------------------- shared log source (1.3, ruling Q2(b)).
+// Stripe and a second family share one source token; a third family shares one of its two tokens;
+// a fourth has its own source. The ambiguous families are unknown and unread, never a complete zero
+// and never each other's entries; the unshared family is read as before; jobs are unchanged.
+$q_sfx  = strtolower( wp_generate_password( 8, false ) );
+$q_tok  = 'blzmcp-q2s-' . $q_sfx;
+$q_own  = 'blzmcp-q2o-' . $q_sfx;
+$q_solo = 'blzmcp-q2c-' . $q_sfx;
+$q_list = static fn( string $id, array $sources, array $hooks = array() ): array => array(
+	'plugin'          => array(),
+	'method_ids'      => array( $id ),
+	'method_prefixes' => array(),
+	'log_sources'     => $sources,
+	'hooks'           => $hooks,
+	'hook_groups'     => array(),
+);
+$q_fam                   = $fam;
+$q_fam['stripe']['log_sources'] = array( $q_tok );
+$q_fam['blzq2part']      = $q_list( 'blzq2part', array( $q_own, $q_tok ), array( 'blzq2_part_job' ) );
+$q_fam['blzq2solo']      = $q_list( 'blzq2solo', array( $q_solo ) );
+$q_row                   = static fn( string $id, string $family, string $kind = 'unknown' ): array => array( 'id' => $id, 'family' => $family, 'kind' => $kind, 'webhook_adapter' => null, 'webhook_required' => null );
+$q_inv                   = array(
+	'stripe'     => $q_row( 'stripe', 'stripe', 'instant' ),
+	'stripe_ach' => $q_row( 'stripe_ach', 'stripe' ),
+	'blzq2part'  => $q_row( 'blzq2part', 'blzq2part' ),
+	'blzq2solo'  => $q_row( 'blzq2solo', 'blzq2solo' ),
+);
+$q_unshared              = $q_fam;
+$q_unshared['blzq2part']['log_sources'] = array( $q_own ); // The same families without the shared token.
+$q_files                 = array();
+blzmcp_it_cleanup(
+	static function () use ( &$q_files ): void {
+		foreach ( $q_files as $p ) {
+			if ( file_exists( $p ) ) {
+				unlink( $p );
+			}
+		}
+	}
+);
+blzmcp_it_cleanup( static fn() => $wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE source IN (%s, %s, %s)', $table, $q_tok, $q_own, $q_solo ) ) );
+$q_unknown = array( 'unknown', false, true, 'unavailable', 'shared_log_source', null, false, null, array() );
+$q_brief   = static fn( array $l ): array => array( $l['status'], $l['checked'], $l['applicable'], $l['coverage'], $l['reason'], $l['count'], $l['count_is_lower_bound'], $l['groups_total'], $l['groups'] );
+$q_assert  = static function ( string $handler ) use ( $q_inv, $q_fam, $q_unshared, $now, $tz, $q_unknown, $q_brief, $q_tok, $q_own, $q_solo ): void {
+	$queries = array();
+	$q_spy   = static function ( $q ) use ( &$queries ) {
+		$queries[] = (string) $q;
+		return $q;
+	};
+	add_filter( 'query', $q_spy );
+	$res = PaymentErrors::for_methods( $q_inv, $q_fam, array(), $now, 24, $tz );
+	remove_filter( 'query', $q_spy );
+	foreach ( array( 'stripe', 'stripe_ach', 'blzq2part' ) as $id ) {
+		blzmcp_it_equals( $q_unknown, $q_brief( $res[ $id ]['logs'] ), "{$handler}: {$id} shares a log source, so its logs are unknown and unread, never a complete zero" );
+	}
+	blzmcp_it_equals( array( 'amber', true, 'complete', null, 1 ), array( $res['blzq2solo']['logs']['status'], $res['blzq2solo']['logs']['checked'], $res['blzq2solo']['logs']['coverage'], $res['blzq2solo']['logs']['reason'], $res['blzq2solo']['logs']['count'] ), "{$handler}: the unshared family beside them is read as before" );
+	blzmcp_it_equals( 1, array_sum( array_map( static fn( $r ) => (int) $r['logs']['count'], $res ) ), "{$handler}: no entry is attributed to two families (only the unshared family's entry is counted)" );
+	blzmcp_it_equals( 'unknown', $res['blzq2part']['status'], "{$handler}: a method whose only evidence is a shared log is unknown, not green" );
+	$read = array_values( array_filter( $queries, static fn( $q ) => str_contains( $q, 'woocommerce_log' ) && ! str_contains( $q, 'SHOW TABLES' ) ) );
+	blzmcp_it_assert( array() === array_filter( $read, static fn( $q ) => str_contains( $q, $q_tok ) || str_contains( $q, $q_own ) ), "{$handler}: no log query names a shared family's source" );
+	if ( 'db' === $handler ) {
+		blzmcp_it_assert( 1 === count( array_filter( $read, static fn( $q ) => str_contains( $q, $q_solo ) ) ), 'db: the unshared source is still read in one query' );
+	}
+	$plain = PaymentErrors::for_methods( $q_inv, $q_unshared, array(), $now, 24, $tz );
+	blzmcp_it_equals( wp_json_encode( array_column( $plain, 'jobs' ) ), wp_json_encode( array_column( $res, 'jobs' ) ), "{$handler}: jobs are the same with or without the shared log source" );
+	blzmcp_it_equals( 'shared_log_source', $res['stripe']['logs']['reason'], "{$handler}: fixed reason code" );
+	blzmcp_it_assert( null === $plain['stripe']['logs']['reason'] || 'shared_log_source' !== $plain['stripe']['logs']['reason'], "{$handler}: without the shared token Stripe is read again" );
+};
+// File handler.
+update_option( 'woocommerce_logs_default_handler', $g_file_handler );
+foreach ( array( $q_tok => 2, $q_own => 1, $q_solo => 1 ) as $source => $n ) {
+	$p = rtrim( (string) $dir, '/' ) . '/' . $source . '-' . gmdate( 'Y-m-d', $now ) . '-blzmcpq2.log';
+	file_put_contents( $p, implode( '', array_map( static fn( $i ) => gmdate( 'c', $now - 600 - $i ) . " ERROR entry {$i}\n", range( 1, $n ) ) ) );
+	$q_files[] = $p;
+}
+$q_assert( 'file' );
+wp_set_current_user( (int) $manager );
+$q_denied = PaymentErrors::for_methods( $q_inv, $q_fam, array(), $now, 24, $tz );
+wp_set_current_user( 1 );
+blzmcp_it_equals( array( 'diagnostics_not_permitted', 'diagnostics_not_permitted' ), array( $q_denied['stripe']['logs']['reason'], $q_denied['blzq2part']['logs']['reason'] ), 'denied: the permission reason still comes first' );
+// DB handler.
+if ( $table === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) ) {
+	update_option( 'woocommerce_logs_default_handler', 'WC_Log_Handler_DB' );
+	foreach ( array( $q_tok => 3, $q_own => 2, $q_solo => 1 ) as $source => $n ) {
+		for ( $i = 0; $i < $n; $i++ ) {
+			$wpdb->insert( $table, array( 'timestamp' => gmdate( 'Y-m-d H:i:s', $now - 300 - $i ), 'level' => 500, 'source' => $source, 'message' => 'blzmcp q2 row' ) );
+		}
+	}
+	$q_assert( 'db' );
+	update_option( 'woocommerce_logs_default_handler', $saved['woocommerce_logs_default_handler'] ?? $g_file_handler );
+} else {
+	echo "NOTE  woocommerce_log table absent; DB shared-source case skipped\n";
+}
+echo 'NOTE  payment health text for shared_log_source: ' . (string) \Blaze\McpToolkit\Abilities\PaymentHealth::reason_text( 'shared_log_source' ) . "\n";
+
 blzmcp_it_equals( 0, $http_calls, 'no HTTP request from diagnostics' );
 blzmcp_it_finish();
 
 /**
  * SHA-256 of the exact wp_json_encode() bytes of for_methods(), captured from the 1.2.1 reader
  * (before the 1.3 card-logs change) with BLZMCP_PE_CAPTURE=1. A mismatch prints the new bytes.
+ * The two shared_* scenarios are the one intended 1.3 change (ruling Q2(b)); their 1.2.1 digests
+ * are noted beside them.
  *
  * @return array<string,string>
  */
 function blzmcp_pe_golden(): array {
 	return array(
 		'file_fixture'         => '4e10c755c1d94de697bc892a4172f494db9de4b94a3d1239e23a14846c778a7e',
+		// Ruling Q2(b), the only intended change: both families sharing the source are unknown
+		// (1.2.1 gave Stripe all 6 file entries: 377bfb2c...a4ae).
+		'shared_file'          => 'f1d4f73378b7f7cd6feb999470d6553ef770a7c45a6487df89291e256819a2ac',
 		'file_clean'           => '6aa83f26bcf73ac1a15421f99a7023842526c8585cc81e7ad91c435a75e82ccc',
 		'file_unparsed'        => 'bbbb4a3c24fdd13828e3ec7b6cb78718c91694444186b9c4270139768d9a6417',
 		'file_byte_cap'        => '9d468fb06e9a6f68e7173f29253753e341d23464189b82a567d7a8909e4cc30d',
@@ -458,6 +575,8 @@ function blzmcp_pe_golden(): array {
 		'file_none'            => '94b92f7a71a581c90125e6b44ae584e5e1dc150001126869a4d3a50261f158b0',
 		'denied'               => '594a21b2d0e7cf59a088a1ac6406a3582cadf3650e569ba0ffcbf853d91c3cee',
 		'db_rows'              => '491e26954d9c681b56150017d71ff2623fff934e4593a602fde5db6f8718d46a',
+		// Ruling Q2(b): same unknown bytes (1.2.1 gave Stripe a complete zero, the other family all 3 rows: f55aae06...e93b).
+		'shared_db'            => 'f1d4f73378b7f7cd6feb999470d6553ef770a7c45a6487df89291e256819a2ac',
 		'db_row_cap'           => 'ba00280cb2305f0ab2050d73881d740de7c58dc94b23b0fae639ac135c01aee5',
 	);
 }

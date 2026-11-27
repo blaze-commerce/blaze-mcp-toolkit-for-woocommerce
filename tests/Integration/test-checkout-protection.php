@@ -23,6 +23,7 @@
 
 require_once __DIR__ . '/assert.php';
 
+use Blaze\McpToolkit\Diagnostics\CardTestingOrders;
 use Blaze\McpToolkit\Diagnostics\CheckoutProtection;
 
 const BLZMCP_CP_STATE = 'blzmcp_it_cp_restore';
@@ -258,7 +259,16 @@ blzmcp_it_equals( true, $base['snap']['permitted'], 'administrator may read' );
 blzmcp_it_equals( WC_VERSION, $base['snap']['wc_version'], 'WooCommerce version read from the constant' );
 blzmcp_it_equals( CheckoutProtection::PATH_IDS, array_column( $base['rows'], 'id' ), 'the 5 fixed rows, in order' );
 blzmcp_it_assert( count( $sql ) <= 6, 'baseline reads stay small (' . count( $sql ) . ' queries)' );
-echo 'NOTE  environment: WooCommerce ' . WC_VERSION . ', verified range ' . ( CheckoutProtection::version_support( $base['snap']['wc_version'] )['verified'] ? 'yes' : 'no' ) . "\n";
+$env_support = CheckoutProtection::version_support( $base['snap']['wc_version'] );
+echo 'NOTE  environment: WooCommerce ' . WC_VERSION . ', supported range ' . ( $env_support['supported'] ? 'yes' : 'no' ) . ', source pin ' . ( $env_support['pinned'] ? 'yes' : 'no' ) . "\n";
+
+// Ruling Q3 provenance: the installed version, the source pins and the range, on the real read.
+$prov = $base['lims'][1] ?? array();
+blzmcp_it_equals( array( 'protection', 'protection_source_versions', null ), array( $prov['scope'] ?? null, $prov['code'] ?? null, array_key_exists( 'check_next', $prov ) ? $prov['check_next'] : 'missing' ), 'source-version limitation follows the enforcement limitation' );
+blzmcp_it_equals( CheckoutProtection::reason( 'protection_source_versions' ) . ' ' . CheckoutProtection::installed_version_text( WC_VERSION ), $prov['what'] ?? null, 'it names the pins, the range and the installed WooCommerce version' );
+blzmcp_it_assert( false !== strpos( (string) ( $prov['what'] ?? '' ), 'WooCommerce ' . WC_VERSION . ' is installed' ), 'installed version ' . WC_VERSION . ' disclosed' );
+blzmcp_it_equals( array( WC_VERSION, $env_support['supported'], $env_support['pinned'] ), array( $base['cache']['wc_version'], $base['cache']['wc_supported'], $base['cache']['wc_source_pinned'] ), 'cache facts carry the installed version, support and pin flags' );
+blzmcp_it_equals( CardTestingOrders::version_supported( WC_VERSION ), $env_support['supported'], 'the order reader and the protection facts agree on the installed version' );
 
 // ------------------------------------------------------------------------------- pages.
 
@@ -368,6 +378,34 @@ foreach ( $rl_cases as $name => list( $value, $state, $configured ) ) {
 }
 $lims = array_column( CheckoutProtection::limitations(), 'code', 'scope' );
 blzmcp_it_equals( 'rate_limit_setting_unrecognised', $lims['store_api_checkout'] ?? null, 'an unexpected saved value is disclosed, never read as off' );
+
+// Ruling Q3 on the real reads: block page, Rate limit Checkout on. WC_VERSION is a constant, so
+// only the version in the real snapshot is swapped; every other fact comes from this store.
+update_option( 'woocommerce_feature_rate_limit_checkout_enabled', 'yes' );
+wp_cache_flush();
+$real = CheckoutProtection::snapshot();
+$at   = static function ( $display ) use ( $real ): array {
+	$s = array_merge( $real, array( 'wc_version' => $display ) );
+	return array(
+		'rows' => blzmcp_cp_by_id( CheckoutProtection::paths( $s ) ),
+		'lims' => CheckoutProtection::limitations( $s ),
+	);
+};
+$pin   = $at( '11.3.1' );
+$patch = $at( '11.3.2' );
+blzmcp_it_equals( array( 'configured', true, true ), array( $pin['rows']['store_api_checkout']['protection_state'], $pin['rows']['store_api_checkout']['protections'][0]['configured'], $pin['rows']['store_api_checkout']['protections'][0]['scope_known'] ), 'pin 11.3.1: Store API checkout configured, scope known' );
+blzmcp_it_equals( array( 'configured', true, false ), array( $patch['rows']['store_api_checkout']['protection_state'], $patch['rows']['store_api_checkout']['protections'][0]['configured'], $patch['rows']['store_api_checkout']['protections'][0]['scope_known'] ), 'later patch 11.3.2: supported by policy, the letter-case fact stays not known' );
+blzmcp_it_equals( $pin['rows']['store_api_checkout']['facts'], $patch['rows']['store_api_checkout']['facts'], 'later patch 11.3.2: the shared source facts are used' );
+blzmcp_it_assert( in_array( 'store_api_checkout|rate_limit_scope_unverified', array_map( static fn( $l ) => $l['scope'] . '|' . $l['code'], $patch['lims'] ), true ), 'later patch 11.3.2: the unknown letter-case scope is a disclosed gap' );
+foreach ( array( '11.4.0', '10.8.9', '11.3.1-beta.1', '11.3.2-rc.1', null ) as $outside ) {
+	$o     = $at( $outside );
+	$codes = array_map( static fn( $l ) => $l['scope'] . '|' . $l['code'], $o['lims'] );
+	$label = null === $outside ? 'unreadable version' : $outside;
+	blzmcp_it_equals( array( 'unknown', 'unknown', null ), array( $o['rows']['store_api_checkout']['exposure'], $o['rows']['store_api_checkout']['protection_state'], $o['rows']['store_api_checkout']['protections'][0]['configured'] ), "$label: unsupported, no guessed value, even with the setting saved on" );
+	blzmcp_it_equals( 'unknown', $o['rows']['checkout_page']['checkout_type'], "$label: the block page is not typed outside the range" );
+	blzmcp_it_assert( in_array( 'store_api_checkout|wc_version_unsupported', $codes, true ) && in_array( 'protection|protection_source_versions', $codes, true ), "$label: unsupported and the source versions are disclosed" );
+}
+blzmcp_it_assert( false !== strpos( $at( '11.3.1-beta.1' )['lims'][1]['what'], 'WooCommerce 11.3.1-beta.1 is installed. Test and pre-release versions are outside the supported range.' ), 'a prerelease is named and rejected, never stripped to 11.3.1' );
 
 update_option( 'woocommerce_feature_rate_limit_checkout_enabled', 'no' );
 blzmcp_cp_set_checkout( (string) $cp_pages['classic'][0] );

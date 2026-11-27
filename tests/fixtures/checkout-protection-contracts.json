@@ -17,11 +17,15 @@
       "note": "REST routing, batch dispatch, block delimiter and shortcode grammar. Same behaviour in 7.2-RC3 at the lines given under each fact."
     }
   },
-  "verified_range": {
+  "supported_range": {
+    "ruling": "REVIEW-pass4 Q3 (b): one stable-release range for both readers, the same as CardTestingOrders::SUPPORTED_WC_MIN / SUPPORTED_WC_BELOW",
     "min": "10.9.0",
-    "max": "11.3.1",
-    "release_grammar": "plain X.Y.Z only; a pre-release or build suffix is outside the range",
-    "rule": "Facts identical at both ends are used for every plain release from min to max inclusive. A fact that differs between the two ends is used only at the exact version where it was read; between them it is reported as not verified. Any version outside the range, unreadable or missing returns wc_version_unverified and no source default is assumed."
+    "below": "11.4.0",
+    "source_pins": ["10.9.0", "11.3.1"],
+    "stable_grammar": "^(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$",
+    "display_grammar": "^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}(-[0-9A-Za-z.]{1,24})?$",
+    "rule": "A version is supported only when it matches stable_grammar exactly and min <= version < below. A prerelease, build suffix, leading zero, extra part or any other malformed value is unsupported; suffixes are never stripped. Facts identical at both source pins are used for every supported release; releases other than the pins (later 11.3 patches included) are covered by this compatibility policy, not by a new source read. A fact that differs between the pins is used only at the exact pin where it was read and reported as not known for every other supported release. Outside the range, prerelease, malformed or missing: wc_version_unsupported, and no source default is assumed. A new minor release needs a source review before below moves.",
+    "disclosure": "Every permitted call returns the limitation protection_source_versions (scope protection): its fixed text names the pins and the range, followed by one fixed sentence naming the installed version when it matches display_grammar (installed_version_text()), never raw constant text."
   },
   "rate_limit_checkout": {
     "feature_id": "rate_limit_checkout",
@@ -35,7 +39,7 @@
       "other": "WooCommerce treats every value other than the string 'yes' as off; the toolkit reports any other saved value as unrecognised (state unknown, configured null), never off"
     },
     "default": "no",
-    "absent_means": "off by the source default, used only inside the verified range",
+    "absent_means": "off by the source default (the same at both pins), used only inside the supported range",
     "opt_in_limit": 3,
     "opt_in_seconds": 60,
     "opt_in_filter_priority": 1,
@@ -118,7 +122,7 @@
         "fact": "letter case of the request address",
         "10.9.0": "case-sensitive (strpos and a pattern without the i flag) while WordPress routes in any case, so a differently cased address reaches the route outside the pattern",
         "11.3.1": "case-insensitive (stripos and the i flag)",
-        "runtime": "scope_known true only at exactly 10.9.0 or 11.3.1; any version between them reports rate_limit_scope_unverified"
+        "runtime": "scope_known true only at exactly 10.9.0 or 11.3.1; every other supported release (between the pins, or a later 11.3 patch) reports rate_limit_scope_unverified"
       }
     ]
   },
@@ -168,7 +172,7 @@
         "11.3.1:src/StoreApi/Routes/V1/Batch.php:126"
       ]
     },
-    "exposure_rule": "Inside the verified range these routes are available_in_core. That is a source fact, not a claim that a remote client can reach them; the toolkit never builds the REST server or dispatches a request to check."
+    "exposure_rule": "Inside the supported range these routes are available_in_core. That is a source fact, not a claim that a remote client can reach them; the toolkit never builds the REST server or dispatches a request to check."
   },
   "checkout_page": {
     "option": "woocommerce_checkout_page_id",
@@ -228,7 +232,7 @@
       "block": "block marker only",
       "classic": "classic marker only",
       "mixed": "both markers",
-      "unknown": "no marker, page not set, invalid setting, missing, not published, larger than max_bytes_read, unreadable, shortcode tag renamed with no block-only marker, or WooCommerce version outside the verified range"
+      "unknown": "no marker, page not set, invalid setting, missing, not published, larger than max_bytes_read, unreadable, shortcode tag renamed with no block-only marker, or WooCommerce version outside the supported range"
     },
     "template_note": "WooCommerce's own block-theme checkout template renders the page content (10.9.0:templates/templates/page-checkout.html:6), but a customised theme template or page builder can change what shows; the toolkit reads the page only and says so."
   },
@@ -352,7 +356,8 @@
   },
   "reason_codes": {
     "protection_enforcement_unverified": "This check reads settings and the checkout page only. It cannot confirm that any protection works, and it cannot see protection added by other plugins, the server, a CDN or the payment provider.",
-    "wc_version_unverified": "This WooCommerce version has not been checked by this tool, so its checkout routes and settings are not described.",
+    "protection_source_versions": "The checkout protection facts come from WooCommerce 10.9.0 and 11.3.1 source code. They are used for stable WooCommerce releases from 10.9.0 up to, not including, 11.4.0; other releases in that range, including later 11.3 patches, are covered by that compatibility policy, not by a separate source check.",
+    "wc_version_unsupported": "This WooCommerce version is outside the range this check supports (stable releases from 10.9.0 up to, not including, 11.4.0), so facts that depend on WooCommerce's own code were not described.",
     "checkout_page_not_set": "No checkout page is set in WooCommerce.",
     "checkout_page_invalid_setting": "The saved checkout page setting is not a valid page.",
     "checkout_page_missing": "The checkout page set in WooCommerce no longer exists.",
@@ -366,13 +371,51 @@
     "rate_limit_checkout_off": "WooCommerce's Rate limit Checkout setting is off. This does not mean nothing else protects this path.",
     "rate_limit_setting_unrecognised": "Rate limit Checkout has an unexpected saved value, so whether it is on is not known.",
     "rate_limit_filter_present": "A plugin or theme changes Store API rate limits, so the limits in use are not known.",
-    "rate_limit_scope_unverified": "Which request addresses Rate limit Checkout matches was not checked for this WooCommerce version.",
+    "rate_limit_scope_unverified": "Whether Rate limit Checkout matches request addresses written in any letter case was checked only for WooCommerce 10.9.0 and 11.3.1, so it is not known for this version.",
     "attribution_disabled": "WooCommerce order attribution is off, so where orders came from is not recorded.",
     "attribution_setting_unrecognised": "The order attribution setting has an unexpected saved value, so whether it is on is not known.",
     "attribution_prefix_override": "A plugin or theme changes how order attribution is stored, so it could not be read.",
     "attribution_fields_override": "A plugin or theme changes which order attribution details are recorded, so they could not be read."
   },
   "synthetic_cases": {
+    "versions": [
+      { "raw": "10.8.9", "display": "10.8.9", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "10.8.99", "display": "10.8.99", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "10.9.0", "display": "10.9.0", "supported": true, "pinned": true, "case_insensitive": false, "sentence": "pinned" },
+      { "raw": "10.9.1", "display": "10.9.1", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.0.0", "display": "11.0.0", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.3.0", "display": "11.3.0", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.3.1", "display": "11.3.1", "supported": true, "pinned": true, "case_insensitive": true, "sentence": "pinned" },
+      { "raw": "11.3.2", "display": "11.3.2", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.3.99", "display": "11.3.99", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.3.9999", "display": "11.3.9999", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.4.0", "display": "11.4.0", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "11.4.1", "display": "11.4.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "11.10.0", "display": "11.10.0", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "9.9.9", "display": "9.9.9", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "12.0.0", "display": "12.0.0", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "011.3.1", "display": "011.3.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "11.03.1", "display": "11.03.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "11.3.1-beta.1", "display": "11.3.1-beta.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.3.2-rc.1", "display": "11.3.2-rc.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "10.9.0-rc.1", "display": "10.9.0-rc.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.0.0-beta", "display": "11.0.0-beta", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.4.0-dev", "display": "11.4.0-dev", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.3", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1.1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "v11.3.1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": " 11.3.1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1 ", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1+build.5", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1-", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1-beta_1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1-beta-1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1-aaaaaaaaaaaaaaaaaaaaaaaa", "display": "11.3.1-aaaaaaaaaaaaaaaaaaaaaaaa", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.3.1-aaaaaaaaaaaaaaaaaaaaaaaaa", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.10000", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" }
+    ],
     "max_bytes_boundary": {
       "at_limit": 262144,
       "over_limit": 262145

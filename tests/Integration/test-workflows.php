@@ -20,6 +20,7 @@
 // phpcs:disable WordPress.Security.EscapeOutput, WordPress.NamingConventions.PrefixAllGlobals, WordPress.DB
 
 require_once __DIR__ . '/assert.php';
+require_once __DIR__ . '/card-testing-fixtures.php';
 
 use Blaze\McpToolkit\Bundled\Commerce;
 use Blaze\McpToolkit\Connectors\Connectors;
@@ -90,6 +91,103 @@ $contradictions = static function ( string $text ): array {
 };
 $whys_of = static function ( $result ): string {
 	return implode( "\n", array_column( (array) ( is_array( $result ) ? $result['steps'] : array() ), 'why' ) );
+};
+
+// 1.3 wave 2 (REVIEW-pass4 item 7): the card tool's own missing-origin possible_attack must be reported
+// and led with, while card testing is never inferred from payment-health inventory alone. Checked
+// sentence by sentence, so the directions agree, not merely that some wording is present: every
+// sentence that ties card testing to inventory_only methods, orders outside verified checkout or
+// orders with no recorded origin may only forbid inferring it, never forbid reporting it.
+$direction_problems = static function ( string $text ): array {
+	$problems = array();
+	foreach ( array( 'If its verdict is likely_attack or possible_attack, lead the answer with it', 'When that result is a possible_attack for orders with no record of where they came from, report and lead with it', 'never infer card testing from payment health' ) as $needed ) {
+		if ( ! str_contains( $text, $needed ) ) {
+			$problems[] = 'missing direction: ' . $needed;
+		}
+	}
+	foreach ( (array) preg_split( '/(?<=[.!?])\s+/', $text ) as $sentence ) {
+		$s          = strtolower( (string) $sentence );
+		$card_s     = str_contains( $s, 'card testing' ) || str_contains( $s, 'card-testing' );
+		$unverified = str_contains( $s, 'inventory_only' ) || str_contains( $s, 'outside verified checkout' ) || str_contains( $s, 'no record of where' );
+		$forbids    = 1 === preg_match( '/never (be )?(described|called|call|present|count|report|mention|treat)|never as\b|not as card testing/', $s );
+		if ( $card_s && $unverified && $forbids && ! str_contains( $s, 'infer' ) ) {
+			$problems[] = 'conflicting direction: ' . trim( (string) $sentence );
+		}
+	}
+	return $problems;
+};
+// The checker catches the wave 1 wording the lead rejected (AbstractWorkflow.php:478, FailedOrderTriage.php:140).
+$wave1_lines = array(
+	'- Keep it apart from payment health: a card-testing result never changes payment health\'s counts or statuses, and payment health\'s inventory_only methods and orders outside verified checkout are never described as card testing.',
+	'A payment method marked inventory_only was not assessed: mention it as a method to confirm, never as a failed checkout, a declined payment or card testing.',
+);
+foreach ( $wave1_lines as $i => $line ) {
+	blzmcp_it_assert( array() !== array_filter( $direction_problems( $line ), static fn( $p ) => str_starts_with( $p, 'conflicting direction' ) ), "direction checker: the rejected wave 1 sentence {$i} is reported as a conflict" );
+}
+
+/**
+ * A real missing-origin burst seen by both tools (wave 2): 100 failed orders in the last half hour with
+ * no recorded origin, for a method the kind filter marks instant and that is neither registered nor
+ * switched on. The card tool returns a qualified possible_attack for that missing-origin scope; payment
+ * health lists the same method as inventory_only. Then every payment workflow, under the connector this
+ * process runs, must direct the assistant to lead with the card tool's own result and its caveat and
+ * never to infer card testing from the inventory row. Orders are CRUD fixtures removed at finish.
+ */
+$paired_case = static function ( string $mode ) use ( $admins, $payment_first, $card, $payment, $index_of, $direction_problems ): void {
+	global $wpdb;
+	wp_set_current_user( $admins[0]->ID );
+	$mo   = blzmcp_ct_method( 'mo' );
+	$kind = static fn( $k, $id ) => $mo === $id ? 'instant' : $k;
+	add_filter( 'blaze_mcp_toolkit_payment_method_kind', $kind, 20, 2 );
+	add_filter( 'pre_wp_mail', '__return_false', 1 );
+	$now = time();
+	for ( $i = 0; $i < 100; $i++ ) {
+		blzmcp_ct_order(
+			array(
+				'method'  => $mo,
+				'via'     => '',
+				'status'  => 'failed',
+				'created' => $now - 1800 + 15 * $i,
+			)
+		);
+	}
+	remove_filter( 'pre_wp_mail', '__return_false', 1 );
+	// Results cached by earlier calls in this run would predate the fixtures: start cold.
+	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s', $wpdb->options, $wpdb->esc_like( '_transient_blzmcp_c_' ) . '%', $wpdb->esc_like( '_transient_timeout_blzmcp_c_' ) . '%' ) );
+	wp_cache_flush();
+	$card_r = wp_get_ability( $card )->execute( array( 'since_hours' => 48 ) );
+	$pay_r  = wp_get_ability( $payment )->execute( array( 'since_hours' => 24 ) );
+	$mo_card = null;
+	foreach ( (array) ( is_array( $card_r ) ? $card_r['assessments'] : array() ) as $a ) {
+		if ( $mo === $a['method_id'] && 'missing_origin' === $a['origin_scope'] ) {
+			$mo_card = $a;
+		}
+	}
+	$mo_find = '';
+	foreach ( (array) ( is_array( $card_r ) ? $card_r['findings'] : array() ) as $f ) {
+		if ( $mo === $f['method_id'] ) {
+			$mo_find = (string) $f['what'];
+		}
+	}
+	$mo_pay = null;
+	foreach ( (array) ( is_array( $pay_r ) ? $pay_r['methods'] : array() ) as $m ) {
+		if ( $mo === $m['id'] ) {
+			$mo_pay = $m;
+		}
+	}
+	blzmcp_it_equals( array( 'possible_attack', 'origin_unverified' ), array( $mo_card['verdict'] ?? null, $mo_card['reason_code'] ?? null ), "{$mode} paired case: the card tool returns its own qualified possible_attack for the missing-origin orders" );
+	blzmcp_it_assert( str_contains( $mo_find, 'whether they came through the checkout could not be established' ), "{$mode} paired case: the card finding carries the could-not-be-established caveat the instructions refer to" );
+	blzmcp_it_equals( 'inventory_only', $mo_pay['assessment'] ?? null, "{$mode} paired case: payment health lists the same method as inventory_only (not assessed)" );
+	foreach ( $payment_first as $wf ) {
+		$r    = wp_get_ability( $wf )->execute();
+		$text = is_array( $r ) ? $r['instructions'] : '';
+		blzmcp_it_equals( 1, $index_of( $r, $card ), "{$mode} paired case {$wf}: the card step is in the plan" );
+		blzmcp_it_equals( array(), $direction_problems( $text ), "{$mode} paired case {$wf}: the directions agree (lead with the card tool's own result, never infer card testing from inventory)" );
+		// The two real results meet the directions: the card verdict is one the lead rule covers, and the
+		// inventory row is one the inference ban covers.
+		blzmcp_it_assert( in_array( $mo_card['verdict'] ?? null, array( 'likely_attack', 'possible_attack' ), true ) && 'inventory_only' === ( $mo_pay['assessment'] ?? null ) && str_contains( $text, 'never infer card testing from payment health\'s inventory_only methods' ), "{$mode} paired case {$wf}: the card result is led with and the inventory row is never turned into card testing" );
+	}
+	remove_filter( 'blaze_mcp_toolkit_payment_method_kind', $kind, 20 );
 };
 
 // Connector naming (1.1): the run sentence 1.0 shipped, and helpers shared by the default and
@@ -299,7 +397,7 @@ if ( $easy_stub ) {
 		$t = is_array( $r ) ? $r['instructions'] : '';
 		blzmcp_it_assert( null === $index_of( $r, $card ) && 0 === $index_of( $r, $payment ) && 1 === $index_of( $r, 'wc-analytics/totals', 'orders' ), "easy-stub card unticked {$wf}: payment health first, totals second" );
 		blzmcp_it_assert( str_contains( $t, 'SWITCHED OFF' ) && str_contains( $t, 'wp_ability_blaze_mcp_toolkit_card_testing' ) && str_contains( $t, 'Easy MCP AI' ), "easy-stub card unticked {$wf}: listed as switched off in Easy MCP AI" );
-		blzmcp_it_assert( str_contains( $t, 'The card-testing check is not in this plan' ) && str_contains( $t, 'Never judge card testing from failed and paid order counts instead' ), "easy-stub card unticked {$wf}: explained once, no failed > paid fallback" );
+		blzmcp_it_assert( str_contains( $t, 'The card-testing check is not in this plan' ) && str_contains( $t, 'Never judge card testing from failed and paid order counts, or from payment health\'s inventory_only methods or orders outside verified checkout, instead.' ), "easy-stub card unticked {$wf}: explained once, no failed > paid or inventory fallback" );
 		blzmcp_it_equals( array(), $contradictions( $t ), "easy-stub card unticked {$wf}: no contradictory clause" );
 	}
 	blzmcp_it_equals( $no_card_ticked, get_option( $opt ), 'easy-stub card unticked: the owner\'s ticked list is left as it was' );
@@ -385,6 +483,11 @@ if ( $easy_stub ) {
 	// Back to all on for the shared checks.
 	$GLOBALS['blzmcp_toolstate_return'] = array( true, 'default' );
 	$shared_connector_checks( $easy_real ? 'real-easy' : 'easy-stub' );
+
+	// Paired missing-origin card / payment-inventory case under the Easy MCP AI connector (wave 2).
+	update_option( $opt, $all_names );
+	$GLOBALS['blzmcp_toolstate_return'] = array( true, 'default' );
+	$paired_case( $easy_real ? 'real-easy' : 'easy-stub' );
 
 	blzmcp_it_finish();
 	return;
@@ -490,6 +593,8 @@ if ( Commerce::is_standing_aside() ) {
 			blzmcp_it_assert( 'blaze-mcp-toolkit/payment-health' === ( $result['steps'][0]['ability'] ?? null ), "standaside analytics off {$name}: payment health registered independently and still first" );
 			blzmcp_it_equals( 1, $index_of( $result, $card ), "standaside analytics off {$name}: card testing registered independently and still second" );
 			blzmcp_it_assert( str_contains( $text, 'likely or possible card-testing findings first, then payment health findings' ), "standaside analytics off {$name}: card evidence and protection advice still reported" );
+		} else {
+			blzmcp_it_assert( ! str_contains( $text, 'card-testing' ) && ! str_contains( $text, 'card testing' ), "standaside analytics off {$name}: no card-testing text without the card step" );
 		}
 		blzmcp_it_equals( array(), $contradictions( $text . "\n" . $whys_of( $result ) ), "standaside analytics off {$name}: no contradictory stop clause" );
 	}
@@ -553,7 +658,7 @@ foreach ( $workflows as $name => $default_period ) {
 		blzmcp_it_assert( str_contains( (string) ( $card_step['why'] ?? '' ), 'A current rolling look-back, not the selected period.' ), "{$name} card step is a rolling look-back" );
 		blzmcp_it_assert( str_contains( $instructions, 'Then run the second step alone: it is the card-testing check. Whatever it returns, carry on. Then run the order totals step alone.' ), "{$name} run order: payment health alone, card testing alone, then totals alone" );
 		blzmcp_it_assert( str_contains( $instructions, "CARD TESTING CHECK\n" ) && strpos( $instructions, "CARD TESTING CHECK\n" ) < strpos( $instructions, "PAYMENT CHECK\n" ), "{$name} card-testing guidance comes before the payment guidance" );
-		foreach ( array( 'If its verdict is likely_attack or possible_attack, lead the answer with it, before any payment health finding or sales figure', 'how many failed orders were created, when, and its caveats', 'its caveat that a payment fault is still possible', 'Never call it confirmed, never say an attack is happening now and never make it stronger than returned', 'whose protection_state is not_configured or unknown', 'Never link them to card testing, or card testing to a sales movement, unless a returned result itself does', 'Unknown means not assessed, never a sign that checkout is fine', 'Never say the checkout is safe or protected', 'never build a total or a rate from its examples', 'never judge card testing by comparing failed orders with paid orders or with Analytics figures', 'enforcement is never verified, unknown does not mean unprotected', 'never for you to change', 'never described as card testing', 'mention once that the card-testing check could not run, and carry on' ) as $clause ) {
+		foreach ( array( 'If its verdict is likely_attack or possible_attack, lead the answer with it, before any payment health finding or sales figure', 'how many failed orders were created, when, and its caveats', 'its caveat that a payment fault is still possible', 'Never call it confirmed, never say an attack is happening now and never make it stronger than returned', 'whose protection_state is not_configured or unknown', 'Never link them to card testing, or card testing to a sales movement, unless a returned result itself does', 'Unknown means not assessed, never a sign that checkout is fine', 'Never say the checkout is safe or protected', 'never build a total or a rate from its examples', 'never judge card testing by comparing failed orders with paid orders or with Analytics figures', 'enforcement is never verified, unknown does not mean unprotected', 'never for you to change', 'never infer card testing from payment health\'s inventory_only methods or its orders outside verified checkout', 'When that result is a possible_attack for orders with no record of where they came from, report and lead with it like any other possible result, keeping its caveat that whether those orders came through the checkout could not be established', 'mention once that the card-testing check could not run, and carry on' ) as $clause ) {
 			blzmcp_it_assert( str_contains( $instructions, $clause ), "{$name} card-testing guidance: {$clause}" );
 		}
 		blzmcp_it_assert( str_contains( $instructions, "PAYMENT CHECK\n" ) && str_contains( $instructions, 'report its findings straight after any likely or possible card-testing result and before any sales figures' ) && ! str_contains( $instructions, 'lead the answer with its findings' ), "{$name} red or amber payment findings follow card testing, never a second lead" );
@@ -571,7 +676,7 @@ foreach ( $workflows as $name => $default_period ) {
 		$own = array(
 			'blaze-mcp-toolkit/weekly-store-review' => 'list it in the Watch List as a method to confirm, never as a payment problem, a loss or a reason for a dip',
 			'blaze-mcp-toolkit/revenue-drop-triage' => 'mention it as a method to confirm, never as a cause of the drop, a lost sale or money at risk',
-			'blaze-mcp-toolkit/failed-order-triage' => 'mention it as a method to confirm, never as a failed checkout, a declined payment or card testing',
+			'blaze-mcp-toolkit/failed-order-triage' => 'mention it as a method to confirm, never as a failed checkout or a declined payment, and never infer card testing from it',
 		);
 		blzmcp_it_assert( str_contains( $instructions, $own[ $name ] ), "{$name} its own guidance keeps inventory-only methods out of its problem narrative" );
 	} else {
@@ -807,7 +912,7 @@ remove_filter( 'user_has_cap', $deny_both, 10 );
 foreach ( $no_card as $wf => $r ) {
 	$t = is_array( $r ) ? $r['instructions'] : '';
 	blzmcp_it_assert( null === $index_of( $r, $card ) && 0 === $index_of( $r, $payment ) && 1 === $index_of( $r, 'wc-analytics/totals', 'orders' ), "card denied {$wf}: payment health first, totals second" );
-	blzmcp_it_assert( str_contains( $t, 'The card-testing check is not in this plan' ) && 1 === substr_count( $t, 'card testing was not checked' ) && str_contains( $t, 'Never judge card testing from failed and paid order counts instead' ), "card denied {$wf}: explained once, no failed > paid fallback" );
+	blzmcp_it_assert( str_contains( $t, 'The card-testing check is not in this plan' ) && 1 === substr_count( $t, 'card testing was not checked' ) && str_contains( $t, 'Never judge card testing from failed and paid order counts, or from payment health\'s inventory_only methods or orders outside verified checkout, instead.' ), "card denied {$wf}: explained once, no failed > paid or inventory fallback" );
 	blzmcp_it_assert( str_contains( $t, 'NOT AVAILABLE FOR YOUR ROLE' ) && str_contains( $t, $card ), "card denied {$wf}: listed under not available for your role" );
 	blzmcp_it_assert( str_contains( $t, 'Run the first step alone: it is the payment health check. Whatever it returns, carry on. Then run the order totals step alone.' ) && ! str_contains( $t, 'it is the card-testing check' ), "card denied {$wf}: run order names no card step" );
 	blzmcp_it_assert( str_contains( $t, 'lead the answer with its findings' ) && ! str_contains( $t, 'If its verdict is likely_attack' ), "card denied {$wf}: payment findings lead, no guidance for a card step that will not run" );
@@ -830,6 +935,41 @@ $card_out = wp_get_ability( $card )->execute( json_decode( (string) wp_json_enco
 remove_filter( 'pre_option_timezone_string', $tz_breaker );
 blzmcp_it_assert( is_wp_error( $card_out ) && 'blzmcp_ability_failed' === $card_out->get_error_code(), 'card step failing after plan generation returns the generic error' );
 blzmcp_it_assert( str_contains( (string) ( $plan['instructions'] ?? '' ), 'If the step returns an error, mention once that the card-testing check could not run, and carry on with the rest of the review.' ), 'the plan handles a card-step error once and continues' );
+
+// Wave 2 (REVIEW-pass4 item 7b): with Analytics unavailable, the stop text names only the diagnostic
+// steps that survived. Refund triage (no payment or card step) and a plan whose card step was left out
+// carry no card-testing text; the full plan keeps the card-first order.
+$an_saved = get_option( 'woocommerce_analytics_enabled', 'yes' );
+update_option( 'woocommerce_analytics_enabled', 'no' );
+\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
+$an_refund = wp_get_ability( 'blaze-mcp-toolkit/refund-triage' )->execute();
+$an_full   = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute();
+add_filter( 'user_has_cap', $deny, 10, 2 );
+$deny_target = $card;
+$an_no_card  = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute();
+$deny_target = $payment;
+$an_no_pay   = wp_get_ability( 'blaze-mcp-toolkit/failed-order-triage' )->execute();
+$deny_target = '';
+remove_filter( 'user_has_cap', $deny, 10 );
+update_option( 'woocommerce_analytics_enabled', $an_saved );
+\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
+$an_text = static fn( $r ): string => is_array( $r ) ? (string) $r['instructions'] : '';
+$t_ref   = $an_text( $an_refund );
+blzmcp_it_assert( str_starts_with( $t_ref, '[ANALYTICS_UNAVAILABLE] ' ) && str_contains( $t_ref, 'STOP THE ANALYTICS WORK' ), 'analytics off, refund: the Analytics-only stop applies' );
+blzmcp_it_assert( ! str_contains( $t_ref, 'card-testing' ) && ! str_contains( $t_ref, 'card testing' ) && ! str_contains( $t_ref, 'payment health findings first' ), 'analytics off, refund: no card-testing or payment-health text for steps it does not have' );
+blzmcp_it_assert( str_contains( $t_ref, 'Still run the steps below, if any, and report what they return; stop the review only if no step remains.' ), 'analytics off, refund: the plain report sentence' );
+$t_nc = $an_text( $an_no_card );
+blzmcp_it_assert( null === $index_of( $an_no_card, $card ) && 0 === $index_of( $an_no_card, $payment ), 'analytics off, card omitted: payment health is the only diagnostic step' );
+blzmcp_it_assert( str_contains( $t_nc, 'report what they return, payment health findings first; stop the review only if no step remains.' ) && ! str_contains( $t_nc, 'the card-testing result and its protection advice included' ) && ! str_contains( $t_nc, 'card-testing findings first' ), 'analytics off, card omitted: the stop text names payment health only, no card findings or protection advice' );
+blzmcp_it_assert( str_contains( $t_nc, 'The card-testing check is not in this plan' ) && ! str_contains( $t_nc, 'If its verdict is likely_attack' ), 'analytics off, card omitted: explained once by the skipped-card paragraph, no guidance for a step that will not run' );
+$t_np = $an_text( $an_no_pay );
+blzmcp_it_assert( 0 === $index_of( $an_no_pay, $card ) && str_contains( $t_np, '(the card-testing result and its protection advice included), likely or possible card-testing findings first; stop the review only if no step remains.' ) && ! str_contains( $t_np, 'then payment health findings' ), 'analytics off, payment omitted: the stop text names the card step only' );
+$t_full = $an_text( $an_full );
+blzmcp_it_assert( str_contains( $t_full, '(the card-testing result and its protection advice included), likely or possible card-testing findings first, then payment health findings; stop the review only if no step remains.' ), 'analytics off, full plan: card findings first, then payment health findings' );
+foreach ( array( 'refund' => $t_ref, 'card omitted' => $t_nc, 'payment omitted' => $t_np, 'full' => $t_full ) as $an_label => $an_t ) {
+	blzmcp_it_equals( array(), $contradictions( $an_t ), "analytics off, {$an_label}: no contradictory or failed > paid clause" );
+}
+blzmcp_it_equals( array(), $direction_problems( $t_full ), 'analytics off, full plan: the card and inventory directions agree' );
 
 // Payment step permission follows the user at plan time (cold and warm): never cached.
 $deny_target = $payment;
@@ -937,5 +1077,8 @@ if ( getenv( 'BLZMCP_SAMPLE' ) ) {
 		echo "-- description: " . wp_get_ability( $name )->get_description() . "\n";
 	}
 }
+
+// Paired missing-origin card / payment-inventory case under the recommended connector (wave 2).
+$paired_case( 'recommended' );
 
 blzmcp_it_finish();

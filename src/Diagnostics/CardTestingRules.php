@@ -107,6 +107,7 @@ final class CardTestingRules {
 		'other_origin_orders',
 		'unassigned_method_orders',
 		'low_history',
+		'order_signal_versions',
 	);
 
 	/** Reader reason codes the rules translate (PaymentOrders and CardTestingOrders). */
@@ -160,11 +161,11 @@ final class CardTestingRules {
 
 		$ok = true === ( $orders['ok'] ?? false ) && is_array( $orders['totals'] ?? null );
 		if ( $ok && ( ( $orders['now'] ?? null ) !== $now || ( $orders['since_hours'] ?? null ) !== $since ) ) {
-			return self::unavailable( $frame, 'reader_mismatch', $ctx );
+			return self::unavailable( $frame, 'reader_mismatch', $orders );
 		}
 		if ( ! $ok ) {
 			$reason = is_string( $orders['reason'] ?? null ) && in_array( $orders['reason'], self::READER_CODES, true ) ? $orders['reason'] : 'orders_unavailable';
-			return self::unavailable( $frame, $reason, $ctx );
+			return self::unavailable( $frame, $reason, $orders );
 		}
 
 		$signals = array(
@@ -202,14 +203,23 @@ final class CardTestingRules {
 		}
 		$ids = array_map( 'strval', array_keys( $ids ) );
 		sort( $ids, SORT_STRING );
+		$truncated = true === ( $orders['methods_truncated'] ?? false );
+		$overflow  = true === ( $orders['invalid_overflow'] ?? false );
+		if ( count( $ids ) > CardTestingOrders::MAX_METHODS ) {
+			// The reader never exceeds its one shared identity budget; a result that does is cut to
+			// the budget and treated as truncated, so method facts (and every cache dependency built
+			// from them) stay within MAX_METHODS and no exact distinct total is published.
+			$ids          = array_slice( $ids, 0, CardTestingOrders::MAX_METHODS );
+			$keep         = array_flip( $ids );
+			$scopes       = array_values( array_filter( $scopes, static fn( array $s ): bool => isset( $keep[ $s['method_id'] ] ) ) );
+			$invalid_only = array_values( array_filter( $invalid_only, static fn( array $s ): bool => isset( $keep[ $s['method_id'] ] ) ) );
+			$truncated    = true;
+		}
 		$facts = array();
 		foreach ( $ids as $id ) {
 			$facts[ $id ] = self::facts( $id, $methods[ $id ] ?? null );
 		}
-
-		$truncated = true === ( $orders['methods_truncated'] ?? false );
-		$overflow  = true === ( $orders['invalid_overflow'] ?? false );
-		$blocks    = self::log_blocks( $logs );
+		$blocks = self::log_blocks( $logs );
 
 		$evals = array();
 		foreach ( $scopes as $s ) {
@@ -303,7 +313,8 @@ final class CardTestingRules {
 			'baseline'           => $frame['baseline'],
 			'totals'             => self::totals( $orders, $facts, $scan, $stop, $truncated ),
 			'methods'            => array_values( array_map( array( self::class, 'public_facts' ), $facts ) ),
-			'methods_total'      => $truncated ? null : count( $facts ),
+			// C8: no exact distinct total once any identity was omitted (shared method budget).
+			'methods_total'      => $truncated || $overflow ? null : count( $facts ),
 			'methods_truncated'  => $truncated,
 			'assessments'        => $assessments,
 			// C8: an exact total of distinct scopes only when no identity map was capped.
@@ -704,6 +715,15 @@ final class CardTestingRules {
 		}
 		if ( $logs ) {
 			$blockers[] = 'logs_unavailable';
+		}
+		// C5 on every public negative verdict: an hour can only read no_sign when its scope could;
+		// otherwise it is unknown with the scope's first blocker as its reason. Positive hours stay.
+		foreach ( $hours as $k => $h ) {
+			$hours[ $k ]['gap'] = null;
+			if ( 'no_sign' === $h['verdict'] && array() !== $blockers ) {
+				$hours[ $k ]['verdict'] = 'unknown';
+				$hours[ $k ]['gap']     = $blockers[0];
+			}
 		}
 
 		$verdict = 'unknown';
@@ -1173,16 +1193,26 @@ final class CardTestingRules {
 	 * @return array<string,mixed>
 	 */
 	private static function burst( array $e, int $k ): array {
-		$h     = $e['hours'][ $k ];
-		$exact = $h['exact'];
-		$tz    = $e['tz'];
-		$cov   = 'not_applicable';
-		$code  = $e['reason'];
+		$h       = $e['hours'][ $k ];
+		$exact   = $h['exact'];
+		$tz      = $e['tz'];
+		$verdict = $e['assessed'] ? $h['verdict'] : 'unknown';
+		$cov     = 'not_applicable';
+		$code    = $e['reason'];
 		if ( $e['applicable'] ) {
-			$cov  = $exact && 'complete' === $h['net']['coverage'] && 'complete' === $h['attr']['coverage'] ? 'complete' : 'partial';
-			$code = 'complete' === $cov ? null : ( $exact ? ( $h['net']['reason'] ?? $h['attr']['reason'] ) : ( $e['scope']['series_complete'] ? 'baseline_incomplete' : 'bucket_cell_cap' ) );
+			// An hour's coverage includes its scope's own gaps (signals, maps, logs), not only its own
+			// network and attribution checks, so a gap never sits under a complete hour (C5/C8).
+			$cov = $exact && 'complete' === $h['net']['coverage'] && 'complete' === $h['attr']['coverage'] && 'complete' === $e['coverage'] ? 'complete' : 'partial';
 			if ( $h['share_unk'] ) {
 				$code = 'share_unknown';
+			} elseif ( ! $exact ) {
+				$code = $e['scope']['counts_complete'] ? 'bucket_cell_cap' : self::counts_reason( $e['scope'] );
+			} elseif ( 'unknown' === $verdict ) {
+				$code = $e['assessed'] ? ( $h['gap'] ?? $e['blockers'][0] ?? $e['reason'] ) : $e['reason'];
+			} elseif ( 'partial' === $cov ) {
+				$code = $h['net']['reason'] ?? $h['attr']['reason'] ?? $e['reason'] ?? $e['blockers'][0] ?? $e['signal_gaps'][0] ?? null;
+			} else {
+				$code = null;
 			}
 		}
 		$out = self::check( true, $e['applicable'], $cov, $code );
@@ -1213,7 +1243,7 @@ final class CardTestingRules {
 		$out['first_created_at']     = null === $h['first'] ? null : PaymentRules::iso( $h['first'], $tz );
 		$out['last_created_at']      = null === $h['last'] ? null : PaymentRules::iso( $h['last'], $tz );
 		$out['recent_failed_orders'] = self::count( $h['recent'], ! $exact );
-		$out['verdict']              = $e['assessed'] ? $h['verdict'] : 'unknown';
+		$out['verdict']              = $verdict;
 		return $out;
 	}
 
@@ -1271,17 +1301,17 @@ final class CardTestingRules {
 	 *
 	 * @param array<string,mixed> $frame  Window and baseline.
 	 * @param string              $reason Reason code.
-	 * @param array<string,mixed> $ctx    Context.
+	 * @param array<string,mixed> $orders Reader result (for the installed version only).
 	 * @return array<string,mixed>
 	 */
-	private static function unavailable( array $frame, string $reason, array $ctx ): array {
-		unset( $ctx );
+	private static function unavailable( array $frame, string $reason, array $orders ): array {
 		$check  = self::check( false, true, 'unavailable', $reason );
 		$totals = $check;
 		foreach ( array_merge( CardTestingOrders::CLASSES, CardTestingOrders::ORIGINS, array( 'unassigned_method', 'invalid_rows', 'test_mode_orders' ) ) as $k ) {
 			$totals[ $k ] = self::count( null, false );
 		}
-		$limits = self::base_limitations();
+		$limits   = self::base_limitations();
+		$limits[] = self::version_limitation( $orders );
 		array_unshift( $limits, self::limitation( 'store', $reason ) );
 		return array(
 			'rule_version'       => self::RULE_VERSION,
@@ -1448,6 +1478,45 @@ final class CardTestingRules {
 	}
 
 	/**
+	 * Installed WooCommerce version and source-pin provenance (ruling Q3), present on every result:
+	 * the safe installed version text (or that it could not be read) and the supported range and
+	 * source pins of the saved network and marketing source reads. Never raw constant text.
+	 *
+	 * @param array<string,mixed> $orders Reader result.
+	 * @return array{scope:string,code:string,what:string,check_next:?string}
+	 */
+	private static function version_limitation( array $orders ): array {
+		return self::limitation( 'store', 'order_signal_versions', self::reason_text( 'order_signal_versions' ) . ' ' . self::installed_version_text( CardTestingOrders::display_version( $orders['wc_version'] ?? null ) ) );
+	}
+
+	/**
+	 * One fixed sentence naming the installed WooCommerce version and how the order signals treat
+	 * it. Worded as lane protection's CheckoutProtection::installed_version_text() (same strings
+	 * where the meaning is the same). The version is display text, never raw constant text.
+	 *
+	 * @param string|null $version CardTestingOrders::display_version() text.
+	 */
+	public static function installed_version_text( ?string $version ): string {
+		if ( null === $version ) {
+			return __( 'The installed WooCommerce version could not be read, so it is treated as outside the supported range.', 'blaze-mcp-toolkit-for-woocommerce' );
+		}
+		if ( CardTestingOrders::version_supported( $version ) ) {
+			if ( in_array( $version, CardTestingOrders::SOURCE_PINS, true ) ) {
+				/* translators: %s: installed WooCommerce version, for example 11.3.1. */
+				return sprintf( __( 'WooCommerce %s is installed, one of the versions whose source was checked.', 'blaze-mcp-toolkit-for-woocommerce' ), $version );
+			}
+			/* translators: %s: installed WooCommerce version, for example 11.3.2. */
+			return sprintf( __( 'WooCommerce %s is installed. It is inside the supported range but its source was not checked separately.', 'blaze-mcp-toolkit-for-woocommerce' ), $version );
+		}
+		if ( false !== strpos( $version, '-' ) ) {
+			/* translators: %s: installed WooCommerce version, for example 11.4.0-beta.1. */
+			return sprintf( __( 'WooCommerce %s is installed. Test and pre-release versions are outside the supported range.', 'blaze-mcp-toolkit-for-woocommerce' ), $version );
+		}
+		/* translators: %s: installed WooCommerce version, for example 11.4.0. */
+		return sprintf( __( 'WooCommerce %s is installed, which is outside the supported range.', 'blaze-mcp-toolkit-for-woocommerce' ), $version );
+	}
+
+	/**
 	 * Mandatory limitations present on every result.
 	 *
 	 * @return array<int,array<string,mixed>>
@@ -1476,7 +1545,8 @@ final class CardTestingRules {
 	 * @return array<int,array<string,mixed>>
 	 */
 	private static function limitations( array $orders, array $evals, array $facts, array $signals, array $blocks, ?string $global_reason, ?string $stop, bool $truncated, bool $overflow ): array {
-		$out = self::base_limitations();
+		$out   = self::base_limitations();
+		$out[] = self::version_limitation( $orders );
 		$add = static function ( string $scope, string $code, ?string $what = null ) use ( &$out ): void {
 			foreach ( $out as $l ) {
 				if ( $l['scope'] === $scope && $l['code'] === $code ) {
@@ -1682,7 +1752,23 @@ final class CardTestingRules {
 				$text .= ' ' . __( 'These orders have no record of where they came from, so whether they came through the checkout could not be established.', 'blaze-mcp-toolkit-for-woocommerce' );
 			}
 			if ( false === $h['net']['signal'] ) {
-				$text .= ' ' . __( 'The failed orders were not concentrated in a few recorded networks.', 'blaze-mcp-toolkit-for-woocommerce' );
+				$valid = (int) $h['net']['valid'];
+				if ( $valid < self::MIN_NETWORK_ORDERS || ! self::share_at_least( $valid, $h['failed'], self::MIN_IP_COMPLETENESS ) ) {
+					// Insufficient network evidence (too few orders with a usable saved network), not dispersion.
+					$text .= ' ' . sprintf(
+						/* translators: 1: failed orders with a usable saved network, 2: failed orders in the hour. */
+						__( 'Only %1$s of these %2$s failed orders had a usable saved network, too few to judge whether they came from a few recorded networks.', 'blaze-mcp-toolkit-for-woocommerce' ),
+						self::num( $valid ),
+						self::num( $h['failed'] )
+					);
+				} else {
+					$text .= ' ' . sprintf(
+						/* translators: 1: failed orders in the 3 largest recorded networks, 2: failed orders with a saved network. */
+						__( 'The 3 largest recorded networks held %1$s of the %2$s failed orders with a saved network, so these orders were not concentrated in a few recorded networks.', 'blaze-mcp-toolkit-for-woocommerce' ),
+						self::num( (int) $h['net']['top'] ),
+						self::num( $valid )
+					);
+				}
 			} elseif ( null === $h['net']['signal'] ) {
 				$text .= ' ' . __( 'Recorded networks could not be compared for these orders.', 'blaze-mcp-toolkit-for-woocommerce' );
 			}
@@ -1791,7 +1877,7 @@ final class CardTestingRules {
 			case 'draft_paid_anomaly':
 				return __( 'Some unfinished checkout orders carry a payment date, which is unexpected, so counts for their payment method are incomplete.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'unsupported_source_version':
-				return __( 'This WooCommerce version has not been verified for reading saved network and marketing source details, so those signs were not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
+				return __( 'This WooCommerce version is outside the range this check supports for saved network and marketing source details (stable releases from 10.9.0 up to, not including, 11.4.0), so those signs were not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'ip_storage_unavailable':
 				return __( 'The store does not keep the network details of orders where this check can read them, so network concentration was not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'attribution_storage_unavailable':
@@ -1846,6 +1932,8 @@ final class CardTestingRules {
 				return __( 'Some orders have no payment method recorded. They are counted but not assessed.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'low_history':
 				return __( 'At least one payment method has too little earlier order history to compare with, so only bursts of 100 or more failed orders in one hour can be detected for it.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'order_signal_versions':
+				return __( 'The saved network and marketing source reads come from WooCommerce 10.9.0 and 11.3.1 source code. They are used for stable WooCommerce releases from 10.9.0 up to, not including, 11.4.0; other releases in that range, including later 11.3 patches, are covered by that compatibility policy, not by a separate source check.', 'blaze-mcp-toolkit-for-woocommerce' );
 		}
 		return __( 'This check could not be completed.', 'blaze-mcp-toolkit-for-woocommerce' );
 	}

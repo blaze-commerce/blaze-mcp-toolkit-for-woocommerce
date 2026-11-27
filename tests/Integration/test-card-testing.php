@@ -51,7 +51,6 @@ $clear_cache = static function () use ( $wpdb ): void {
 };
 blzmcp_it_cleanup( $clear_cache );
 $clear_cache();
-$audit_start = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COALESCE(MAX(id), 0) FROM %i', $wpdb->prefix . 'blzmcp_audit' ) );
 
 // Spies: HTTP, mail, card-related work (order, page and log reads) and exception log lines.
 $http_calls = 0;
@@ -313,9 +312,11 @@ blzmcp_it_assert( CardTesting::validate_raw_input( $earlier, array( 'since_hours
 $ph_ability = wp_get_ability( 'blaze-mcp-toolkit/payment-health' );
 blzmcp_it_equals( true, null === $ph_ability ? null : $ph_ability->validate_input( array( 'since_hours' => '24' ) ), 'payment health validation is unchanged (core still accepts its numeric string)' );
 $clear_cache();
-$omitted = $ability->execute();
-$empty   = $ability->execute( array() );
-$explicit = $ability->execute( array( 'since_hours' => 48 ) );
+$audit_in_0 = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COALESCE(MAX(id), 0) FROM %i', $wpdb->prefix . 'blzmcp_audit' ) );
+$omitted    = $ability->execute();
+$empty      = $ability->execute( array() );
+$explicit   = $ability->execute( array( 'since_hours' => 48 ) );
+$audit_in_1 = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COALESCE(MAX(id), 0) FROM %i', $wpdb->prefix . 'blzmcp_audit' ) );
 blzmcp_it_assert( is_array( $omitted ) && 48 === $omitted['since_hours'], 'omitted input runs the 48-hour window' );
 blzmcp_it_equals( wp_json_encode( $omitted ), wp_json_encode( $empty ), 'empty input is the same cached result, byte for byte' );
 blzmcp_it_equals( wp_json_encode( $omitted ), wp_json_encode( $explicit ), 'since_hours 48 is the same cached result as omitted input, byte for byte' );
@@ -394,6 +395,67 @@ $no_work( static fn() => $ability->execute(), 'throwing permission check through
 $no_work( static fn() => CardTesting::execute(), 'throwing permission check on a direct call' );
 remove_filter( 'user_has_cap', $thrower, 1 );
 wp_set_current_user( $admin );
+
+// ---------------------------------------------------------------- object and array input keep their types (C1, wave 2).
+// A plain object is read with its own property types (no JSON round trip, which turns 48.0 into 48);
+// any other object form is rejected. Each malformed input, as an array and as an object, is rejected
+// on a direct call and by the raw-validation hook, and does no order, page, log or configuration read.
+$invalid_read_free = static function ( callable $call, string $code, string $label ) use ( &$work_sql, &$token_calls, &$page_reads, $work_spy, $ct_transients ): void {
+	$work_sql    = array();
+	$token_calls = 0;
+	$page_reads  = 0;
+	$before      = $ct_transients();
+	add_filter( 'query', $work_spy );
+	$result = $call();
+	remove_filter( 'query', $work_spy );
+	blzmcp_it_assert( is_wp_error( $result ) && $code === $result->get_error_code(), "{$label}: rejected with {$code}" . ( is_wp_error( $result ) ? '' : ' (got data)' ) );
+	blzmcp_it_equals( array( array(), 0, 0 ), array( $work_sql, $token_calls, $page_reads ), "{$label}: no order, page, log or configuration read" );
+	blzmcp_it_equals( $before, $ct_transients(), "{$label}: no cache entry written" );
+};
+$typed_bad = array(
+	'integral float' => array( 'since_hours' => 48.0 ),
+	'numeric string' => array( 'since_hours' => '48' ),
+	'boolean'        => array( 'since_hours' => true ),
+	'null'           => array( 'since_hours' => null ),
+	'extra key'      => array(
+		'since_hours' => 48,
+		'foo'         => 1,
+	),
+	'only an extra key' => array( 'foo' => 1 ),
+);
+foreach ( $typed_bad as $kind => $as_array ) {
+	foreach ( array( 'array' => $as_array, 'object' => (object) $as_array ) as $form => $bad ) {
+		$label = "{$kind} as {$form} " . wp_json_encode( $bad );
+		$invalid_read_free( static fn() => CardTesting::execute( $bad ), 'blzmcp_invalid_input', "direct execute(), {$label}" );
+		$invalid_read_free( static fn() => CardTesting::validate_raw_input( true, $bad, CardTesting::NAME ), 'ability_invalid_input', "raw-validation hook, {$label}" );
+		if ( $core_filter ) {
+			$invalid_read_free( static fn() => $ability->validate_input( $bad ), 'ability_invalid_input', "core validate_input() with the hook applied, {$label}" );
+		}
+		blzmcp_it_assert( is_wp_error( $ability->execute( $bad ) ), "through the Abilities API, {$label}: rejected" );
+	}
+}
+blzmcp_it_equals( 'double', gettype( get_object_vars( (object) array( 'since_hours' => 48.0 ) )['since_hours'] ), 'a plain object keeps 48.0 as a float (the type the check sees)' );
+// Other object forms are not C1 input, even when they hold a valid value.
+$json_obj = new class() implements JsonSerializable {
+	/**
+	 * Serialises to valid-looking input.
+	 */
+	public function jsonSerialize(): array {
+		return array( 'since_hours' => 48 );
+	}
+};
+foreach ( array( 'ArrayObject' => new ArrayObject( array( 'since_hours' => 48 ) ), 'JsonSerializable' => $json_obj ) as $form => $bad ) {
+	$invalid_read_free( static fn() => CardTesting::execute( $bad ), 'blzmcp_invalid_input', "direct execute(), {$form} holding since_hours 48" );
+	$invalid_read_free( static fn() => CardTesting::validate_raw_input( true, $bad, CardTesting::NAME ), 'ability_invalid_input', "raw-validation hook, {$form} holding since_hours 48" );
+}
+// Valid object forms stay valid: a plain object with an integer, and an empty plain object (48).
+$clear_cache();
+$obj_ok = CardTesting::execute( (object) array( 'since_hours' => 24 ) );
+blzmcp_it_assert( is_array( $obj_ok ) && 24 === $obj_ok['since_hours'], 'a plain object with an integer since_hours is accepted on a direct call (and keeps its 24)' );
+blzmcp_it_equals( true, CardTesting::validate_raw_input( true, (object) array( 'since_hours' => 24 ), CardTesting::NAME ), 'the raw-validation hook accepts a plain object with an integer since_hours' );
+$obj_empty = CardTesting::execute( new stdClass() );
+blzmcp_it_assert( is_array( $obj_empty ) && 48 === $obj_empty['since_hours'], 'an empty plain object means the 48-hour default' );
+$clear_cache();
 
 // ---------------------------------------------------------------- fixtures (synthetic, documentation IP ranges).
 $ct_tag = blzmcp_ct_tag();
@@ -565,16 +627,28 @@ $snapshot = static function () use ( $wpdb ): array {
 };
 
 // ---------------------------------------------------------------- admin: cold, then warm (C2, C5, C8).
-$clear_cache();
-$http_calls = 0;
-$mail_calls = 0;
-$audit_0    = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $audit_table ) );
-$before     = $snapshot();
-$t0         = microtime( true );
-$cold       = $ability->execute( array( 'since_hours' => 48 ) );
-$cold_ms    = (int) round( ( microtime( true ) - $t0 ) * 1000 );
-$warm       = $ability->execute();
-$after      = $snapshot();
+// Other lanes may write orders (posts, in legacy storage) or audit rows in the shared store while this
+// runs. The ability never writes either, so a store-wide difference that does not reproduce is another
+// process: the cold/warm pair is retried (up to 3 times) and the last attempt is the one asserted. A
+// real write by the ability reproduces on every attempt and still fails.
+$rw_attempts = 0;
+do {
+	++$rw_attempts;
+	$clear_cache();
+	$http_calls = 0;
+	$mail_calls = 0;
+	$audit_0    = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $audit_table ) );
+	$before     = $snapshot();
+	$t0         = microtime( true );
+	$cold       = $ability->execute( array( 'since_hours' => 48 ) );
+	$cold_ms    = (int) round( ( microtime( true ) - $t0 ) * 1000 );
+	$warm       = $ability->execute();
+	$after      = $snapshot();
+	$audit_1    = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $audit_table ) );
+} while ( $rw_attempts < 3 && ( $before !== $after || $audit_0 + 2 !== $audit_1 ) );
+if ( $rw_attempts > 1 ) {
+	echo "NOTE  read-only snapshot taken {$rw_attempts} times: another process changed the shared store during an earlier attempt\n";
+}
 echo "TIMING  cold card-testing call {$cold_ms} ms (" . count( blzmcp_ct_ids() ) . " fixture orders)\n";
 $v = $valid( $cold );
 blzmcp_it_assert( true === $v, 'admin response validates against the declared schema' . ( is_wp_error( $v ) ? ': ' . $v->get_error_message() : '' ) );
@@ -589,7 +663,7 @@ if ( '1' === getenv( 'BLZMCP_CT_SAMPLE' ) ) {
 blzmcp_it_equals( wp_json_encode( $cold ), wp_json_encode( $warm ), 'warm call: identical bytes, checked_at kept (C2)' );
 blzmcp_it_equals( array( 0, 0 ), array( $http_calls, $mail_calls ), 'cold and warm calls: no HTTP, loopback or mail' );
 blzmcp_it_equals( $before, $after, 'cold and warm calls: no option, order, schema, schedule, log or post change (transients excepted)' );
-blzmcp_it_equals( $audit_0 + 2, (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $audit_table ) ), 'one audit row per call, nothing else' );
+blzmcp_it_equals( $audit_0 + 2, $audit_1, 'one audit row per call, nothing else' );
 blzmcp_it_equals( array( 1, 1, 48 ), array( $cold['schema_version'], $cold['rule_version'], $cold['since_hours'] ), 'schema 1, rule 1, 48 hours' );
 blzmcp_it_equals( wp_timezone()->getName(), $cold['timezone'], 'store timezone' );
 $checked = strtotime( $cold['checked_at'] );
@@ -676,16 +750,30 @@ foreach ( $prose( $cold ) as $text ) {
 blzmcp_it_equals( array(), array_values( array_unique( $jargon ) ), 'owner prose: no storage jargon, status slug, table or tool name, em dash or safety claim' );
 
 // Identical inputs give identical bytes (apart from checked_at, which is the same second here).
-$same = null;
-for ( $try = 0; $try < 5 && null === $same; $try++ ) {
+// The order-ID fingerprint brackets each pair: a pair during which another process wrote orders is
+// not a comparison of identical inputs, so it is retried; a same-second pair over an unchanged store
+// must match byte for byte.
+$order_print = static fn(): string => md5( (string) wp_json_encode( blzmcp_it_order_store_ids() ) );
+$same        = null;
+$skipped     = 0;
+for ( $try = 0; $try < 8 && null === $same; $try++ ) {
+	$print = $order_print();
 	$clear_cache();
 	$x = $ability->execute();
 	$clear_cache();
 	$y = $ability->execute();
+	if ( $order_print() !== $print ) {
+		++$skipped;
+		continue;
+	}
 	if ( is_array( $x ) && is_array( $y ) && $x['checked_at'] === $y['checked_at'] ) {
 		$same = array( $x, $y );
 	}
 }
+if ( $skipped > 0 ) {
+	echo "NOTE  identical-bytes check: {$skipped} pair(s) skipped because another process wrote orders meanwhile\n";
+}
+blzmcp_it_assert( null !== $same, 'a same-second pair of cold calls over an unchanged store was obtained' );
 blzmcp_it_assert( null !== $same && wp_json_encode( $same[0] ) === wp_json_encode( $same[1] ), 'two cold calls in the same second give identical bytes' );
 
 // ---------------------------------------------------------------- roles, diagnostics and warm downgrade (C2).
@@ -776,7 +864,9 @@ $no_canary( implode( "\n", $cached_values ), 'every cache entry' );
 // Every audit column except the existing input-parameter hash (a hash of since_hours only).
 $audit_rows = (string) wp_json_encode( $wpdb->get_results( $wpdb->prepare( 'SELECT created_at, user_id, ability, row_count, duration_ms, status FROM %i WHERE ability = %s', $audit_table, CardTesting::NAME ), ARRAY_A ) );
 $no_canary( $audit_rows, 'audit rows' );
-blzmcp_it_equals( array( \Blaze\McpToolkit\Audit\AuditLog::hash_params( array( 'since_hours' => 48 ) ) ), array_values( array_unique( $wpdb->get_col( $wpdb->prepare( 'SELECT params_hash FROM %i WHERE id > %d AND ability = %s AND status = %s AND user_id = %d', $audit_table, $audit_start, CardTesting::NAME, 'ok', $admin ) ) ) ), 'audit params hash covers the canonical input only (omitted, empty and 48 are one input)' );
+// The three calls made with omitted, empty and explicit 48 input (rows between the two marks taken
+// around them, so other lanes' calls in the shared store cannot enter the comparison).
+blzmcp_it_equals( array( \Blaze\McpToolkit\Audit\AuditLog::hash_params( array( 'since_hours' => 48 ) ) ), array_values( array_unique( $wpdb->get_col( $wpdb->prepare( 'SELECT params_hash FROM %i WHERE id > %d AND id <= %d AND ability = %s AND status = %s AND user_id = %d', $audit_table, $audit_in_0, $audit_in_1, CardTesting::NAME, 'ok', $admin ) ) ) ), 'audit params hash covers the canonical input only (omitted, empty and 48 are one input)' );
 blzmcp_it_assert( ! str_contains( $audit_rows, $m_r ) && ! str_contains( $audit_rows, 'likely' ), 'audit rows carry metadata only, no method or signal values' );
 // A failure inside the cache context: generic error, never cached, logged as class and location only.
 $logged      = array();
@@ -949,10 +1039,12 @@ foreach ( $attr_states as $state => [ $value, $filter ] ) {
 	}
 }
 update_option( CheckoutProtection::ATTRIBUTION_OPTION, 'yes' );
-// Version gates (orchestrator ruling Q3 pending): the reader trusts 10.9.0 <= WC < 11.4.0, the
-// protection facts exactly 10.9.0..11.3.1. Recorded so a ruling that aligns them shows here.
-foreach ( array( '10.8.9' => array( false, false ), '10.9.0' => array( true, true ), '11.3.1' => array( true, true ), '11.3.2' => array( true, false ), '11.4.0' => array( false, false ) ) as $ver => $want ) {
-	blzmcp_it_equals( $want, array( CardTestingOrders::version_supported( $ver ), CheckoutProtection::version_support( $ver )['verified'] ), "WooCommerce {$ver}: reader signals " . ( $want[0] ? 'read' : 'unsupported' ) . ', protection facts ' . ( $want[1] ? 'verified' : 'unverified' ) );
+// Version gates (ruling Q3, wave 2): one stable-release range, 10.9.0 <= WC < 11.4.0, for both the
+// order signals and the protection facts; prerelease and malformed versions are unsupported by both,
+// never stripped to a matching release. The two gates must agree for every version.
+foreach ( array( '10.8.9' => false, '10.9.0' => true, '11.3.1' => true, '11.3.2' => true, '11.3.99' => true, '11.4.0' => false, '11.3.1-rc.1' => false, '11.3.2-beta.1' => false, '11.3' => false, '011.3.1' => false, '11.3.1.1' => false, 'trunk' => false ) as $ver => $want ) {
+	$v_prot = CheckoutProtection::version_support( $ver );
+	blzmcp_it_equals( array( $want, $want ), array( CardTestingOrders::version_supported( $ver ), $v_prot['supported'] ?? null ), "WooCommerce {$ver}: order signals and protection facts both " . ( $want ? 'supported' : 'unsupported' ) );
 }
 
 // ---------------------------------------------------------------- bounds: partial evidence, display caps (C4, C8).
@@ -1046,7 +1138,8 @@ blzmcp_ct_order( array( 'method' => $last, 'via' => 'checkout', 'status' => 'com
 $at21 = $ability->execute();
 blzmcp_it_assert( true === $valid( $at21 ), 'assessments one past the cap: validates' );
 blzmcp_it_equals( array( 20, 21, true, true ), array( count( $at21['assessments'] ?? array() ), $at21['assessments_total'] ?? null, $at21['assessments_truncated'] ?? null, in_array( 'display|assessments_display_cap', $limits( $at21 ), true ) ), 'assessments one past the cap: 20 shown, total 21, truncated and disclosed' );
-blzmcp_it_assert( null === $assess( $at21, $last ) && is_array( $method_row( $at21, $last ) ), 'the omitted assessment\'s method facts are still listed (cache revalidation covers it)' );
+blzmcp_it_assert( null === $assess( $at21, $last ), 'the last-sorted method\'s assessment is the one the display cap omits' . ( null === $assess( $at21, $last ) ? '' : ' (displayed: ' . implode( ', ', array_map( static fn( $a ) => (string) $a['method_id'] . '/' . $a['verdict'] . '/' . ( $a['applicable'] ? 'applicable' : 'n-a' ), (array) ( $at21['assessments'] ?? array() ) ) ) . ')' ) );
+blzmcp_it_assert( is_array( $method_row( $at21, $last ) ), 'the omitted assessment\'s method facts are still listed (cache revalidation covers it)' . ( is_array( $method_row( $at21, $last ) ) ? '' : ' (methods: ' . implode( ', ', array_column( (array) ( $at21['methods'] ?? array() ), 'id' ) ) . '; methods_truncated ' . wp_json_encode( $at21['methods_truncated'] ?? null ) . ')' ) );
 blzmcp_it_equals( 'likely_attack', $at21['verdict'] ?? null, 'the display cap never lowers the verdict' );
 $last_manual = static fn( $k, $id ) => $last === $id ? 'manual' : $k;
 add_filter( 'blaze_mcp_toolkit_payment_method_kind', $last_manual, 30, 2 );

@@ -38,11 +38,31 @@ $hpos = 'hpos' === $auth['authority'];
 $tz   = wp_timezone();
 $now  = time();
 
-$strip_work = static function ( array $r ): array {
-	unset( $r['work'] );
-	return $r;
-};
 $fingerprint = static fn(): string => md5( implode( ',', blzmcp_ct_all_order_ids() ) );
+// This process's own view of a card read: everything the reader says about the fixture methods
+// (scopes, invalid-only rows, identities), with each bucket's network map reduced to its sorted
+// counts. Other suites may write orders to the same store at the same time, so determinism, path
+// and shadow comparisons use this view; store-wide totals are compared separately, bracketed by an
+// order-ID fingerprint.
+$fixture_view = static function ( array $r, array $methods ): string {
+	$keep   = array_flip( $methods );
+	$scopes = array();
+	foreach ( (array) $r['scopes'] as $s ) {
+		if ( isset( $keep[ $s['method_id'] ] ) ) {
+			$nets = array();
+			foreach ( $s['networks'] as $b => $map ) {
+				$vals = array_values( $map );
+				sort( $vals );
+				$nets[ $b ] = $vals;
+			}
+			$s['networks'] = $nets;
+			$scopes[]      = $s;
+		}
+	}
+	$invalid = array_values( array_filter( (array) $r['invalid_only'], static fn( array $x ): bool => isset( $keep[ $x['method_id'] ] ) ) );
+	$ids     = array_values( array_intersect( (array) $r['method_ids'], $methods ) );
+	return serialize( array( $r['ok'], $r['authority'], $r['reason'], $r['signals'], $scopes, $invalid, $ids ) );
+};
 
 // ---------------------------------------------------------------- source support here.
 blzmcp_it_assert( defined( 'WC_VERSION' ) && CardTestingOrders::version_supported( WC_VERSION ), 'this WooCommerce version is inside the source-verified range (' . ( defined( 'WC_VERSION' ) ? WC_VERSION : 'none' ) . ')' );
@@ -173,6 +193,15 @@ $wallet = $by_key[ $meth['wallet'] . '|verified_checkout' ] ?? array();
 blzmcp_it_equals( array( 1, 1 ), array( $wallet['invalid_rows'] ?? null, $wallet['anomalies'] ?? null ), 'wallet: a future paid date is invalid; paid evidence on a draft is an anomaly' );
 blzmcp_it_assert( $r['draft_anomalies'] >= 1 && 'partial' === $r['coverage'], 'draft anomaly and invalid rows make the read partial, never complete' );
 blzmcp_it_assert( isset( $by_key[ $meth['card'] . '|missing_origin' ] ), 'missing origin is its own scope' );
+// Wave 2 (REVIEW-pass4 item 2): one shared identity budget for valid and invalid-only methods.
+blzmcp_it_assert( in_array( $meth['ghost'], $r['method_ids'], true ) && in_array( $meth['ghost'], array_column( $r['invalid_only'], 'method_id' ), true ), 'an invalid-only method is an identity and an invalid-only row' );
+blzmcp_it_assert( ! isset( $by_key[ $meth['ghost'] . '|verified_checkout' ] ), 'an invalid-only method never forms a scope (positive evidence only)' );
+blzmcp_it_equals( count( $r['method_ids'] ), $r['usage']['methods'], 'the identity budget counts every admitted identity, valid and invalid-only' );
+// Ruling Q3: the installed version as safe text and whether it is a supported stable release.
+blzmcp_it_equals( array( WC_VERSION, CardTestingOrders::version_supported( WC_VERSION ) ), array( $r['wc_version'], $r['wc_supported'] ), 'reader carries the installed WooCommerce version and its support' );
+$rule_out = CardTestingRules::evaluate( $r, array(), array(), $now, 48, $tz );
+$version  = array_values( array_filter( $rule_out['limitations'], static fn( array $l ): bool => 'order_signal_versions' === $l['code'] ) );
+blzmcp_it_assert( 1 === count( $version ) && $version[0]['what'] === CardTestingRules::reason_text( 'order_signal_versions' ) . ' ' . CardTestingRules::installed_version_text( WC_VERSION ) && str_contains( $version[0]['what'], 'WooCommerce ' . WC_VERSION . ' is installed' ), 'the source pins, range and installed version are disclosed in the limitations' );
 blzmcp_it_assert( ! isset( $by_key['|verified_checkout'] ) && ! isset( $by_key['|missing_origin'] ), 'an empty method ID never forms a scope' );
 blzmcp_it_assert( isset( $by_key[ $meth['malformed'] . '|verified_checkout' ] ) && str_starts_with( $meth['malformed'], 'unrecognised-' ), 'a malformed method ID becomes one opaque reference' );
 blzmcp_it_assert( isset( $by_key[ $meth['numeric'] . '|verified_checkout' ] ) && in_array( $meth['numeric'], $r['method_ids'], true ), 'a numeric method ID stays a string' );
@@ -234,7 +263,7 @@ foreach ( array( 'ip_address', '_customer_ip_address', '_wc_order_attribution', 
 }
 
 // ---------------------------------------------------------------- conflicting shadow rows.
-$base = serialize( $strip_work( PaymentOrders::read_card_testing( $now, 48, $tz ) ) );
+$base = $fixture_view( PaymentOrders::read_card_testing( $now, 48, $tz ), $fixture_methods );
 $sid  = $ids['shape_0'];
 if ( $hpos ) {
 	if ( $wpdb->get_var( $wpdb->prepare( 'SELECT ID FROM %i WHERE ID = %d AND post_type = %s', $wpdb->posts, $sid, 'shop_order' ) ) ) {
@@ -250,11 +279,11 @@ if ( $hpos ) {
 	echo "NOTE  conflicting HPOS shadow written for {$sid} (if present)\n";
 }
 wp_cache_flush();
-blzmcp_it_assert( serialize( $strip_work( PaymentOrders::read_card_testing( $now, 48, $tz ) ) ) === $base, 'conflicting rows in the non-authoritative store change nothing' );
+blzmcp_it_assert( $fixture_view( PaymentOrders::read_card_testing( $now, 48, $tz ), $fixture_methods ) === $base, 'conflicting rows in the non-authoritative store change nothing' );
 blzmcp_it_assert( ! in_array( 'shadow_method', PaymentOrders::read_card_testing( $now, 48, $tz )['method_ids'], true ), 'no shadow-store method' );
 
 // ---------------------------------------------------------------- determinism, chunks and both legacy paths.
-blzmcp_it_assert( serialize( $strip_work( PaymentOrders::read_card_testing( $now, 48, $tz ) ) ) === $base, 'identical inputs give identical output (network sequence numbers follow the scan order, not the per-call key)' );
+blzmcp_it_assert( $fixture_view( PaymentOrders::read_card_testing( $now, 48, $tz ), $fixture_methods ) === $base, 'identical inputs give identical output for this process\'s orders' );
 $limits = new ReflectionProperty( PaymentOrders::class, 'limits_override' );
 $limits->setAccessible( true );
 $with = static function ( ?array $l, int $hours = 48, ?int $at = null ) use ( $limits, $now, $tz ): array {
@@ -266,7 +295,7 @@ $with = static function ( ?array $l, int $hours = 48, ?int $at = null ) use ( $l
 		$limits->setValue( null, null );
 	}
 };
-blzmcp_it_assert( serialize( $strip_work( $with( array( 'chunk' => 2 ) ) ) ) === $base, 'chunks of 2 with sentinel rows: identical output (keyset is exact)' );
+blzmcp_it_assert( $fixture_view( $with( array( 'chunk' => 2 ) ), $fixture_methods ) === $base, 'chunks of 2 with sentinel rows: identical output (keyset is exact)' );
 if ( ! $hpos ) {
 	$paths = new ReflectionProperty( PaymentOrders::class, 'legacy_paths' );
 	$force = new ReflectionProperty( PaymentOrders::class, 'legacy_path_override' );
@@ -289,7 +318,7 @@ if ( ! $hpos ) {
 		}
 		$ran = $paths->getValue();
 		blzmcp_it_assert( $ran[ $path ] >= 1 && 0 === $ran[ 'span' === $path ? 'fallback' : 'span' ], "legacy {$path} metadata path ran alone" );
-		blzmcp_it_assert( serialize( $strip_work( $forced ) ) === $base, "legacy {$path} metadata path: identical output (first row per key, duplicate IP and method rows)" );
+		blzmcp_it_assert( $fixture_view( $forced, $fixture_methods ) === $base, "legacy {$path} metadata path: identical output (first row per key, duplicate IP and method rows)" );
 	}
 }
 
@@ -313,6 +342,29 @@ foreach ( array( 'methods' => 'methods_truncated', 'networks' => 'network_ids', 
 	$get  = static fn( array $x ): bool => 'methods_truncated' === $flag ? $x['methods_truncated'] : $x['caps'][ $flag ];
 	blzmcp_it_equals( array( false, true ), array( $get( $at ), $get( $past ) ), "{$bound} bound: not capped at the exact usage, capped one under" );
 	blzmcp_it_equals( 'partial', $past['coverage'], "{$bound} bound one under: partial" );
+	if ( 'methods' === $bound ) {
+		blzmcp_it_assert( count( $past['method_ids'] ) <= $usage['methods'] - 1 && $past['usage']['methods'] <= $usage['methods'] - 1, 'methods bound one under: identities (valid and invalid-only) stay within the bound' );
+		$capped_out = CardTestingRules::evaluate( $past, array(), array(), $now, 48, $tz );
+		blzmcp_it_equals( array( null, null, true ), array( $capped_out['methods_total'], $capped_out['assessments_total'], $capped_out['methods_truncated'] ), 'methods bound one under: no exact method or assessment total' );
+		blzmcp_it_assert( count( $capped_out['methods'] ) <= $usage['methods'] - 1, 'methods bound one under: public method facts within the bound' );
+		// Whichever identity is omitted (valid or invalid-only), a tracked scope sees every one of its
+		// rows, so it keeps the same counts and completeness as the unbounded read.
+		$scope_of = static function ( array $x ) use ( $fixture_methods ): array {
+			$out = array();
+			foreach ( $x['scopes'] as $s ) {
+				if ( in_array( $s['method_id'], $fixture_methods, true ) ) {
+					$out[ $s['method_id'] . '|' . $s['origin_scope'] ] = array( $s['counts'], $s['invalid_rows'], $s['counts_complete'] );
+				}
+			}
+			return $out;
+		};
+		$full_scopes = $scope_of( $full );
+		$kept_same   = true;
+		foreach ( $scope_of( $past ) as $key => $view ) {
+			$kept_same = $kept_same && isset( $full_scopes[ $key ] ) && $full_scopes[ $key ] === $view;
+		}
+		blzmcp_it_assert( $kept_same, 'methods bound one under: every tracked scope keeps its exact counts and completeness (an omitted identity never makes it partial)' );
+	}
 	blzmcp_it_equals( $full['totals'], $past['totals'], "{$bound} bound one under: safe store-wide totals still exact" );
 }
 blzmcp_it_assert( null === $with( array( 'networks' => $usage['networks'] - 1 ) )['networks_seen'], 'network identity cap: no exact distinct-network count' );

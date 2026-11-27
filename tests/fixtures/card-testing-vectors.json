@@ -67,7 +67,7 @@
         { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "distinct:9", "attr": "absent" },
         { "status": "processing", "paid": true, "count": 5, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" }
       ],
-      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ], "findings_include": [ "possible_card_testing" ] }
+      "expect": { "verdict": "possible_attack", "never": [ "likely_attack" ], "findings_include": [ "possible_card_testing" ], "summary_includes": "The 3 largest recorded networks held 3 of the 120 failed orders with a saved network, so these orders were not concentrated in a few recorded networks.", "summary_excludes": "too few to judge" }
     },
     {
       "name": "stable_low_volume_declines",
@@ -202,21 +202,21 @@
       "about": "A quiet store with some failed orders whose network details cannot be read: no all-clear.",
       "signals": { "ip": "ip_storage_unavailable", "attribution": true },
       "use": [ "healthy_baseline", "healthy_current" ],
-      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "ip_storage_unavailable" ] }
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "ip_storage_unavailable" ], "assessments": [ { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "coverage": "partial", "reason_code": "ip_storage_unavailable", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "ip_storage_unavailable" } }, { "method_id": null, "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "ip_storage_unavailable", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "ip_storage_unavailable" } } ] }
     },
     {
       "name": "attribution_disabled_quiet",
       "about": "A quiet store with Order Attribution switched off: no all-clear, and missing sources are not suspicious.",
       "signals": { "ip": true, "attribution": "attribution_feature_disabled" },
       "use": [ "healthy_baseline", "healthy_current" ],
-      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "attribution_feature_disabled" ] }
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "attribution_feature_disabled" ], "assessments": [ { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "coverage": "partial", "reason_code": "attribution_feature_disabled", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "attribution_feature_disabled" } }, { "method_id": null, "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "attribution_feature_disabled", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "attribution_feature_disabled" } } ] }
     },
     {
       "name": "logs_denied_quiet",
       "about": "A quiet store checked by a role without diagnostics access: the supported log was not read, so no unqualified all-clear.",
       "logs": { "checked": false, "coverage": "unavailable", "reason_code": "diagnostics_denied", "summaries": [ { "family": "stripe", "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "diagnostics_denied" } ] },
       "use": [ "healthy_baseline", "healthy_current" ],
-      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "logs_unavailable" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable" } }
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "limitations_include": [ "logs_unavailable" ], "assessments": [ { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "coverage": "partial", "reason_code": "logs_unavailable", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "logs_unavailable" } }, { "method_id": null, "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "logs_unavailable" } } ] }
     },
     {
       "name": "logs_unsupported_quiet",
@@ -251,14 +251,14 @@
       "methods": { "stripe": { "kind": "instant", "test_mode": false, "family": "stripe" }, "ppcp-gateway": { "kind": "instant", "test_mode": false, "family": "paypal" } },
       "logs": { "checked": false, "coverage": "unavailable", "reason_code": "diagnostics_denied", "summaries": [ { "family": "stripe", "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "diagnostics_denied" }, { "family": "paypal", "checked": false, "applicable": false, "coverage": "not_applicable", "reason_code": "no_supported_log_mapping" } ] },
       "use": [ "healthy_baseline", "healthy_current", { "template": "healthy_baseline", "rename": { "stripe": "ppcp-gateway" } } ],
-      "expect": { "verdict": "unknown", "coverage": "partial", "limitations_include": [ "logs_unavailable" ], "assessments": [ { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable" }, { "method_id": "ppcp-gateway", "origin_scope": "verified_checkout", "verdict": "no_sign" }, { "method_id": null, "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable" } ] }
+      "expect": { "verdict": "unknown", "coverage": "partial", "limitations_include": [ "logs_unavailable" ], "assessments": [ { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "logs_unavailable" } }, { "method_id": "ppcp-gateway", "origin_scope": "verified_checkout", "verdict": "no_sign", "coverage": "complete", "latest_hour": { "verdict": "no_sign", "coverage": "complete", "reason_code": null } }, { "method_id": null, "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "logs_unavailable" } } ] }
     },
     {
       "name": "logs_source_read_failed_row",
       "about": "The Stripe log reader failed and returned an applicable per-family row with source_read_failed: any applicable row that is not complete still blocks its family.",
       "logs": { "checked": false, "coverage": "unavailable", "reason_code": "source_read_failed", "summaries": [ { "family": "stripe", "checked": false, "applicable": true, "coverage": "unavailable", "reason_code": "source_read_failed" } ] },
       "use": [ "healthy_baseline", "healthy_current" ],
-      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable" } }
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "logs_unavailable", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "logs_unavailable" } } }
     },
     {
       "name": "logs_capped_row_positive_survives",
@@ -269,7 +269,7 @@
         { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
         { "status": "processing", "paid": true, "count": 5, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" }
       ],
-      "expect": { "verdict": "likely_attack", "coverage": "partial", "limitations_include": [ "logs_unavailable" ] }
+      "expect": { "verdict": "likely_attack", "coverage": "partial", "limitations_include": [ "logs_unavailable" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "likely_attack", "coverage": "partial", "reason_code": "logs_unavailable", "latest_hour": { "verdict": "likely_attack", "coverage": "partial", "reason_code": "logs_unavailable" } } }
     },
     {
       "name": "logs_unmapped_row_with_family",
@@ -302,6 +302,19 @@
       "limits": { "methods": 1 },
       "use": [ "healthy_baseline", "healthy_current", { "template": "healthy_baseline", "rename": { "stripe": "woocommerce_payments" } } ],
       "expect": { "verdict": "unknown", "coverage": "partial", "assessments_total": null, "methods_truncated": true, "methods_total": null, "limitations_include": [ "method_cap" ], "assessment": { "method_id": null, "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "method_cap" } }
+    },
+    {
+      "name": "method_cap_invalid_row_of_omitted_method",
+      "about": "The corroborated recent burst with the method bound at 1 and one future-dated failed order on a second method. The second identity is omitted and its row counted store-wide as invalid, but it cannot belong to the tracked method, whose scope keeps its exact counts and its likely verdict. No exact method or assessment total.",
+      "methods": { "stripe": { "kind": "instant", "test_mode": false, "family": "stripe" }, "blzghost": { "kind": "instant", "test_mode": false } },
+      "limits": { "methods": 1 },
+      "use": [ "healthy_baseline", "healthy_current" ],
+      "orders": [
+        { "status": "failed", "count": 120, "from": 3600, "to": 0, "ip": "networks:3", "attr": "absent" },
+        { "status": "processing", "paid": true, "count": 5, "from": 3600, "to": 0, "ip": "distinct:5", "attr": "typein" },
+        { "method": "blzghost", "status": "failed", "count": 1, "at": -7200 }
+      ],
+      "expect": { "verdict": "likely_attack", "activity": "recent", "coverage": "partial", "assessments_total": null, "methods_truncated": true, "methods_total": null, "limitations_include": [ "method_cap", "invalid_timestamps" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "likely_attack", "activity": "recent", "coverage": "complete" } }
     },
     {
       "name": "counts_only_burst",
@@ -358,7 +371,7 @@
       "about": "The scan hit its work budget on a quiet store: unknown, never an all-clear.",
       "stop": "order_scan_budget",
       "use": [ "healthy_baseline", "healthy_current" ],
-      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "coverage": "partial", "limitations_include": [ "order_scan_budget" ] }
+      "expect": { "verdict": "unknown", "never": [ "no_sign" ], "coverage": "partial", "limitations_include": [ "order_scan_budget" ], "assessment": { "method_id": "stripe", "origin_scope": "verified_checkout", "verdict": "unknown", "reason_code": "order_scan_budget", "latest_hour": { "verdict": "unknown", "coverage": "partial", "reason_code": "order_scan_budget" } } }
     },
     {
       "name": "empty_store",

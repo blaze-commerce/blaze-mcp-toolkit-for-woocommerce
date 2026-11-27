@@ -20,12 +20,17 @@ defined( 'ABSPATH' ) || exit;
  * handler or gateway, reads a page password or secret, or outputs page text, IDs or URLs.
  *
  * Source facts and their version:path:line citations are pinned in
- * tests/fixtures/checkout-protection-contracts.json. Facts that are the same in both verified
- * WooCommerce versions hold for every plain release between them; a fact that differs holds only
- * at the exact version where it was read. Outside the range nothing is assumed.
+ * tests/fixtures/checkout-protection-contracts.json. Their source was read at the two pins,
+ * WooCommerce 10.9.0 and 11.3.1. Ruling Q3: facts that are the same at both pins are used for
+ * every stable release from 10.9.0 up to, not including, 11.4.0, the same range the order reader
+ * uses; releases other than the pins (11.3.2 and later 11.3 patches included) are covered by that
+ * compatibility policy, not by a new source read. A fact that differs between the pins holds only
+ * at the exact pin where it was read. Prerelease and malformed versions, and anything outside the
+ * range, are unsupported and nothing is assumed for them; suffixes are never stripped.
  *
- * Every result is built from fixed PHP text. Enforcement is never verified: a configured setting
- * means the saved setting is on, not that it works.
+ * Every result is built from fixed PHP text; the only site value placed in text is the installed
+ * WooCommerce version, and only as regex-checked display text. Enforcement is never verified: a
+ * configured setting means the saved setting is on, not that it works.
  */
 final class CheckoutProtection {
 
@@ -38,13 +43,26 @@ final class CheckoutProtection {
 	/** Most checkout-page bytes read (C7). A larger page is not read. */
 	public const MAX_PAGE_BYTES = 262144;
 
-	/** Oldest and newest WooCommerce releases whose source was read. */
-	public const WC_MIN_VERIFIED = '10.9.0';
-	public const WC_MAX_VERIFIED = '11.3.1';
+	/**
+	 * Supported WooCommerce range (ruling Q3): stable releases with WC_MIN_SUPPORTED <= version <
+	 * WC_BELOW_SUPPORTED. Identical to CardTestingOrders::SUPPORTED_WC_MIN / SUPPORTED_WC_BELOW
+	 * (asserted by the unit tests). A new minor release needs a source review before this moves.
+	 */
+	public const WC_MIN_SUPPORTED   = '10.9.0';
+	public const WC_BELOW_SUPPORTED = '11.4.0';
+
+	/** The WooCommerce releases whose source was actually read (the pins). */
+	public const SOURCE_PINS = array( '10.9.0', '11.3.1' );
+
+	/** A stable release, written exactly major.minor.patch (the order reader's grammar). */
+	private const STABLE_VERSION = '/^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$/';
+
+	/** Safe display text for the installed version (the order reader's grammar). */
+	private const DISPLAY_VERSION = '/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(-[0-9A-Za-z.]{1,24})?$/';
 
 	/**
-	 * Whether the Rate limit Checkout route pattern ignores letter case, per exact verified
-	 * version. The two ends differ, so any version between them is not verified for this fact.
+	 * Whether the Rate limit Checkout route pattern ignores letter case, per exact pin. The two
+	 * pins differ, so for every other supported release this fact is not known.
 	 */
 	public const ROUTE_CASE_INSENSITIVE = array(
 		'10.9.0' => false,
@@ -57,7 +75,7 @@ final class CheckoutProtection {
 	public const RATE_LIMIT_OPTION     = 'woocommerce_feature_rate_limit_checkout_enabled';
 	public const ATTRIBUTION_OPTION    = 'woocommerce_feature_order_attribution_enabled';
 
-	/** Source defaults inside the verified range. */
+	/** Source defaults inside the supported range. */
 	public const RATE_LIMIT_DEFAULT       = 'no';
 	public const ATTRIBUTION_DEFAULT      = 'yes';
 	public const SOURCE_RATE_LIMIT        = 3;
@@ -85,7 +103,8 @@ final class CheckoutProtection {
 	/** Every reason code this class emits (plain words come from reason()). */
 	public const REASON_CODES = array(
 		'protection_enforcement_unverified',
-		'wc_version_unverified',
+		'protection_source_versions',
+		'wc_version_unsupported',
 		'checkout_page_not_set',
 		'checkout_page_invalid_setting',
 		'checkout_page_missing',
@@ -169,9 +188,10 @@ final class CheckoutProtection {
 	}
 
 	/**
-	 * C8 Limitation entries for the protection rows: one general enforcement limitation, then one
-	 * per path whose protection is unknown or whose built-in setting is off, and one per configured
-	 * path whose setting's scope is not known.
+	 * C8 Limitation entries for the protection rows: one general enforcement limitation, one
+	 * source-version limitation (the pins, the supported range and the installed version, ruling
+	 * Q3), then one per path whose protection is unknown or whose built-in setting is off, and one
+	 * per configured path whose setting's scope is not known.
 	 *
 	 * @param array<string,mixed>|null $snapshot From snapshot(); read now when null.
 	 * @return list<array{scope:string,code:string,what:string,check_next:?string}>
@@ -188,6 +208,12 @@ final class CheckoutProtection {
 				'code'       => 'protection_enforcement_unverified',
 				'what'       => self::reason( 'protection_enforcement_unverified' ),
 				'check_next' => __( 'Test each checkout path, ask your host what server or CDN rules apply, and check your payment provider\'s fraud and decline dashboard.', 'blaze-mcp-toolkit-for-woocommerce' ),
+			),
+			array(
+				'scope'      => 'protection',
+				'code'       => 'protection_source_versions',
+				'what'       => self::reason( 'protection_source_versions' ) . ' ' . self::installed_version_text( $s['wc_version'] ?? null ),
+				'check_next' => null,
 			),
 		);
 		foreach ( self::paths( $s ) as $row ) {
@@ -208,7 +234,8 @@ final class CheckoutProtection {
 	/**
 	 * Only the scalar safe facts the card tool's cache key needs (C2): page IDs, mapped statuses,
 	 * byte length and SHA-256 of the bounded content, detected type, allowlisted option values or
-	 * their absence, WooCommerce version and filter-presence flags. No page text and no URL.
+	 * their absence, WooCommerce version (safe display text), whether it is supported and whether
+	 * it is a source pin, and filter-presence flags. No page text and no URL.
 	 *
 	 * @param array<string,mixed>|null $snapshot From snapshot(); read now when null.
 	 * @return array<string,mixed>
@@ -228,7 +255,8 @@ final class CheckoutProtection {
 			'facts_version'           => self::FACTS_VERSION,
 			'permitted'               => true,
 			'wc_version'              => $s['wc_version'],
-			'wc_verified'             => $ctx['verified'],
+			'wc_supported'            => $ctx['supported'],
+			'wc_source_pinned'        => $ctx['pinned'],
 			'checkout_page_id'        => $c['id'],
 			'checkout_page_state'     => $c['state'],
 			'checkout_page_status'    => $c['status'],
@@ -247,7 +275,7 @@ final class CheckoutProtection {
 	/**
 	 * Order attribution support, stated apart from path protection (C7): turning attribution on
 	 * improves evidence and blocks nothing. `supported` is true only when the feature is on inside
-	 * the verified range and no plugin changes how or which attribution details are stored.
+	 * the supported range and no plugin changes how or which attribution details are stored.
 	 *
 	 * @param array<string,mixed>|null $snapshot From snapshot(); read now when null.
 	 * @return array{option:string,enabled:?bool,supported:bool,reason_code:?string,prefix_filter:bool,fields_filter:bool,allow_tracking_filter:bool}|array{}
@@ -257,10 +285,10 @@ final class CheckoutProtection {
 		if ( true !== ( $s['permitted'] ?? false ) ) {
 			return array();
 		}
-		$verified = self::version_support( $s['wc_version'] )['verified'];
-		$option   = (string) $s['attribution'];
-		$enabled  = null;
-		if ( $verified ) {
+		$supported = self::version_support( $s['wc_version'] ?? null )['supported'];
+		$option    = (string) $s['attribution'];
+		$enabled   = null;
+		if ( $supported ) {
 			if ( 'yes' === $option || ( 'absent' === $option && 'yes' === self::ATTRIBUTION_DEFAULT ) ) {
 				$enabled = true;
 			} elseif ( 'no' === $option ) {
@@ -270,8 +298,8 @@ final class CheckoutProtection {
 		$prefix = true === ( $s['filters']['attribution_prefix'] ?? false );
 		$fields = true === ( $s['filters']['attribution_fields'] ?? false );
 		$reason = null;
-		if ( ! $verified ) {
-			$reason = 'wc_version_unverified';
+		if ( ! $supported ) {
+			$reason = 'wc_version_unsupported';
 		} elseif ( false === $enabled ) {
 			$reason = 'attribution_disabled';
 		} elseif ( null === $enabled ) {
@@ -306,8 +334,10 @@ final class CheckoutProtection {
 		switch ( $code ) {
 			case 'protection_enforcement_unverified':
 				return __( 'This check reads settings and the checkout page only. It cannot confirm that any protection works, and it cannot see protection added by other plugins, the server, a CDN or the payment provider.', 'blaze-mcp-toolkit-for-woocommerce' );
-			case 'wc_version_unverified':
-				return __( 'This WooCommerce version has not been checked by this tool, so its checkout routes and settings are not described.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'protection_source_versions':
+				return __( 'The checkout protection facts come from WooCommerce 10.9.0 and 11.3.1 source code. They are used for stable WooCommerce releases from 10.9.0 up to, not including, 11.4.0; other releases in that range, including later 11.3 patches, are covered by that compatibility policy, not by a separate source check.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'wc_version_unsupported':
+				return __( 'This WooCommerce version is outside the range this check supports (stable releases from 10.9.0 up to, not including, 11.4.0), so facts that depend on WooCommerce\'s own code were not described.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'checkout_page_not_set':
 				return __( 'No checkout page is set in WooCommerce.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'checkout_page_invalid_setting':
@@ -335,7 +365,7 @@ final class CheckoutProtection {
 			case 'rate_limit_filter_present':
 				return __( 'A plugin or theme changes Store API rate limits, so the limits in use are not known.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'rate_limit_scope_unverified':
-				return __( 'Which request addresses Rate limit Checkout matches was not checked for this WooCommerce version.', 'blaze-mcp-toolkit-for-woocommerce' );
+				return __( 'Whether Rate limit Checkout matches request addresses written in any letter case was checked only for WooCommerce 10.9.0 and 11.3.1, so it is not known for this version.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'attribution_disabled':
 				return __( 'WooCommerce order attribution is off, so where orders came from is not recorded.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'attribution_setting_unrecognised':
@@ -563,33 +593,68 @@ final class CheckoutProtection {
 	}
 
 	/**
-	 * A safe WooCommerce version string, or null when missing or malformed.
+	 * The installed WooCommerce version as safe display text (digits, dots and a short prerelease
+	 * tag only), or null when WC_VERSION is missing or not in that form. Never raw constant text.
+	 * The same grammar as the order reader's display_version(). Display text is not support: a
+	 * prerelease is shown but unsupported (version_support()).
 	 *
 	 * @param mixed $raw WC_VERSION.
 	 */
 	public static function parse_version( $raw ): ?string {
-		if ( ! is_string( $raw ) || 1 !== preg_match( '/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:-[0-9A-Za-z.\-]{1,30})?$/', $raw ) ) {
-			return null;
-		}
-		return $raw;
+		return is_string( $raw ) && 1 === preg_match( self::DISPLAY_VERSION, $raw ) ? $raw : null;
 	}
 
 	/**
-	 * Whether a version is inside the verified range, and whether its route-pattern letter-case
-	 * handling is known (only at the exact versions read).
+	 * Whether a version is supported (ruling Q3: a stable release written exactly
+	 * major.minor.patch, with WC_MIN_SUPPORTED <= version < WC_BELOW_SUPPORTED; a prerelease,
+	 * build suffix, leading zero, extra part or other malformed value is unsupported and never
+	 * stripped down to a matching release), whether it is one of the source pins, and whether its
+	 * route-pattern letter-case handling is known (only at the exact pins).
 	 *
-	 * @param string|null $version Parsed version.
-	 * @return array{verified:bool,case_insensitive:?bool}
+	 * @param string|null $version Version text.
+	 * @return array{supported:bool,pinned:bool,case_insensitive:?bool}
 	 */
 	public static function version_support( ?string $version ): array {
-		if ( null === $version || 1 !== preg_match( '/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/', $version )
-			|| version_compare( $version, self::WC_MIN_VERIFIED, '<' ) || version_compare( $version, self::WC_MAX_VERIFIED, '>' ) ) {
-			return array( 'verified' => false, 'case_insensitive' => null );
+		if ( null === $version || 1 !== preg_match( self::STABLE_VERSION, $version )
+			|| version_compare( $version, self::WC_MIN_SUPPORTED, '<' ) || ! version_compare( $version, self::WC_BELOW_SUPPORTED, '<' ) ) {
+			return array(
+				'supported'        => false,
+				'pinned'           => false,
+				'case_insensitive' => null,
+			);
 		}
 		return array(
-			'verified'         => true,
+			'supported'        => true,
+			'pinned'           => in_array( $version, self::SOURCE_PINS, true ),
 			'case_insensitive' => self::ROUTE_CASE_INSENSITIVE[ $version ] ?? null,
 		);
+	}
+
+	/**
+	 * One fixed sentence naming the installed WooCommerce version and how this check treats it.
+	 * The version is regex-checked display text (parse_version()), never raw constant text.
+	 *
+	 * @param string|null $version Display text from parse_version().
+	 */
+	public static function installed_version_text( ?string $version ): string {
+		if ( null === $version ) {
+			return __( 'The installed WooCommerce version could not be read, so it is treated as outside the supported range.', 'blaze-mcp-toolkit-for-woocommerce' );
+		}
+		$v = self::version_support( $version );
+		if ( $v['pinned'] ) {
+			/* translators: %s: installed WooCommerce version, for example 11.3.1. */
+			return sprintf( __( 'WooCommerce %s is installed, one of the versions whose source was checked.', 'blaze-mcp-toolkit-for-woocommerce' ), $version );
+		}
+		if ( $v['supported'] ) {
+			/* translators: %s: installed WooCommerce version, for example 11.3.2. */
+			return sprintf( __( 'WooCommerce %s is installed. It is inside the supported range but its source was not checked separately, so facts that differ between the two checked versions are reported as not known.', 'blaze-mcp-toolkit-for-woocommerce' ), $version );
+		}
+		if ( false !== strpos( $version, '-' ) ) {
+			/* translators: %s: installed WooCommerce version, for example 11.4.0-beta.1. */
+			return sprintf( __( 'WooCommerce %s is installed. Test and pre-release versions are outside the supported range.', 'blaze-mcp-toolkit-for-woocommerce' ), $version );
+		}
+		/* translators: %s: installed WooCommerce version, for example 11.4.0. */
+		return sprintf( __( 'WooCommerce %s is installed, which is outside the supported range.', 'blaze-mcp-toolkit-for-woocommerce' ), $version );
 	}
 
 	// ------------------------------------------------------------------ reads.
@@ -668,8 +733,8 @@ final class CheckoutProtection {
 		}
 		if ( null === $page_reason ) {
 			$marker = (string) $c['marker'];
-			if ( ! $v['verified'] ) {
-				$page_reason = 'wc_version_unverified';
+			if ( ! $v['supported'] ) {
+				$page_reason = 'wc_version_unsupported';
 			} elseif ( 'block' === $marker ) {
 				$type = 'block';
 			} elseif ( $f( 'checkout_shortcode_tag' ) ) {
@@ -685,7 +750,8 @@ final class CheckoutProtection {
 		}
 
 		return array(
-			'verified'    => $v['verified'],
+			'supported'   => $v['supported'],
+			'pinned'      => $v['pinned'],
 			'case'        => $v['case_insensitive'],
 			'filters'     => $f,
 			'checkout'    => $c,
@@ -701,14 +767,14 @@ final class CheckoutProtection {
 	 * Rate limit Checkout as a protection: whether its saved value is on, whether its route scope
 	 * is known for this version, the state it gives a covered path and why.
 	 *
-	 * @param string                                   $option         yes, no, absent or unrecognised.
-	 * @param array{verified:bool,case_insensitive:?bool} $v          Version support.
-	 * @param bool                                     $options_filter A plugin changes Store API rate limits.
+	 * @param string                                                  $option         yes, no, absent or unrecognised.
+	 * @param array{supported:bool,pinned:bool,case_insensitive:?bool} $v              Version support.
+	 * @param bool                                                    $options_filter A plugin changes Store API rate limits.
 	 * @return array{configured:?bool,scope_known:bool,state:string,reason:?string}
 	 */
 	private static function rate_limit( string $option, array $v, bool $options_filter ): array {
-		if ( ! $v['verified'] ) {
-			return array( 'configured' => null, 'scope_known' => false, 'state' => 'unknown', 'reason' => 'wc_version_unverified' );
+		if ( ! $v['supported'] ) {
+			return array( 'configured' => null, 'scope_known' => false, 'state' => 'unknown', 'reason' => 'wc_version_unsupported' );
 		}
 		$scope_known = null !== $v['case_insensitive'] && ! $options_filter;
 		$scope_why   = $options_filter ? 'rate_limit_filter_present' : ( null === $v['case_insensitive'] ? 'rate_limit_scope_unverified' : null );
@@ -718,7 +784,7 @@ final class CheckoutProtection {
 		if ( 'yes' === $option ) {
 			return array( 'configured' => true, 'scope_known' => $scope_known, 'state' => 'configured', 'reason' => $scope_why );
 		}
-		// Saved 'no', or absent with the verified source default 'no'.
+		// Saved 'no', or absent with the source default 'no' (the same at both pins).
 		if ( $options_filter ) {
 			// A plugin may switch Store API rate limits on for every route: not known to be off.
 			return array( 'configured' => false, 'scope_known' => false, 'state' => 'unknown', 'reason' => 'rate_limit_filter_present' );
@@ -748,8 +814,8 @@ final class CheckoutProtection {
 			}
 			return 'block' === $ctx['type'] ? ( $rl['reason'] ?? 'no_readable_protection' ) : 'no_readable_protection';
 		}
-		if ( ! $ctx['verified'] ) {
-			return 'wc_version_unverified';
+		if ( ! $ctx['supported'] ) {
+			return 'wc_version_unsupported';
 		}
 		if ( 'store_api_checkout' === $id || 'store_api_order_pay' === $id ) {
 			return $rl['reason'] ?? 'no_readable_protection';
@@ -811,10 +877,10 @@ final class CheckoutProtection {
 	private static function rate_limit_facts( array $ctx ): array {
 		$out = array();
 		$opt = $ctx['option'];
-		if ( ! $ctx['verified'] ) {
+		if ( ! $ctx['supported'] ) {
 			$out[] = 'yes' === $opt
-				? __( 'Rate limit Checkout is saved as on, but this WooCommerce version has not been checked.', 'blaze-mcp-toolkit-for-woocommerce' )
-				: self::reason( 'wc_version_unverified' );
+				? __( 'Rate limit Checkout is saved as on, but this WooCommerce version is outside the range this check supports.', 'blaze-mcp-toolkit-for-woocommerce' )
+				: self::reason( 'wc_version_unsupported' );
 			return $out;
 		}
 		if ( 'yes' === $opt ) {
@@ -849,12 +915,12 @@ final class CheckoutProtection {
 			__( 'This check cannot confirm Rate limit Checkout works. Behind a proxy or CDN, WooCommerce may see the proxy\'s address instead of each visitor\'s.', 'blaze-mcp-toolkit-for-woocommerce' ),
 			__( 'A bot check shown on the checkout page does not by itself cover requests sent straight to the Store API.', 'blaze-mcp-toolkit-for-woocommerce' ),
 		);
-		if ( ! $ctx['verified'] ) {
+		if ( ! $ctx['supported'] ) {
 			return $out;
 		}
-		$out[] = __( 'In the WooCommerce versions this check verified, checkout requests sent inside a combined Store API batch request fall outside Rate limit Checkout.', 'blaze-mcp-toolkit-for-woocommerce' );
+		$out[] = __( 'In the WooCommerce source this check read (10.9.0 and 11.3.1), checkout requests sent inside a combined Store API batch request fall outside Rate limit Checkout.', 'blaze-mcp-toolkit-for-woocommerce' );
 		if ( false === $ctx['case'] ) {
-			$out[] = __( 'In this WooCommerce version, a request address written in different letter case can fall outside Rate limit Checkout.', 'blaze-mcp-toolkit-for-woocommerce' );
+			$out[] = __( 'In WooCommerce 10.9.0, a request address written in different letter case can fall outside Rate limit Checkout.', 'blaze-mcp-toolkit-for-woocommerce' );
 		} elseif ( null === $ctx['case'] ) {
 			$out[] = self::reason( 'rate_limit_scope_unverified' );
 		}
@@ -867,8 +933,8 @@ final class CheckoutProtection {
 	 * @param array<string,mixed> $ctx Context.
 	 */
 	private static function rate_limit_next( array $ctx ): string {
-		if ( ! $ctx['verified'] ) {
-			return self::unverified_next();
+		if ( ! $ctx['supported'] ) {
+			return self::unsupported_next();
 		}
 		switch ( $ctx['rate_limit']['state'] ) {
 			case 'not_configured':
@@ -879,9 +945,9 @@ final class CheckoutProtection {
 		return __( 'Check WooCommerce > Settings > Advanced > Features > Rate limit Checkout, ask whoever manages your site whether a plugin, server or CDN rule limits Store API checkout requests, and check your payment provider\'s fraud and decline dashboard.', 'blaze-mcp-toolkit-for-woocommerce' );
 	}
 
-	/** Next action when the WooCommerce version is outside the verified range. */
-	private static function unverified_next(): string {
-		return __( 'This WooCommerce version has not been checked. Look at WooCommerce > Settings > Advanced > Features > Rate limit Checkout yourself, ask whoever manages your site what covers this path, and check your payment provider\'s fraud and decline dashboard.', 'blaze-mcp-toolkit-for-woocommerce' );
+	/** Next action when the WooCommerce version is outside the supported range. */
+	private static function unsupported_next(): string {
+		return __( 'This WooCommerce version is outside the range this check supports. Look at WooCommerce > Settings > Advanced > Features > Rate limit Checkout yourself, ask whoever manages your site what covers this path, and check your payment provider\'s fraud and decline dashboard.', 'blaze-mcp-toolkit-for-woocommerce' );
 	}
 
 	/**
@@ -953,7 +1019,7 @@ final class CheckoutProtection {
 	 */
 	private static function store_api_row( array $ctx, string $id ): array {
 		$pay = 'store_api_order_pay' === $id;
-		if ( ! $ctx['verified'] ) {
+		if ( ! $ctx['supported'] ) {
 			$facts = array();
 		} elseif ( $pay ) {
 			$facts = array(
@@ -974,7 +1040,7 @@ final class CheckoutProtection {
 			$pay
 				? __( 'Paying an existing order through the Store API', 'blaze-mcp-toolkit-for-woocommerce' )
 				: __( 'Placing an order through the Store API', 'blaze-mcp-toolkit-for-woocommerce' ),
-			$ctx['verified'] ? 'available_in_core' : 'unknown',
+			$ctx['supported'] ? 'available_in_core' : 'unknown',
 			null,
 			$ctx['rate_limit']['state'],
 			array( self::rate_limit_entry( $ctx, $note ) ),
@@ -991,16 +1057,16 @@ final class CheckoutProtection {
 	 * @return array<string,mixed>
 	 */
 	private static function order_pay_row( array $ctx ): array {
-		$facts = $ctx['verified']
+		$facts = $ctx['supported']
 			? array(
 				__( 'WooCommerce includes a page for paying an existing order. It checks a security token and the order\'s key, which are not bot checks.', 'blaze-mcp-toolkit-for-woocommerce' ),
 				__( 'Rate limit Checkout does not cover this page.', 'blaze-mcp-toolkit-for-woocommerce' ),
 			)
-			: array( self::reason( 'wc_version_unverified' ) );
+			: array( self::reason( 'wc_version_unsupported' ) );
 		return self::row(
 			'order_pay',
 			__( 'Paying an existing order on the order payment page', 'blaze-mcp-toolkit-for-woocommerce' ),
-			$ctx['verified'] ? 'available_in_core' : 'unknown',
+			$ctx['supported'] ? 'available_in_core' : 'unknown',
 			null,
 			'unknown',
 			array(),
@@ -1008,9 +1074,9 @@ final class CheckoutProtection {
 			array(
 				__( 'A bot check on the checkout page does not establish protection for this page.', 'blaze-mcp-toolkit-for-woocommerce' ),
 			),
-			$ctx['verified']
+			$ctx['supported']
 				? __( 'Use a server-side Turnstile, reCAPTCHA or hCaptcha integration that explicitly covers paying an existing order, and confirm the coverage with its vendor.', 'blaze-mcp-toolkit-for-woocommerce' )
-				: self::unverified_next()
+				: self::unsupported_next()
 		);
 	}
 
@@ -1022,10 +1088,10 @@ final class CheckoutProtection {
 	 */
 	private static function add_payment_method_row( array $ctx ): array {
 		$facts = array();
-		if ( $ctx['verified'] ) {
+		if ( $ctx['supported'] ) {
 			$facts[] = __( 'WooCommerce includes a form for saving a payment method in My Account.', 'blaze-mcp-toolkit-for-woocommerce' );
 		} else {
-			$facts[] = self::reason( 'wc_version_unverified' );
+			$facts[] = self::reason( 'wc_version_unsupported' );
 		}
 		switch ( $ctx['myaccount']['state'] ) {
 			case 'published':
@@ -1046,26 +1112,26 @@ final class CheckoutProtection {
 			default:
 				$facts[] = __( 'The My Account page could not be read.', 'blaze-mcp-toolkit-for-woocommerce' );
 		}
-		if ( $ctx['verified'] ) {
+		if ( $ctx['supported'] ) {
 			$facts[] = __( 'By default WooCommerce makes each account wait 20 seconds between saved payment methods.', 'blaze-mcp-toolkit-for-woocommerce' );
 		}
 		if ( ( $ctx['filters'] )( 'saved_method_delay' ) ) {
 			$facts[] = __( 'A plugin or theme changes this wait.', 'blaze-mcp-toolkit-for-woocommerce' );
 		}
-		if ( $ctx['verified'] ) {
+		if ( $ctx['supported'] ) {
 			$facts[] = __( 'Rate limit Checkout does not cover saving a payment method.', 'blaze-mcp-toolkit-for-woocommerce' );
 		}
 		return self::row(
 			'add_payment_method',
 			__( 'Saving a payment method in My Account', 'blaze-mcp-toolkit-for-woocommerce' ),
-			$ctx['verified'] ? 'available_in_core' : 'unknown',
+			$ctx['supported'] ? 'available_in_core' : 'unknown',
 			null,
 			'unknown',
 			array(
 				array(
 					'id'          => 'core_saved_payment_delay',
 					'configured'  => null,
-					'scope_known' => $ctx['verified'],
+					'scope_known' => $ctx['supported'],
 					'note'        => __( 'WooCommerce\'s default wait between saved payment methods for one account. The value in use is not confirmed.', 'blaze-mcp-toolkit-for-woocommerce' ),
 				),
 			),
@@ -1074,9 +1140,9 @@ final class CheckoutProtection {
 				__( 'This check does not confirm the wait in use. The wait applies to one account at a time, so it does not slow many new accounts.', 'blaze-mcp-toolkit-for-woocommerce' ),
 				__( 'A bot check on the checkout page does not establish protection for this form.', 'blaze-mcp-toolkit-for-woocommerce' ),
 			),
-			$ctx['verified']
+			$ctx['supported']
 				? __( 'Use a server-side Turnstile, reCAPTCHA or hCaptcha integration that explicitly covers saving a payment method, confirm the coverage with its vendor, and review your payment provider\'s saved-card and fraud controls.', 'blaze-mcp-toolkit-for-woocommerce' )
-				: self::unverified_next()
+				: self::unsupported_next()
 		);
 	}
 }

@@ -17,6 +17,26 @@
  *                                                                            (both print CLEANUP=<json>: what was removed and what remains)
  *   wp eval-file .../seed-payment-volume.php distribution                   Print the seed distribution as JSON
  *
+ * Card-testing performance workload (1.3 FEATURE-PLAN item 9; independent of the payment cycle,
+ * cleaned by the same cleanup, see payment-volume-cycle.php):
+ *
+ *   wp eval-file .../seed-payment-volume.php card-settings                  Save, then set, the 3 instant methods enabled and live
+ *                                                                            and core order attribution on (CARD_SETTINGS=<json>)
+ *   wp eval-file .../seed-payment-volume.php card-orders <offset> <count> <now> <total>
+ *                                                                            Recent card orders over the 28-day history (bursts first)
+ *   wp eval-file .../seed-payment-volume.php card-old <offset> <count> <now> <total>
+ *                                                                            Older card orders (30-400 days ago, outside the history)
+ *   wp eval-file .../seed-payment-volume.php card-cap-methods <offset> <count> <now>
+ *                                                                            Method-cap stress: one distinct method ID per order
+ *   wp eval-file .../seed-payment-volume.php card-cap-networks <offset> <count> <now>
+ *                                                                            Network-cap stress: one IPv6 /64 per failed order
+ *   wp eval-file .../seed-payment-volume.php card-verify <orders> <old> <now> Counts in the authoritative store plus a CRUD sample
+ *                                                                            checked against each order's own spec (CARD_VERIFY=<json>)
+ *   wp eval-file .../seed-payment-volume.php card-distribution <orders> <old> <now>
+ *                                                                            Print the card seed distribution as JSON
+ *
+ * The full cleanup (cleanup) also restores the card settings; diag-cleanup leaves them.
+ *
  * Orders go through WooCommerce CRUD (new WC_Order, one save), origin `checkout`, tagged with
  * meta `_blzmcp_perf=1`. Order i of N is created at now - 60 s - i * (28 days / N), so the recent
  * orders cover the whole 28-day history evenly. Methods and statuses come from a fixed cycle of 20
@@ -152,6 +172,14 @@ function blzmcp_perf_cleanup( bool $orders = true ): int {
 		}
 		delete_option( BLZMCP_PERF_SAVED );
 	}
+	// Card workload settings (1.3): restored only by the full cleanup, never by diag-cleanup.
+	$card = $orders ? get_option( BLZMCP_CARD_PERF_SAVED, null ) : null;
+	if ( is_array( $card ) ) {
+		foreach ( $card as $name => $value ) {
+			null === $value ? delete_option( $name ) : update_option( $name, $value );
+		}
+		delete_option( BLZMCP_CARD_PERF_SAVED );
+	}
 	wp_cache_flush_group( 'orders' );
 	return count( $ids );
 }
@@ -175,7 +203,7 @@ function blzmcp_perf_cleanup_result( string $mode, ?int $removed ): array {
 		? (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE args LIKE %s', $wpdb->prefix . 'actionscheduler_actions', '%blzmcp_perf%' ) )
 		: 0;
 	$tagged   = count( blzmcp_perf_ids() );
-	$settings = null === get_option( BLZMCP_PERF_SAVED, null );
+	$settings = null === get_option( BLZMCP_PERF_SAVED, null ) && ( 'diagnostics' === $mode || null === get_option( BLZMCP_CARD_PERF_SAVED, null ) );
 	$diag_ok  = 0 === $logs && 0 === $files && 0 === $jobs && $settings;
 	return array(
 		'mode'                     => $mode,
@@ -277,7 +305,219 @@ function blzmcp_perf_diag( string $handler, int $now ): array {
 	return $out;
 }
 
+/**
+ * Create one card workload order through CRUD with a single save (1.3, FEATURE-PLAN item 9).
+ *
+ * @param array<string,mixed> $s   blzmcp_card_perf_spec() / cap spec.
+ * @param string              $tag Fixture tag value (card:<kind>:<n>).
+ * @param int                 $i   Sequence number.
+ */
+function blzmcp_card_perf_order( array $s, string $tag, int $i ): void {
+	$order = new WC_Order();
+	$order->set_created_via( (string) $s['via'] );
+	$order->set_payment_method( (string) $s['method'] );
+	$order->set_currency( 'AUD' );
+	$order->set_total( (string) ( 10 + ( $i % 90 ) ) . '.25' );
+	$order->set_billing_email( 'blzmcp-card-' . ( $i % 50 ) . '@example.invalid' );
+	if ( '' !== $s['ip'] ) {
+		$order->set_customer_ip_address( (string) $s['ip'] );
+	}
+	$order->set_date_created( (int) $s['created'] );
+	$order->set_status( (string) $s['status'] );
+	$order->set_date_paid( $s['paid'] );
+	if ( null !== $s['attr'] ) {
+		$order->update_meta_data( '_wc_order_attribution_source_type', (string) $s['attr'] );
+	}
+	$order->update_meta_data( BLZMCP_PERF_META, $tag );
+	$order->save();
+}
+
+/**
+ * Save the card settings once (their previous values, or null when absent), then set them.
+ *
+ * @return array<string,mixed>
+ */
+function blzmcp_card_perf_settings(): array {
+	if ( ! is_array( get_option( BLZMCP_CARD_PERF_SAVED, null ) ) ) {
+		$saved = array();
+		foreach ( array_keys( BLZMCP_CARD_PERF_SETTINGS ) as $name ) {
+			$saved[ $name ] = get_option( $name, null );
+		}
+		update_option( BLZMCP_CARD_PERF_SAVED, $saved, false );
+	}
+	foreach ( BLZMCP_CARD_PERF_SETTINGS as $name => $value ) {
+		update_option( $name, $value );
+	}
+	$ok = true;
+	foreach ( BLZMCP_CARD_PERF_SETTINGS as $name => $value ) {
+		$ok = $ok && get_option( $name, null ) === $value;
+	}
+	$kinds = array();
+	if ( class_exists( '\Blaze\McpToolkit\Diagnostics\PaymentMethods' ) ) {
+		foreach ( BLZMCP_CARD_PERF_METHODS as $id ) {
+			$kinds[ $id ] = \Blaze\McpToolkit\Diagnostics\PaymentMethods::kind( $id );
+		}
+	}
+	return array(
+		'ok'          => $ok && is_array( get_option( BLZMCP_CARD_PERF_SAVED, null ) ) && array( 'instant', 'instant', 'instant' ) === array_values( $kinds ),
+		'options'     => array_keys( BLZMCP_CARD_PERF_SETTINGS ),
+		'kinds'       => $kinds,
+		'stripe_mode' => class_exists( '\Blaze\McpToolkit\Diagnostics\PaymentMethods' ) ? \Blaze\McpToolkit\Diagnostics\PaymentMethods::stripe_mode() : null,
+	);
+}
+
+/**
+ * The card workload in the authoritative store, checked against its own spec (seed time).
+ *
+ * @param int $want_orders Recent orders seeded.
+ * @param int $want_old    Older orders seeded.
+ * @param int $seed_now    Seed reference time.
+ * @return array<string,mixed>
+ */
+function blzmcp_card_perf_verify( int $want_orders, int $want_old, int $seed_now ): array {
+	global $wpdb;
+	$hpos   = \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+	$like   = $wpdb->esc_like( 'card:' ) . '%';
+	$orders = $wpdb->prefix . 'wc_orders';
+	$ometa  = $wpdb->prefix . 'wc_orders_meta';
+	if ( $hpos ) {
+		$rows       = $wpdb->get_results( $wpdb->prepare( 'SELECT o.id, o.status, m.meta_value AS tag FROM %i o JOIN %i m ON m.order_id = o.id AND m.meta_key = %s WHERE o.type = %s AND m.meta_value LIKE %s ORDER BY o.id ASC', $orders, $ometa, BLZMCP_PERF_META, 'shop_order', $like ), ARRAY_A );
+		$untagged   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i o WHERE o.type = %s AND o.status NOT IN ('trash', 'auto-draft') AND NOT EXISTS (SELECT 1 FROM %i m WHERE m.order_id = o.id AND m.meta_key = %s)", $orders, 'shop_order', $ometa, BLZMCP_PERF_META ) );
+		$missing    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i o JOIN %i m ON m.order_id = o.id AND m.meta_key = %s AND m.meta_value LIKE %s LEFT JOIN %i d ON d.order_id = o.id WHERE o.type = %s AND ( d.created_via IS NULL OR d.created_via = '' )", $orders, $ometa, BLZMCP_PERF_META, $like, $wpdb->prefix . 'wc_order_operational_data', 'shop_order' ) );
+		$attr_rows  = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(DISTINCT a.order_id) FROM %i a JOIN %i m ON m.order_id = a.order_id AND m.meta_key = %s AND m.meta_value LIKE %s WHERE a.meta_key = %s', $ometa, $ometa, BLZMCP_PERF_META, $like, '_wc_order_attribution_source_type' ) );
+		$ip_rows    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i o JOIN %i m ON m.order_id = o.id AND m.meta_key = %s AND m.meta_value LIKE %s WHERE o.type = %s AND o.ip_address IS NOT NULL AND o.ip_address <> ''", $orders, $ometa, BLZMCP_PERF_META, $like, 'shop_order' ) );
+	} else {
+		$rows       = $wpdb->get_results( $wpdb->prepare( 'SELECT p.ID AS id, p.post_status AS status, m.meta_value AS tag FROM %i p JOIN %i m ON m.post_id = p.ID AND m.meta_key = %s WHERE p.post_type = %s AND m.meta_value LIKE %s ORDER BY p.ID ASC', $wpdb->posts, $wpdb->postmeta, BLZMCP_PERF_META, 'shop_order', $like ), ARRAY_A );
+		$untagged   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i p WHERE p.post_type = %s AND p.post_status NOT IN ('trash', 'auto-draft') AND NOT EXISTS (SELECT 1 FROM %i m WHERE m.post_id = p.ID AND m.meta_key = %s)", $wpdb->posts, 'shop_order', $wpdb->postmeta, BLZMCP_PERF_META ) );
+		$missing    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i p JOIN %i m ON m.post_id = p.ID AND m.meta_key = %s AND m.meta_value LIKE %s WHERE p.post_type = %s AND NOT EXISTS (SELECT 1 FROM %i v WHERE v.post_id = p.ID AND v.meta_key = %s AND v.meta_value <> '')", $wpdb->posts, $wpdb->postmeta, BLZMCP_PERF_META, $like, 'shop_order', $wpdb->postmeta, '_created_via' ) );
+		$attr_rows  = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(DISTINCT a.post_id) FROM %i a JOIN %i m ON m.post_id = a.post_id AND m.meta_key = %s AND m.meta_value LIKE %s WHERE a.meta_key = %s', $wpdb->postmeta, $wpdb->postmeta, BLZMCP_PERF_META, $like, '_wc_order_attribution_source_type' ) );
+		$ip_rows    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(DISTINCT a.post_id) FROM %i a JOIN %i m ON m.post_id = a.post_id AND m.meta_key = %s AND m.meta_value LIKE %s WHERE a.meta_key = %s AND a.meta_value <> ''", $wpdb->postmeta, $wpdb->postmeta, BLZMCP_PERF_META, $like, '_customer_ip_address' ) );
+	}
+	$dist   = blzmcp_card_perf_distribution( $want_orders, $want_old, $seed_now );
+	$count  = array(
+		'r' => 0,
+		'o' => 0,
+	);
+	$drafts = 0;
+	$failed = 0;
+	$ids    = array();
+	foreach ( (array) $rows as $r ) {
+		if ( 1 === preg_match( '/^card:([ro]):(\d+)$/', (string) $r['tag'], $m ) ) {
+			++$count[ $m[1] ];
+			$ids[] = array( (int) $r['id'], $m[1], (int) $m[2] );
+		}
+		$drafts += 'wc-checkout-draft' === $r['status'] ? 1 : 0;
+		$failed += 'wc-failed' === $r['status'] ? 1 : 0;
+	}
+	// A CRUD sample of the first and last orders, each checked against its own spec. Field names
+	// only are reported on a mismatch, never values.
+	$sample   = array_merge( array_slice( $ids, 0, 25 ), array_slice( $ids, -10 ) );
+	$crud_ok  = 0;
+	$mismatch = array();
+	foreach ( $sample as $row ) {
+		list( $id, $kind, $n ) = $row;
+		$s                     = blzmcp_card_perf_spec( $kind, $n, $seed_now, 'r' === $kind ? $want_orders : $want_old );
+		$o                     = wc_get_order( $id );
+		if ( ! $o instanceof WC_Order ) {
+			$mismatch['order'] = true;
+			continue;
+		}
+		$paid  = $o->get_date_paid();
+		$made  = $o->get_date_created();
+		$check = array(
+			'method'  => $o->get_payment_method() === $s['method'],
+			'status'  => $o->get_status() === $s['status'],
+			'via'     => (string) $o->get_created_via() === $s['via'],
+			'ip'      => (string) $o->get_customer_ip_address() === $s['ip'],
+			'attr'    => (string) $o->get_meta( '_wc_order_attribution_source_type', true ) === (string) ( $s['attr'] ?? '' ),
+			'created' => null !== $made && $made->getTimestamp() === $s['created'],
+			'paid'    => null === $s['paid'] ? null === $paid : ( null !== $paid && $paid->getTimestamp() === $s['paid'] ),
+		);
+		if ( ! in_array( false, $check, true ) ) {
+			++$crud_ok;
+		}
+		foreach ( $check as $field => $good ) {
+			if ( ! $good ) {
+				$mismatch[ $field ] = true;
+			}
+		}
+	}
+	$expected = $want_orders + $want_old;
+	$checks   = array(
+		'orders'         => count( $ids ) === $expected && $count['r'] === $want_orders && $count['o'] === $want_old,
+		'drafts'         => $drafts === $dist['drafts'],
+		'failed'         => $failed === $dist['failed'],
+		'missing_origin' => $missing === $dist['missing_origin'],
+		'attribution'    => $attr_rows === $dist['attribution_rows'],
+		'ip'             => $ip_rows === $dist['ip_rows'],
+		'crud'           => count( $sample ) > 0 && count( $sample ) === $crud_ok,
+		'untagged'       => 0 === $untagged,
+	);
+	return array(
+		'authority'               => $hpos ? 'hpos' : 'legacy',
+		'sync'                    => get_option( 'woocommerce_custom_orders_table_data_sync_enabled', 'no' ),
+		'orders'                  => count( $ids ),
+		'expected'                => $expected,
+		'recent'                  => $count['r'],
+		'old'                     => $count['o'],
+		'drafts'                  => $drafts,
+		'expected_drafts'         => $dist['drafts'],
+		'failed'                  => $failed,
+		'expected_failed'         => $dist['failed'],
+		'missing_origin'          => $missing,
+		'expected_missing_origin' => $dist['missing_origin'],
+		'attribution_rows'        => $attr_rows,
+		'expected_attribution'    => $dist['attribution_rows'],
+		'ip_rows'                 => $ip_rows,
+		'expected_ip_rows'        => $dist['ip_rows'],
+		'crud_sample'             => count( $sample ),
+		'crud_ok'                 => $crud_ok,
+		'crud_mismatch'           => array_keys( $mismatch ),
+		'untagged'                => $untagged,
+		'checks'                  => $checks,
+		'ok'                      => ! in_array( false, $checks, true ),
+	);
+}
+
 switch ( $blzmcp_perf_cmd ) {
+	case 'card-settings':
+		echo 'CARD_SETTINGS=' . wp_json_encode( blzmcp_card_perf_settings() ) . "\n";
+		break;
+	case 'card-orders':
+	case 'card-old':
+		blzmcp_perf_quiet();
+		$offset = (int) ( $blzmcp_perf_args[1] ?? 0 );
+		$count  = (int) ( $blzmcp_perf_args[2] ?? 0 );
+		$now    = (int) ( $blzmcp_perf_args[3] ?? time() );
+		$total  = (int) ( $blzmcp_perf_args[4] ?? 0 );
+		$kind   = 'card-orders' === $blzmcp_perf_cmd ? 'r' : 'o';
+		$made   = 0;
+		for ( $i = $offset; $i < $offset + $count && $i < $total; $i++ ) {
+			blzmcp_card_perf_order( blzmcp_card_perf_spec( $kind, $i, $now, $total ), 'card:' . $kind . ':' . $i, $i );
+			++$made;
+		}
+		echo 'SEEDED=' . $made . "\n";
+		break;
+	case 'card-cap-methods':
+	case 'card-cap-networks':
+		blzmcp_perf_quiet();
+		$offset = (int) ( $blzmcp_perf_args[1] ?? 0 );
+		$count  = (int) ( $blzmcp_perf_args[2] ?? 0 );
+		$now    = (int) ( $blzmcp_perf_args[3] ?? time() );
+		$net    = 'card-cap-networks' === $blzmcp_perf_cmd;
+		$made   = 0;
+		for ( $n = $offset; $n < $offset + $count; $n++ ) {
+			blzmcp_card_perf_order( $net ? blzmcp_card_perf_cap_network_spec( $n, $now ) : blzmcp_card_perf_cap_method_spec( $n, $now ), 'card:' . ( $net ? 'n' : 'm' ) . ':' . $n, $n );
+			++$made;
+		}
+		echo 'SEEDED=' . $made . "\n";
+		break;
+	case 'card-verify':
+		echo 'CARD_VERIFY=' . wp_json_encode( blzmcp_card_perf_verify( (int) ( $blzmcp_perf_args[1] ?? 0 ), (int) ( $blzmcp_perf_args[2] ?? 0 ), (int) ( $blzmcp_perf_args[3] ?? 0 ) ) ) . "\n";
+		break;
+	case 'card-distribution':
+		echo 'CARD_DISTRIBUTION=' . wp_json_encode( blzmcp_card_perf_distribution( (int) ( $blzmcp_perf_args[1] ?? 0 ), (int) ( $blzmcp_perf_args[2] ?? 0 ), (int) ( $blzmcp_perf_args[3] ?? 0 ) ) ) . "\n";
+		break;
 	case 'orders':
 	case 'old':
 		blzmcp_perf_quiet();
@@ -396,6 +636,6 @@ switch ( $blzmcp_perf_cmd ) {
 		echo 'DISTRIBUTION=' . wp_json_encode( array( 'cycle' => 20, 'per_cycle' => $per, 'outside_cycle' => array_map( static fn( $r ) => $r[0] . ' origin ' . ( '' === $r[1] ? '(empty)' : $r[1] ), BLZMCP_PERF_OUTSIDE ) ) ) . "\n";
 		break;
 	default:
-		echo "ERROR=usage: seed-payment-volume.php orders|old|outside|cap|verify|diag|cleanup|diag-cleanup|distribution\n";
+		echo "ERROR=usage: seed-payment-volume.php orders|old|outside|cap|verify|diag|cleanup|diag-cleanup|distribution|card-settings|card-orders|card-old|card-cap-methods|card-cap-networks|card-verify|card-distribution\n";
 		exit( 1 );
 }
