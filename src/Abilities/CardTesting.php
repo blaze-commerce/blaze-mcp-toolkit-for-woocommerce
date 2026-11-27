@@ -416,6 +416,42 @@ final class CardTesting extends AbstractAbility {
 	}
 
 	/**
+	 * Register the ability, plus the raw-input check for it (C1).
+	 *
+	 * WordPress 7.2 sanitises validated input to the schema types (WP_Ability::prepare_input())
+	 * before the permission and execute callbacks, so "48" or 48.0 would reach execute() as 48. The
+	 * `wp_ability_validate_input` filter (WordPress 7.1+) runs on the raw, normalised input before that
+	 * cast, so the strict check is applied there too, for this ability only. On 6.9 the filter does not
+	 * exist and nothing is cast, so execute()'s own check is the guard.
+	 */
+	public static function register(): void {
+		parent::register();
+		if ( function_exists( 'add_filter' ) && false === has_filter( 'wp_ability_validate_input', array( self::class, 'validate_raw_input' ) ) ) {
+			add_filter( 'wp_ability_validate_input', array( self::class, 'validate_raw_input' ), 10, 3 );
+		}
+	}
+
+	/**
+	 * `wp_ability_validate_input` callback: reject anything but C1's input (an object with at most an
+	 * integer since_hours from 1 to 168) for this ability, before core casts it. Every other ability's
+	 * result is returned untouched, and an earlier failure is kept as it is.
+	 *
+	 * @param true|\WP_Error|mixed $is_valid     Validation result so far.
+	 * @param mixed                $input        Input being validated (raw on the first pass).
+	 * @param string|mixed         $ability_name Ability being validated.
+	 * @return true|\WP_Error|mixed
+	 */
+	public static function validate_raw_input( $is_valid, $input = null, $ability_name = '' ) {
+		if ( self::NAME !== $ability_name || true !== $is_valid ) {
+			return $is_valid;
+		}
+		if ( null !== self::hours( $input ) ) {
+			return $is_valid;
+		}
+		return new \WP_Error( 'ability_invalid_input', __( 'since_hours must be a whole number of hours from 1 to 168, and no other input is accepted.', 'blaze-mcp-toolkit-for-woocommerce' ) );
+	}
+
+	/**
 	 * Every limitation code a response can carry: the rules', the reader's, the logs', the
 	 * protection facts' and this ability's own.
 	 *

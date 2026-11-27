@@ -260,7 +260,24 @@ foreach ( $bad_inputs as $bad ) {
 	blzmcp_it_assert( is_wp_error( $r ), 'rejects ' . wp_json_encode( $bad ) . ' through the Abilities API' );
 	$r = CardTesting::execute( $bad );
 	blzmcp_it_assert( is_wp_error( $r ) && 'blzmcp_invalid_input' === $r->get_error_code(), 'rejects ' . wp_json_encode( $bad ) . ' on a direct call' );
+	// WordPress 7.2 casts validated input to the schema types before the callbacks
+	// (WP_Ability::prepare_input()), so the raw value must already fail validate_input(), the step
+	// prepare_input() runs first on the raw input (7.1+: through wp_ability_validate_input).
+	$v = $ability->validate_input( $bad );
+	blzmcp_it_assert( is_wp_error( $v ), 'rejects ' . wp_json_encode( $bad ) . ' in validate_input(), before any sanitising cast' );
 }
+$raw_check = array( CardTesting::class, 'validate_raw_input' );
+blzmcp_it_equals( 10, has_filter( 'wp_ability_validate_input', $raw_check ), 'raw-input check registered on wp_ability_validate_input with the ability' );
+foreach ( array( array(), array( 'since_hours' => 1 ), array( 'since_hours' => 48 ), array( 'since_hours' => 168 ) ) as $good ) {
+	blzmcp_it_equals( true, $ability->validate_input( $good ), 'accepts ' . wp_json_encode( $good ) . ' in validate_input()' );
+}
+blzmcp_it_assert( is_wp_error( apply_filters( 'wp_ability_validate_input', true, array( 'since_hours' => '48' ), CardTesting::NAME ) ), 'the raw-input check rejects a numeric string for card testing' );
+blzmcp_it_equals( true, apply_filters( 'wp_ability_validate_input', true, array( 'since_hours' => 48 ), CardTesting::NAME ), 'the raw-input check passes the cast integer through (7.2 second pass)' );
+blzmcp_it_equals( true, apply_filters( 'wp_ability_validate_input', true, array( 'since_hours' => '48' ), 'blaze-mcp-toolkit/payment-health' ), 'the raw-input check never touches another ability' );
+$earlier = new WP_Error( 'blzct_earlier', 'earlier failure' );
+blzmcp_it_assert( CardTesting::validate_raw_input( $earlier, array( 'since_hours' => 48 ), CardTesting::NAME ) === $earlier, 'an earlier validation failure is returned unchanged' );
+$ph_ability = wp_get_ability( 'blaze-mcp-toolkit/payment-health' );
+blzmcp_it_equals( true, null === $ph_ability ? null : $ph_ability->validate_input( array( 'since_hours' => '24' ) ), 'payment health validation is unchanged (core still accepts its numeric string)' );
 $clear_cache();
 $omitted = $ability->execute();
 $empty   = $ability->execute( array() );
