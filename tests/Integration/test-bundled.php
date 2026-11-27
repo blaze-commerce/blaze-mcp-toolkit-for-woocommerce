@@ -135,6 +135,8 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 	}
 	$payment = wp_get_ability( 'blaze-mcp-toolkit/payment-health' );
 	blzmcp_it_assert( $payment instanceof WP_Ability && 'blaze-mcp-toolkit' === $payment->get_category() && true === ( $payment->get_meta()['mcp']['public'] ?? null ), 'bundled: payment-health registered, ours and public' );
+	$card = wp_get_ability( 'blaze-mcp-toolkit/card-testing' );
+	blzmcp_it_assert( $card instanceof WP_Ability && 'blaze-mcp-toolkit' === $card->get_category() && true === ( $card->get_meta()['mcp']['public'] ?? null ) && true === ( $card->get_meta()['annotations']['readonly'] ?? null ), 'bundled: card-testing registered, ours, public and read-only' );
 	// The upstream store tools are not registered under their own names by us.
 	blzmcp_it_assert( ! wp_has_ability( 'woocommerce-claude/get-store-profile' ), 'upstream woocommerce-claude/* names are not registered' );
 
@@ -666,6 +668,14 @@ if ( ! $wcfc_constant && ! $wcfc_plugin ) {
 		$meta = $payment->get_meta();
 		blzmcp_it_equals( 'blaze-mcp-toolkit', $payment->get_category(), 'standaside: payment-health category is ours' );
 		blzmcp_it_equals( array( true, true, true, false, true ), array( $meta['show_in_rest'] ?? null, $meta['mcp']['public'] ?? null, $meta['annotations']['readonly'] ?? null, $meta['annotations']['destructive'] ?? null, $meta['annotations']['idempotent'] ?? null ), 'standaside: payment-health show_in_rest, mcp.public, readonly, not destructive, idempotent' );
+	}
+	// Card testing (1.3) is ours too: registered whether or not we stand aside.
+	$card = wp_get_ability( 'blaze-mcp-toolkit/card-testing' );
+	blzmcp_it_assert( $card instanceof WP_Ability, 'standaside_when_wcfc_active: card-testing still registered' );
+	if ( $card instanceof WP_Ability ) {
+		$meta = $card->get_meta();
+		blzmcp_it_equals( 'blaze-mcp-toolkit', $card->get_category(), 'standaside: card-testing category is ours' );
+		blzmcp_it_equals( array( true, true, true, false, true ), array( $meta['show_in_rest'] ?? null, $meta['mcp']['public'] ?? null, $meta['annotations']['readonly'] ?? null, $meta['annotations']['destructive'] ?? null, $meta['annotations']['idempotent'] ?? null ), 'standaside: card-testing show_in_rest, mcp.public, readonly, not destructive, idempotent' );
 	}
 	blzmcp_it_equals( false, has_filter( 'wp_register_ability_args', array( AnalyticsGuard::class, 'filter_args' ) ), 'standaside: analytics guard not registered' );
 

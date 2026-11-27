@@ -43,6 +43,9 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-http.XXXXXX")
 # Reply classifiers and payload checks (fail closed; self-tested by tests/matrix/test-http-checks.sh).
 # shellcheck source=tests/matrix/http-checks.sh
 . "$(dirname "${BASH_SOURCE[0]}")/http-checks.sh"
+# The card-testing cases and their payload checks (1.3 item 8; definitions only, run near the end).
+# shellcheck source=tests/matrix/card-testing-http.sh
+. "$(dirname "${BASH_SOURCE[0]}")/card-testing-http.sh"
 
 pass=0
 fail=0
@@ -94,7 +97,7 @@ BLAZE_ABILITIES=(
 	blaze-mcp-toolkit/failed-order-triage blaze-mcp-toolkit/refund-triage
 	blaze-mcp-toolkit/store-profile blaze-mcp-toolkit/search-products blaze-mcp-toolkit/product-details
 	blaze-mcp-toolkit/readiness-score blaze-mcp-toolkit/recommendations
-	blaze-mcp-toolkit/suggest-improvements blaze-mcp-toolkit/payment-health
+	blaze-mcp-toolkit/suggest-improvements blaze-mcp-toolkit/payment-health blaze-mcp-toolkit/card-testing
 )
 PAY=blaze-mcp-toolkit/payment-health
 WORKFLOWS=(weekly-store-review revenue-drop-triage failed-order-triage refund-triage)
@@ -109,6 +112,7 @@ easy_name() { printf 'wp_ability_%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:low
 args_for() {
 	case "$1" in
 	blaze-mcp-toolkit/health-summary | blaze-mcp-toolkit/payment-health) echo '{"since_hours":24}' ;;
+	blaze-mcp-toolkit/card-testing) echo '{"since_hours":48}' ;;
 	blaze-mcp-toolkit/update-history) echo '{"days":7}' ;;
 	blaze-mcp-toolkit/search-products) echo '{"query":"Matrix"}' ;;
 	blaze-mcp-toolkit/product-details | blaze-mcp-toolkit/suggest-improvements) echo "{\"product_id\":$PRODUCT_ID}" ;;
@@ -310,6 +314,7 @@ if [ "$STATE" == none ]; then
 			fi
 			row_end "$r" any admin no_tool
 		done
+		card_none_cases
 	else
 		no "none: an administrator credential for the no-tool check"
 	fi
@@ -419,7 +424,9 @@ for s in "${TRANSPORTS[@]}"; do
 		truthy "$s: $w names no obsolete alias" "$(jq -r '(.instructions | test("wc-analytics-confirm-large-range")) | not' "$plan")"
 		if [[ " ${PAYMENT_FIRST[*]} " == *" $w "* ]]; then
 			eq "$s: $w runs payment health first, as $(tool_of "$s" "$PAY")" "$PAY $(tool_of "$s" "$PAY")" "$(jq -r '.steps[0] | "\(.ability) \(.tool)"' "$plan")"
-			eq "$s: $w order totals come straight after payment health" 'wc-analytics/totals orders' "$(jq -r '.steps[1] | "\(.ability) \(.arguments.subject)"' "$plan")"
+			# 1.3 (C9): card testing runs second, then the order totals alone.
+			eq "$s: $w runs card testing second, as $(tool_of "$s" "$CARD")" "$CARD $(tool_of "$s" "$CARD")" "$(jq -r '.steps[1] | "\(.ability) \(.tool)"' "$plan")"
+			eq "$s: $w order totals come straight after card testing" 'wc-analytics/totals orders' "$(jq -r '.steps[2] | "\(.ability) \(.arguments.subject)"' "$plan")"
 			truthy "$s: $w has the PAYMENT CHECK paragraph" "$(jq -r '.instructions | contains("PAYMENT CHECK")' "$plan")"
 		else
 			truthy "$s: $w has no payment step and no PAYMENT CHECK paragraph" "$(jq -r --arg p "$PAY" '([.steps[].ability] | index($p) == null) and (.instructions | contains("PAYMENT CHECK") | not)' "$plan")"
@@ -937,6 +944,15 @@ if has_transport easy; then
 	row_end easy any admin tool_off
 fi
 pay_unseed "$pf_orig_set"
+
+# ---------------------------------------------------------------------------------------------
+# Card testing over HTTP (1.3 item 8, C10; tests/matrix/card-testing-http.sh): every storage:sync
+# combination, then the authority-independent cases. Seeded after every fixed Analytics comparison
+# and the payment cases above, and removed again before each switch and before the original
+# storage is restored, so no expected figure above moves. Rows are CARD_ROW lines.
+# ---------------------------------------------------------------------------------------------
+card_storage_cases
+card_any_cases
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

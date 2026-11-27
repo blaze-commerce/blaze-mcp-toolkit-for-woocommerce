@@ -346,6 +346,28 @@ if ( ! $hpos ) {
 	blzmcp_it_equals( $dense[24][0]['store']['series']['count'] + 1, $sparse_ids[24][0]['store']['series']['count'], 'the order after the filler is read (one more taken event)' );
 }
 
+// ---------------------------------------------------------------- 1.3 card mode leaves payment health alone.
+// read_card_testing() shares the authority guard, chunks, dates and first-row metadata machinery
+// but folds into its own accumulator: read() output and its selected fields are unchanged.
+wp_cache_flush();
+$pre_card = serialize( array( PaymentOrders::read( $now, 24, $tz ), PaymentOrders::read( $now, 168, $tz ) ) ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- exact structural comparison.
+$card     = PaymentOrders::read_card_testing( $now, 48, $tz );
+wp_cache_flush();
+blzmcp_it_assert( $pre_card === serialize( array( PaymentOrders::read( $now, 24, $tz ), PaymentOrders::read( $now, 168, $tz ) ) ), '1.3: a card-mode read leaves payment-health read() output identical' ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- exact structural comparison.
+blzmcp_it_assert( true === $card['ok'] && $auth['authority'] === $card['authority'], '1.3: card mode reads the same authoritative store' );
+$pay_q = array();
+$pay_spy = static function ( $q ) use ( &$pay_q ) {
+	$pay_q[] = (string) $q;
+	return $q;
+};
+add_filter( 'query', $pay_spy );
+wp_cache_flush();
+PaymentOrders::read( $now, 24, $tz );
+remove_filter( 'query', $pay_spy );
+$pay_sql = implode( "\n", $pay_q );
+blzmcp_it_assert( ! str_contains( $pay_sql, 'ip_address' ) && ! str_contains( $pay_sql, '_customer_ip_address' ) && ! str_contains( $pay_sql, '_wc_order_attribution' ) && ! str_contains( $pay_sql, 'wc_orders_meta' ), '1.3: payment-health mode never selects IP or attribution fields' );
+blzmcp_it_assert( str_contains( $pay_sql, $hpos ? 'o.transaction_id' : "'_transaction_id'" ), '1.3: payment-health mode keeps its transaction-reference selection' );
+
 // ---------------------------------------------------------------- failure paths fail closed.
 $break = static fn( $q ) => ( str_contains( $q, '_blzmcp_never' ) || str_contains( $q, 'ORDER BY o.id ASC' ) || str_contains( $q, 'ORDER BY p.ID ASC LIMIT' ) ) ? 'SELECT broken_column FROM blzmcp_no_such_table' : $q;
 add_filter( 'query', $break );

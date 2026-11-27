@@ -63,6 +63,19 @@ if ( class_exists( \Blaze\McpToolkit\Abilities\PaymentHealth::class ) ) {
 	blzmcp_it_assert( str_starts_with( $payment_key, 'blzmcp_c_' ) && is_array( get_transient( $payment_key ) ), 'payment health result is cached under a blzmcp_c_ key' );
 	blzmcp_it_equals( \Blaze\McpToolkit\Abilities\PaymentHealth::CONTEXT_VERSION, $context['v'] ?? null, 'payment cache context carries its contract version, so a later incompatible context never reuses an external object-cache entry' );
 }
+// A real card-testing result (1.3): its own 60-second entry under the same prefix.
+$card_key = '';
+$card     = wp_get_ability( 'blaze-mcp-toolkit/card-testing' );
+blzmcp_it_assert( null !== $card && is_array( $card->execute( array( 'since_hours' => 48 ) ) ), 'card testing runs before uninstall' );
+if ( class_exists( \Blaze\McpToolkit\Abilities\CardTesting::class ) ) {
+	$card_key     = ( new ReflectionMethod( \Blaze\McpToolkit\Abilities\CardTesting::class, 'cache_key' ) )->invoke( null, array( 'since_hours' => 48 ) );
+	$card_context = ( new ReflectionMethod( \Blaze\McpToolkit\Abilities\CardTesting::class, 'cache_context' ) )->invoke( null );
+	blzmcp_it_assert( str_starts_with( $card_key, 'blzmcp_c_' ) && is_array( get_transient( $card_key ) ), 'card testing result is cached under a blzmcp_c_ key' );
+	blzmcp_it_assert( (int) get_option( '_transient_timeout_' . $card_key ) - time() <= 60, 'card testing entry expires within 60 seconds' );
+	blzmcp_it_equals( \Blaze\McpToolkit\Abilities\CardTesting::CONTEXT_VERSION, $card_context['v'] ?? null, 'card cache context carries its contract version' );
+}
+// The settings schema stays at db_version 1 (no 1.3 migration).
+blzmcp_it_equals( 1, (int) ( get_option( 'blzmcp_settings', array() )['db_version'] ?? 1 ), 'settings db_version unchanged at 1' );
 wp_set_current_user( 0 );
 
 $as_count = static function () use ( $wpdb ): int {
@@ -90,6 +103,9 @@ blzmcp_it_equals( false, get_transient( 'blzmcp_c_test_uninstall' ), 'cached too
 blzmcp_it_equals( false, get_transient( 'blzmcp_anon_test_uninstall' ), 'anonymous-denial transient is gone' );
 if ( '' !== $payment_key ) {
 	blzmcp_it_equals( false, get_transient( $payment_key ), 'payment health result transient is gone' );
+}
+if ( '' !== $card_key ) {
+	blzmcp_it_equals( false, get_transient( $card_key ), 'card testing result transient is gone' );
 }
 
 // Tables.

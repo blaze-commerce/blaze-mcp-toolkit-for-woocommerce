@@ -49,11 +49,21 @@ function blzmcp_fx_set_inputs(): callable {
 	}
 	$util     = \Automattic\WooCommerce\Utilities\OrderUtil::class;
 	$hpos_was = class_exists( $util ) && $util::custom_orders_table_usage_is_enabled();
+	// blzmcp_it_set_hpos() turns compatibility sync on before it switches, and switching back does
+	// not turn it off again: keep the raw value (or its absence) and put it back in the restore, so
+	// neither caller (the capture script, test-setup-checks.php) leaves a legacy store with sync on.
+	$sync_missing = new \stdClass();
+	$sync_was     = get_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync_missing );
 	blzmcp_it_set_hpos( true );
 	AnalyticsGuard::clear_cache();
 
-	return static function () use ( $prev, $hpos_was ): void {
+	return static function () use ( $prev, $hpos_was, $sync_was, $sync_missing ): void {
 		blzmcp_it_set_hpos( $hpos_was );
+		if ( $sync_was === $sync_missing ) {
+			delete_option( 'woocommerce_custom_orders_table_data_sync_enabled' );
+		} else {
+			update_option( 'woocommerce_custom_orders_table_data_sync_enabled', $sync_was );
+		}
 		foreach ( $prev as $name => $value ) {
 			if ( null === $value ) {
 				delete_option( $name );

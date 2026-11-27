@@ -38,6 +38,9 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 SUITE=${BLZMCP_TEST_HTTP_SUITE:-$REPO/tests/matrix/http-suite.sh} # override: run every case against another copy
 # The helper the suite sources is the one beside it (http-suite.sh sources its own directory's copy).
 CHECKS=$(cd "$(dirname "$SUITE")" && pwd)/http-checks.sh
+# The card-testing cases (1.3 item 8), sourced by the suite right after http-checks.sh.
+CARD_HTTP=$(cd "$(dirname "$SUITE")" && pwd)/card-testing-http.sh
+CARD_SAMPLE=$(cd "$(dirname "$SUITE")" && pwd)/card-testing-sample.json
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/blzmcp-test-http.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 T_PASS=0
@@ -234,7 +237,7 @@ for at in "$NONE_AT" "$OVR_AT"; do
 done
 early() { # label state(none|easy-*) at-line -> the child's stdout; stderr in $WORK/e-err
 	local prelude n
-	prelude=". '$CHECKS'"$'\n' # http-suite.sh sources it before any case
+	prelude=". '$CHECKS'"$'\n'". '$CARD_HTTP'"$'\n' # http-suite.sh sources both before any case
 	for n in $(defs_before "$3"); do prelude+="$(extract "$n")"$'\n'; done
 	env STATE="$2" "$BASH" -c '
 		set -u
@@ -272,6 +275,9 @@ early() { # label state(none|easy-*) at-line -> the child's stdout; stderr in $W
 			*weekly?store?review)
 				RPC_CODE=200; echo "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}" >"$RPC_BODY"
 				echo "{\"ok\":{\"steps\":[{\"ability\":\"blaze-mcp-toolkit/health-summary\"}],\"instructions\":\"switched off by the site configuration\"}}" >"$CALL_OUT" ;;
+			*card?testing) # the same injected answer, naming the card-testing ability where it names one
+				local b=${!v}
+				RPC_CODE=$CALL_CODE; printf "%s" "${b//payment-health/card-testing}" >"$RPC_BODY"; echo "{\"err\":\"stub\"}" >"$CALL_OUT" ;;
 			*) RPC_CODE=$CALL_CODE; printf "%s" "${!v}" >"$RPC_BODY"; echo "{\"err\":\"stub\"}" >"$CALL_OUT" ;;
 			esac
 		}
@@ -297,6 +303,8 @@ none_case() { # label expected(PASSED|FAILED) grep_fail init_code init_body call
 	out=$(early "$1" none "$NONE_AT")
 	rows=$(grep '^TRANSPORT_ROW=none|' <<<"$out" | sed 's/^TRANSPORT_ROW=none|\([a-z]*\)|.*|\([A-Z]*\)$/\1:\2/' | paste -sd, -)
 	t_eq "$1 (rows)" "rec:$2,easy:$2" "$rows"
+	rows=$(grep '^CARD_ROW=none|' <<<"$out" | sed 's/^CARD_ROW=none|\([a-z]*\)|any|admin|card_no_tool|\([A-Z]*\)$/\1:\2/' | paste -sd, -)
+	t_eq "$1 (card rows)" "rec:$2,easy:$2" "$rows"
 	t_eq "$1 (no checker execution error)" 0 "$(exec_errors)"
 }
 [ -n "$NONE_AT" ] && {
@@ -321,6 +329,123 @@ ovr_case() { # label expected(PASS|FAIL) grep_fail call_easy
 	ovr_case 'Easy override: the switched-off answer carries method facts' FAIL 0 "$EASY_OFF_FACTS"
 	ovr_case 'Easy override: the method-fact check cannot run' FAIL 1 "$EASY_OFF"
 }
+
+# --- 2c. card-testing payload checks (1.3 item 8) ---------------------------------------------
+# card-testing-sample.json is an administrator's real card-testing result over the card fixture
+# (recorded on the development environment, trimmed to the fields the checks read, the host
+# removed from the edit links). Every checker passes on it; each injected defect must fail its
+# check, an unparseable result must fail (never vacuously pass), and a denial body carrying card
+# facts must fail the shared fact check.
+. "$CARD_HTTP"
+jq '{ok: .}' "$CARD_SAMPLE" >"$WORK/c-good.json"
+c_count() { # checker file [args...] -> "<true> <false>"
+	local out
+	out=$("$@" 2>/dev/null | cut -f2)
+	echo "$(grep -c '^true$' <<<"$out") $(grep -c '^false$' <<<"$out")"
+}
+c_good() { # label checker [args...]: every check true on the recorded result
+	local r
+	r=$(c_count "$2" "$WORK/c-good.json" "${@:3}")
+	if [ "${r#* }" == 0 ] && [ "${r%% *}" -gt 0 ]; then t_ok "$1 ($r)"; else t_no "$1 (true/false: $r)"; fi
+}
+c_bad() { # label jq-mutation checker [args...]: at least one check false after the mutation
+	local r
+	jq "$2" "$WORK/c-good.json" >"$WORK/c-bad.json" 2>/dev/null || { t_no "$1 (mutation did not apply)"; return; }
+	r=$(c_count "$3" "$WORK/c-bad.json" "${@:4}")
+	if [ "${r#* }" -gt 0 ]; then t_ok "$1 ($r)"; else t_no "$1 (true/false: $r: the defect passed)"; fi
+}
+c_good 'card contract: the recorded result keeps the C8 contract' card_contract_checks rec
+c_good 'card recent: the recorded stripe burst is likely and recent' card_recent_checks 30
+c_good 'card earlier: the recorded woocommerce_payments burst is likely, earlier' card_earlier_checks 24
+c_good 'card low volume: the recorded square_credit_card scope is unknown' card_low_volume_checks
+c_good 'card gaps: the recorded ppcp-gateway gaps are disclosed' card_gaps_checks 25 22
+c_good 'card protection: the recorded protection paths' card_protection_checks
+c_good 'card logs: the recorded administrator logs are exposed' card_logs_checks exposed
+# A manager's withheld result, as the recorded manager run differed: the stripe row denied, the
+# role limitation added, the stripe scopes blocked from no_sign (verdict unchanged).
+jq '.ok.logs |= map(if .family == "stripe" then .checked = false | .coverage = "unavailable" | .reason_code = "diagnostics_denied" | .source = null | .count = {value: null, lower_bound: false} | .categories = [] else . end) | .ok.limitations += [{scope: "logs", code: "diagnostics_denied"}]' "$WORK/c-good.json" >"$WORK/c-sm.json"
+r=$(c_count card_logs_checks "$WORK/c-sm.json" withheld)
+[ "${r#* }" == 0 ] && [ "${r%% *}" -gt 0 ] && t_ok "card logs: a manager's withheld result passes withheld ($r)" || t_no "card logs: a manager's withheld result passes withheld ($r)"
+c_bad 'card logs: an administrator result does not count as withheld' '.' card_logs_checks withheld
+c_bad 'card logs: a withheld result does not count as exposed' '.ok.logs |= map(if .family == "stripe" then .checked = false | .reason_code = "diagnostics_denied" | .count.value = null | .categories = [] else . end)' card_logs_checks exposed
+c_bad 'card logs: a withheld result leaking the log count fails' '.ok.logs |= map(if .family == "stripe" then .checked = false | .coverage = "unavailable" | .reason_code = "diagnostics_denied" | .source = null else . end) | .ok.limitations += [{scope: "logs", code: "diagnostics_denied"}]' card_logs_checks withheld
+c_bad 'card contract: an extra top-level key fails' '.ok.debug = 1' card_contract_checks rec
+c_bad 'card contract: a missing top-level key fails' 'del(.ok.limitations)' card_contract_checks rec
+c_bad 'card contract: schema_version as a string fails on the recommended route' '.ok.schema_version = "1"' card_contract_checks rec
+c_bad 'card contract: schema_version 2 fails on either route' '.ok.schema_version = 2' card_contract_checks easy
+c_bad 'card contract: a saved IP in the response fails' '.ok.summary += " 203.0.113.7"' card_contract_checks rec
+c_bad 'card contract: a network prefix in the response fails' '.ok.findings[0].what = "2001:db8:aa::/64"' card_contract_checks rec
+c_bad 'card contract: a count that is a bare number fails' '.ok.totals.failed_unpaid = 123' card_contract_checks rec
+c_bad 'card contract: a missing protection path fails' '.ok.protection |= .[0:4]' card_contract_checks rec
+c_bad 'card contract: a missing mandatory limitation fails' '.ok.limitations |= map(select(.code != "unsaved_and_retried_orders"))' card_contract_checks rec
+c_bad 'card contract: a baseline overlapping the window fails' '.ok.baseline.end = .ok.window.end' card_contract_checks rec
+c_bad 'card recent: possible instead of likely fails' '.ok.assessments[0].verdict = "possible_attack"' card_recent_checks 30
+c_bad 'card recent: activity earlier instead of recent fails' '.ok.activity = "earlier_in_window"' card_recent_checks 30
+c_bad 'card recent: a lower-bound count fails' '.ok.assessments[0].latest_hour.failed_orders.lower_bound = true' card_recent_checks 30
+c_bad 'card recent: a count other than the seeded one fails' '.' card_recent_checks 29
+c_bad 'card recent: missing IPs counted as networks fails' '.ok.assessments[0].latest_hour.networks.missing_ip_orders = 5' card_recent_checks 30
+c_bad 'card recent: a confirmed-attack summary without the payment-fault caveat fails' '.ok.summary |= sub("A payment fault is still possible. "; "")' card_recent_checks 30
+c_bad 'card recent: an example carrying a customer field fails' '.ok.examples[0].billing_email = "x"' card_recent_checks 30
+c_bad 'card recent: no example at all fails' '.ok.examples = []' card_recent_checks 30
+c_bad 'card earlier: recent instead of earlier fails' '.ok.assessments[1].activity = "recent"' card_earlier_checks 24
+c_bad 'card earlier: a lower-bound episode fails' '.ok.assessments[1].episodes[0].failed_orders.lower_bound = true' card_earlier_checks 24
+c_bad 'card low volume: no_sign instead of unknown fails' '.ok.assessments[4].verdict = "no_sign"' card_low_volume_checks
+c_bad 'card low volume: a possible finding for the low-history method fails' '.ok.findings += [{severity: "warning", code: "possible_card_testing", method_id: "square_credit_card"}]' card_low_volume_checks
+c_bad 'card gaps: a likely verdict without saved IPs fails' '.ok.assessments[2].verdict = "likely_attack"' card_gaps_checks 25 22
+c_bad 'card gaps: missing IPs grouped as one network fails' '.ok.assessments[2].latest_hour.networks.signal = true' card_gaps_checks 25 22
+c_bad 'card gaps: a likely missing-origin scope fails' '.ok.assessments[3].verdict = "likely_attack"' card_gaps_checks 25 22
+c_bad 'card gaps: the missing-origin limitation dropped fails' '.ok.limitations |= map(select(.code != "missing_origin_orders"))' card_gaps_checks 25 22
+c_bad 'card gaps: complete coverage with unknown protection fails' '.ok.coverage = "complete"' card_gaps_checks 25 22
+c_bad 'card protection: a verified enforcement fails' '.ok.protection[1].enforcement = "verified"' card_protection_checks
+c_bad 'card protection: a protected flag fails' '.ok.protection[3].protected = false' card_protection_checks
+c_bad 'card protection: order payment inheriting the Store API setting fails' '.ok.protection[3].protection_state = "configured" | .ok.protection[3].protections = [{id: "core_checkout_rate_limit", configured: true, scope_known: true}]' card_protection_checks
+c_bad 'card protection: the saved-payment delay asserted fails' '.ok.protection[4].protections[0].configured = true' card_protection_checks
+c_bad 'card protection: the enforcement limitation dropped fails' '.ok.limitations |= map(select(.code != "protection_enforcement_unverified"))' card_protection_checks
+c_bad 'card protection: unknown protection lowering the verdict fails' '.ok.verdict = "unknown"' card_protection_checks
+c_bad 'card: an error result fails every checker (contract)' '{err: "Permission denied"}' card_contract_checks rec
+echo 'not json' >"$WORK/c-nojson.json"
+c_out=$(ok() { :; }; no() { echo "NO $*"; }; CALL_OUT=$WORK/c-nojson.json; card_checks probe card_contract_checks "$WORK/c-nojson.json" rec)
+grep -q '^NO probe: card checks could not be evaluated' <<<"$c_out" && t_ok 'card checks: an unparseable result fails, never vacuously passes' || t_no "card checks: an unparseable result fails ($c_out)"
+c_plan=$(jq -cn '{steps: [{ability: "blaze-mcp-toolkit/payment-health", tool: "blaze-mcp-toolkit/payment-health"}, {ability: "blaze-mcp-toolkit/card-testing", tool: "blaze-mcp-toolkit/card-testing", arguments: {since_hours: 48}}, {ability: "wc-analytics/totals", arguments: {subject: "orders"}}], instructions: "CARD TESTING CHECK\nThe card-testing step looks back"}')
+printf '%s' "$c_plan" >"$WORK/c-plan.json"
+r=$(c_count card_plan_checks "$WORK/c-plan.json" rec "$CARD" "$PAY")
+[ "${r#* }" == 0 ] && [ "${r%% *}" -gt 0 ] && t_ok "card plan: payment, card, totals with the paragraph passes ($r)" || t_no "card plan: the good plan ($r)"
+for m in '.steps[1].ability = "wc-analytics/totals"' '.steps[1].arguments.since_hours = 169' '.steps[1].arguments.since_hours = "48"' '.instructions += " If failed orders exceed paid orders, warn of card testing."' '.instructions = "no paragraph"' '.steps |= [.[1], .[0], .[2]]'; do
+	jq "$m" "$WORK/c-plan.json" >"$WORK/c-plan-bad.json"
+	r=$(c_count card_plan_checks "$WORK/c-plan-bad.json" rec "$CARD" "$PAY")
+	[ "${r#* }" -gt 0 ] && t_ok "card plan: defect fails: $m" || t_no "card plan: defect passed: $m"
+done
+reply 200 "$(err_result 'Permission denied likely_attack failed_unpaid')"
+t_eq 'card denial: a permission refusal carrying card facts is a leak' leak "$(blzmcp_leak_state "$RPC_BODY")"
+reply 200 "$(err_result 'Error: Permission denied for ability: blaze-mcp-toolkit/card-testing')"
+t_eq 'card denial: the clean Easy MCP AI refusal for card testing is a permission refusal without facts' 'perm clean' "$(call_refusal easy "$CARD") $(blzmcp_leak_state "$RPC_BODY")"
+reply 200 "$(err_result "Ability 'blaze-mcp-toolkit/card-testing' not found on this WordPress site.")"
+t_eq 'card off: the recommended not-found answer for card testing is tool_off' tool_off "$(call_refusal rec "$CARD")"
+# R3 (REVIEW-pass4a, wave 3): Analytics readiness of the card fixture, checked on its own output.
+ca_count() { # fixture-output -> "<true> <false>"
+	local out
+	out=$(card_analytics_lines "$1" | cut -f2)
+	echo "$(grep -c '^true$' <<<"$out") $(grep -c '^false$' <<<"$out")"
+}
+CA_READY=$'SEEDED=433\nIMPORTED=433\nANALYTICS_GAP_HISTORY=none\nANALYTICS_GAP_WORKFLOW=none\nANALYTICS_READY=1'
+t_eq 'card analytics: an imported, ready fixture passes every readiness check' '4 0' "$(ca_count "$CA_READY")"
+t_eq 'card analytics: the recheck (no seed count) passes when ready' '3 0' "$(ca_count $'ANALYTICS_GAP_HISTORY=none\nANALYTICS_GAP_WORKFLOW=none\nANALYTICS_READY=1')"
+for m in 'IMPORTED=0' 'IMPORTED=432' 'ANALYTICS_GAP_HISTORY=orders_not_imported' 'ANALYTICS_GAP_HISTORY=import_not_run' 'ANALYTICS_GAP_WORKFLOW=import_in_progress' 'ANALYTICS_READY=0'; do
+	k=${m%%=*}
+	r=$(ca_count "$(sed "s/^$k=.*/$m/" <<<"$CA_READY")")
+	[ "${r#* }" -gt 0 ] && t_ok "card analytics: a fixture with $m fails ($r)" || t_no "card analytics: a fixture with $m passed ($r)"
+done
+r=$(ca_count "$(grep -v '^ANALYTICS_READY=' <<<"$CA_READY")")
+[ "${r#* }" -gt 0 ] && t_ok "card analytics: no readiness line fails ($r)" || t_no "card analytics: no readiness line passed ($r)"
+r=$(ca_count '')
+[ "${r#* }" -gt 0 ] && t_ok "card analytics: no fixture output fails, never vacuously passes ($r)" || t_no "card analytics: no fixture output passed ($r)"
+t_eq 'card analytics: card_seed checks readiness on the seed output' 1 "$(sed -n '/^card_seed() {/,/^}/p' "$CARD_HTTP" | grep -cE '^[[:space:]]*card_analytics_checks "\$1" "\$out"$')"
+t_eq 'card analytics: the workflow rows recheck readiness fresh before expecting the order-totals step' 1 "$(sed -n '/^card_any_cases() {/,/^}/p' "$CARD_HTTP" | awk '/row_begin/ {r = 1} r && /card_analytics_checks .*analytics-ready/ {a = 1} a && /card_plan_checks/ {print "ok"; exit}' | grep -c ok)"
+t_eq 'card analytics: the cleanup must leave no pending import job and no Analytics row' 2 "$(sed -n '/^card_unseed() {/,/^}/p' "$CARD_HTTP" | grep -oE '(IMPORT_JOBS|STATS)_LEFT=//p' | wc -l | tr -d ' ')"
+t_eq 'card analytics: the fixture imports every order synchronously and probes with the gap cache cleared' '1 3' "$(grep -c 'OrdersScheduler::import( \$order->get_id() );' "$(dirname "$CARD_HTTP")/card-testing-fixture.php") $(sed -n '/^function blzmcp_cardfx_analytics()/,/^}/p' "$(dirname "$CARD_HTTP")/card-testing-fixture.php" | grep -c 'AnalyticsGuard::clear_cache();')"
+reply 200 "$(err_result "Ability 'blaze-mcp-toolkit/payment-health' not found on this WordPress site.")"
+c_cls=$(call_refusal rec "$CARD")
+[ "${c_cls#bad:}" != "$c_cls" ] && t_ok "card off: another ability's not-found answer is not card testing's ($c_cls)" || t_no "card off: another ability's not-found answer counted for card testing ($c_cls)"
 
 # --- 3. diagnostics withheld / exposed ---------------------------------------------------------
 NOTE='not allowed to see store diagnostics'
@@ -387,6 +512,21 @@ t_eq 'tool off needs the tool-off answer on both routes' 2 "$(grep -cE 'expect_c
 t_eq 'diagnostics: manager off phases withheld, on phase and administrator exposed, warm-up exposed' 4 "$(grep -cE 'diag_checks ".*" (withheld|exposed)$' "$SUITE")"
 t_eq 'no safety case passes on a bare unsuccessful call (call_ok || / call_ok && no)' 0 "$(grep -cE 'if call_ok \|\| leaks|call_ok && no ' "$SUITE")"
 t_eq 'no denial passes when the credential helper refused' 0 "$(grep -cE 'could not obtain a credential' "$SUITE")"
+# 1.3 card testing (card-testing-http.sh): sourced by the suite and run, every safety case through
+# the fail-closed helpers, the row helper the only source of CARD_ROW lines.
+grep -qF '. "$(dirname "${BASH_SOURCE[0]}")/card-testing-http.sh"' "$SUITE" && t_ok 'http-suite.sh sources card-testing-http.sh' || t_no 'http-suite.sh sources card-testing-http.sh'
+t_eq 'http-suite.sh runs the card storage and authority-independent cases once each, after the payment cases' '2' "$(awk '/^pay_unseed "\$pf_orig_set"$/ {p=1} p && /^card_(storage|any)_cases$/ {n++} END {print n + 0}' "$SUITE")"
+t_eq 'the none branch runs the card no-tool cases' 1 "$(block_text "$NONE_AT" | grep -cE '^[[:space:]]*card_none_cases$')"
+t_eq 'card denial needs the permission refusal; the denied and the downgraded user get no facts' '1 2' "$(grep -cE 'expect_call_refusal ".*denied card testing with the known permission refusal" "\$1" "\$CARD" perm' "$CARD_HTTP") $(grep -cE 'expect_no_facts ".*receives no method or card facts"' "$CARD_HTTP")"
+t_eq 'card warm downgrade needs the permission refusal' 1 "$(grep -cE 'expect_call_refusal ".*downgrade.*card result.*" "\$\{S_KIND\[\$sm\]\}" "\$CARD" perm' "$CARD_HTTP")"
+t_eq 'card off needs the tool-off answer on both routes' 2 "$(grep -cE 'expect_call_refusal "card off \((recommended|Easy MCP AI)\).*" (rec|easy) "\$CARD" tool_off' "$CARD_HTTP")"
+t_eq 'card none needs rest_no_route or the tool-off answer' 2 "$(grep -cE 'expect_init_refusal ".*card testing in none.*" no_route|expect_call_refusal ".*card testing in none.*" "\$r" "\$CARD" tool_off' "$CARD_HTTP")"
+t_eq 'card logs: administrator, manager on phase and warm-up exposed; manager off phases and roles withheld' '3 2' "$(grep -cE 'card_logs_checks "\$CALL_OUT" exposed$' "$CARD_HTTP") $(grep -cE 'card_logs_checks "\$CALL_OUT" withheld$' "$CARD_HTTP")"
+t_eq 'every card row is printed by card_row_end' 1 "$(grep -c 'echo "CARD_ROW=' "$CARD_HTTP")"
+t_eq 'card-testing-http.sh defines no method-fact checker of its own and never negates one' '0 0' "$(grep -cE '^[[:space:]]*(blzmcp_)?leaks\(\)' "$CARD_HTTP") $(grep -hE '![[:space:]]*(blzmcp_)?leaks[[:space:]]' "$CARD_HTTP" | grep -cv '^[[:space:]]*#')"
+t_eq 'card-testing-http.sh changes no credential itself (only the suite and its helpers do)' 0 "$(grep -cE 'app-password|easy-token|credentials\.php [a-z-]+ (create|revoke)' "$CARD_HTTP")"
+t_eq 'the storage loop prints its 9 card row kinds, each under the combination it switched to' 9 "$(sed -n '/^card_storage_cases() {/,/^}/p' "$CARD_HTTP" | grep -cE '^[[:space:]]*card_row_end "\$s" "\$combo" ')"
+t_eq 'the authority-independent cases print their 5 card row kinds' 5 "$(sed -n '/^card_any_cases() {/,/^}/p' "$CARD_HTTP" | grep -oE 'card_row_end [^ ]+ any (admin|manager) card_[a-z_]+' | awk '{print $4 "/" $5}' | sort -u | wc -l | tr -d ' ')"
 # REVIEW-pass4b R4: one method-fact checker, in the sourced helper, never negated, never shadowed.
 t_eq 'http-checks.sh defines blzmcp_leaks' 1 "$(grep -cE '^blzmcp_leaks\(\) \{' "$CHECKS")"
 t_eq 'http-suite.sh defines no method-fact checker of its own' 0 "$(grep -cE '^[[:space:]]*(blzmcp_)?leaks\(\)' "$SUITE")"

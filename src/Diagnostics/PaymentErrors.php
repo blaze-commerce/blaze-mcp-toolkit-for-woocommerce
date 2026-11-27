@@ -19,6 +19,12 @@ defined( 'ABSPATH' ) || exit;
  * last-error value. Logs and jobs need Settings::can_view_diagnostics(), checked before any read.
  * Webhook status uses only the verified Stripe scalar timestamp options (item 1) and is visible
  * at the entry permission. No HTTP, no cron or Action Scheduler work, no repair.
+ *
+ * 1.3 (card testing, contracts C2/C6): logs_for_families() is a second, aggregate-only view of the
+ * same bounded log reader. It reads logs only (never jobs, webhook records or gateways), shares the
+ * one file/byte/row budget across every family, and returns fixed categories, counts and times as
+ * payment-fault context. Log errors are never declined-card counts or attack evidence: no decline
+ * code is read from any log in this version.
  */
 final class PaymentErrors {
 
@@ -43,6 +49,35 @@ final class PaymentErrors {
 	public const JOB_CATEGORIES     = array( 'gateway_job_failed' );
 	public const WEBHOOK_CATEGORIES = array( 'delivery_ok', 'delivery_failed', 'order_unclear', 'record_malformed', 'record_missing', 'no_events_recorded', 'no_success_recorded', 'success_stale', 'webhook_stale_unverified', 'mode_unknown' );
 	public const SOURCE_LABELS      = array( 'woocommerce_log_file', 'woocommerce_log_db' );
+
+	/**
+	 * Reason codes a card log summary (logs_for_families()) can carry. The first three are its own;
+	 * the rest are the shared reader's codes, unchanged.
+	 */
+	public const LOG_SUMMARY_REASONS = array(
+		'diagnostics_denied',
+		'no_supported_log_mapping',
+		'shared_log_source',
+		'logging_unavailable',
+		'logging_disabled',
+		'unsupported_log_handler',
+		'logging_threshold_above_error',
+		'stale_retention',
+		'log_directory_unavailable',
+		'no_matching_log_source',
+		'file_unreadable',
+		'file_cap',
+		'byte_cap',
+		'log_row_cap',
+		'unparsed_entries',
+		'source_read_failed',
+	);
+
+	/** Fixed limitation code for the card check: logs are not read for declined cards (C6). */
+	public const DECLINE_DETECTION_UNSUPPORTED = 'decline_detection_unsupported';
+
+	/** Family key grammar (the same as PaymentMethods' token-map keys). */
+	private const FAMILY_KEY = '/^[a-z0-9][a-z0-9_\-]{0,39}$/';
 
 	/** A date-led line (numeric or month-name date, optionally bracketed): an entry head of some format. */
 	private const HEAD_LIKE = '/^\[?(?:\d{1,4}[-\/.]\d{1,2}[-\/.]\d{1,4}|\d{1,2}[-\/ ][A-Z][a-z]{2}[-\/ ]\d{4})[T ]/';
@@ -90,8 +125,11 @@ final class PaymentErrors {
 			}
 		}
 
-		$logs = $allowed ? self::read_logs( $used, $since, $now ) : null;
-		$jobs = $allowed ? self::read_jobs( $used, $since, $now ) : null;
+		// Ruling Q2(b) (1.3): families that share a log source token cannot be told apart, so the
+		// entries are attributed to neither: their logs are not read and both report unknown.
+		$shared = self::shared_sources( $used );
+		$logs   = $allowed ? self::read_logs( array_diff_key( $used, $shared ), $since, $now ) : null;
+		$jobs   = $allowed ? self::read_jobs( $used, $since, $now ) : null;
 
 		$out         = array();
 		$groups_left = self::MAX_GROUPS_TOTAL;
@@ -103,7 +141,7 @@ final class PaymentErrors {
 			$lists      = null !== $family ? ( $families[ $family ] ?? null ) : null;
 			$log_family = is_array( $lists ) && array() !== ( $lists['log_sources'] ?? array() ) ? $family : null;
 			$job_family = is_array( $lists ) && ( array() !== ( $lists['hooks'] ?? array() ) || array() !== ( $lists['hook_groups'] ?? array() ) ) ? $family : null;
-			$log        = self::log_check( $allowed, $manual, $log_family, $logs, $tz, $groups_left );
+			$log        = self::log_check( $allowed, $manual, $log_family, $logs, $tz, $groups_left, null !== $log_family && isset( $shared[ $log_family ] ) );
 			$job        = self::job_check( $allowed, $manual, $job_family, $jobs, $hooks_left );
 			$webhook = self::webhook_check( $m, (int) ( $accepted_7d[ $id ] ?? 0 ), $now, $tz );
 			$out[ $id ] = array(
@@ -136,6 +174,350 @@ final class PaymentErrors {
 		);
 	}
 
+	// ------------------------------------------------------------------ card-testing log summaries.
+
+	/**
+	 * Aggregate log summaries for the card-testing check (1.3, contracts C2, C6 and C8 LogSummary).
+	 *
+	 * Permission comes first: without manage_woocommerce nothing is resolved or read and no summary
+	 * is returned; without Settings::can_view_diagnostics() no log setting, file or table is read
+	 * and every supported family reports diagnostics_denied with a null count. A throwing permission
+	 * check counts as denied.
+	 *
+	 * $families holds family keys (as PaymentMethods::method_family() returns them), or a family =>
+	 * lists map whose keys are used. Log sources always come from PaymentMethods::token_map(), never
+	 * from the caller, so no file or table is found from caller input. Families are deduplicated, so
+	 * several methods of one family never multiply its counts. A family without verified log sources
+	 * is not applicable (no_supported_log_mapping), never a checked zero. Families that share a log
+	 * source token cannot be told apart and are not read (shared_log_source). Every other family is
+	 * read once, together, under the one 7-file / 5 MB / 2,000-row budget of for_methods().
+	 *
+	 * Counts are log entries at error level or above in [now - since_hours, now). A complete read can
+	 * give an exact zero; a partial read gives a lower bound, or a null count when it observed none;
+	 * an unreadable or unsupported source gives a null count. Only fixed categories, counts, times
+	 * and the family key are returned: no message, filename, path, context or hook text.
+	 *
+	 * @param array<int|string,mixed> $families    Family keys, or a family => lists map.
+	 * @param int                     $now         Captured UTC now (window end, exclusive).
+	 * @param int                     $since_hours Window in hours (clamped to 1-168, as for_methods()).
+	 * @param \DateTimeZone           $tz          Store timezone for first_seen / last_seen.
+	 * @return array{checked:bool,coverage:string,reason_code:?string,summaries:list<array<string,mixed>>}
+	 */
+	public static function logs_for_families( array $families, int $now, int $since_hours, \DateTimeZone $tz ): array {
+		try {
+			$woo     = current_user_can( 'manage_woocommerce' );
+			$allowed = $woo && Settings::can_view_diagnostics(); // Checked before any log read.
+		} catch ( \Throwable $e ) {
+			$woo     = false;
+			$allowed = false;
+		}
+		$denied = array(
+			'checked'     => false,
+			'coverage'    => 'unavailable',
+			'reason_code' => 'diagnostics_denied',
+		);
+		if ( ! $woo ) {
+			return $denied + array( 'summaries' => array() );
+		}
+		$keys   = self::requested_families( $families );
+		$map    = null;
+		$shared = array();
+		try {
+			$map       = PaymentMethods::token_map();
+			$supported = array();
+			foreach ( $keys as $family ) {
+				$lists = self::log_lists( $map, $family );
+				if ( null !== $lists ) {
+					$supported[ $family ] = $lists;
+				}
+			}
+			$shared   = self::shared_sources( $supported );
+			$read     = array();
+			$readable = array_diff_key( $supported, $shared );
+			if ( $allowed && array() !== $readable ) {
+				$since = $now - max( 1, min( 168, $since_hours ) ) * 3600;
+				$read  = self::read_logs( $readable, $since, $now ); // A throwing reader lands in the catch below.
+			}
+			$summaries = array();
+			foreach ( $keys as $family ) {
+				if ( ! isset( $supported[ $family ] ) ) {
+					$summaries[] = self::summary( $family, false, false, 'not_applicable', 'no_supported_log_mapping' );
+				} elseif ( ! $allowed ) {
+					$summaries[] = self::summary( $family, false, true, 'unavailable', 'diagnostics_denied' );
+				} elseif ( isset( $shared[ $family ] ) ) {
+					$summaries[] = self::summary( $family, false, true, 'unavailable', 'shared_log_source' );
+				} else {
+					$summaries[] = self::log_summary( $family, $read[ $family ] ?? null, $tz );
+				}
+			}
+		} catch ( \Throwable $e ) {
+			// Fail closed per family, so a supported family that was not read stays visible as an
+			// applicable, unread row. Without a token map, support cannot be ruled out, so every
+			// requested family counts as supported and unread.
+			$summaries = array();
+			foreach ( $keys as $family ) {
+				if ( is_array( $map ) && null === self::log_lists( $map, $family ) ) {
+					$summaries[] = self::summary( $family, false, false, 'not_applicable', 'no_supported_log_mapping' );
+				} elseif ( ! $allowed ) {
+					$summaries[] = self::summary( $family, false, true, 'unavailable', 'diagnostics_denied' );
+				} else {
+					$summaries[] = self::summary( $family, false, true, 'unavailable', isset( $shared[ $family ] ) ? 'shared_log_source' : 'source_read_failed' );
+				}
+			}
+		}
+		return ( $allowed ? self::logs_rollup( $summaries ) : $denied ) + array( 'summaries' => $summaries );
+	}
+
+	/**
+	 * Families whose log source tokens are also another family's (family => true). Their entries
+	 * cannot be attributed to one family, so neither log view reads them (ruling Q2(b)).
+	 *
+	 * @param array<int|string,mixed> $families Family => token-map lists.
+	 * @return array<int|string,bool>
+	 */
+	private static function shared_sources( array $families ): array {
+		$owners = array();
+		foreach ( $families as $family => $lists ) {
+			foreach ( is_array( $lists ) && is_array( $lists['log_sources'] ?? null ) ? $lists['log_sources'] : array() as $token ) {
+				$owners[ (string) $token ][ (string) $family ] = true;
+			}
+		}
+		$shared = array();
+		foreach ( $owners as $holders ) {
+			if ( count( $holders ) > 1 ) {
+				$shared += $holders;
+			}
+		}
+		return $shared;
+	}
+
+	/**
+	 * A family's token-map lists when it has verified log sources, else null.
+	 *
+	 * @param array<string,mixed> $map    PaymentMethods::token_map().
+	 * @param string              $family Family key.
+	 * @return array<string,mixed>|null
+	 */
+	private static function log_lists( array $map, string $family ): ?array {
+		$lists = $map[ $family ] ?? null;
+		return is_array( $lists ) && is_array( $lists['log_sources'] ?? null ) && array() !== $lists['log_sources'] ? $lists : null;
+	}
+
+	/**
+	 * One family's C8 LogSummary from its shared-reader result (pure; null means no result).
+	 *
+	 * @param string                   $family Family key.
+	 * @param array<string,mixed>|null $r      read_logs() result for the family.
+	 * @param \DateTimeZone            $tz     Store timezone.
+	 * @return array<string,mixed>
+	 */
+	public static function log_summary( string $family, ?array $r, \DateTimeZone $tz ): array {
+		if ( null === $r ) {
+			return self::summary( $family, false, true, 'unavailable', 'source_read_failed' );
+		}
+		$reason = self::summary_reason( $r );
+		if ( empty( $r['ok'] ) ) {
+			return self::summary( $family, false, true, 'unavailable', $reason );
+		}
+		$complete = ! empty( $r['complete'] );
+		$count    = max( 0, (int) ( $r['count'] ?? 0 ) );
+		$by       = array();
+		foreach ( is_array( $r['groups'] ?? null ) ? $r['groups'] : array() as $g ) {
+			$cat = is_array( $g ) ? ( $g['category'] ?? null ) : null;
+			$n   = is_array( $g ) ? (int) ( $g['count'] ?? 0 ) : 0;
+			if ( ! in_array( $cat, self::LOG_CATEGORIES, true ) || $n <= 0 ) {
+				continue;
+			}
+			$first = is_int( $g['first'] ?? null ) ? $g['first'] : null;
+			$last  = is_int( $g['last'] ?? null ) ? $g['last'] : null;
+			if ( isset( $by[ $cat ] ) ) {
+				$n    += $by[ $cat ]['count'];
+				$first = null === $first ? $by[ $cat ]['first'] : ( null === $by[ $cat ]['first'] ? $first : min( $first, $by[ $cat ]['first'] ) );
+				$last  = null === $last ? $by[ $cat ]['last'] : ( null === $by[ $cat ]['last'] ? $last : max( $last, $by[ $cat ]['last'] ) );
+			}
+			$by[ $cat ] = array(
+				'count' => $n,
+				'first' => $first,
+				'last'  => $last,
+			);
+		}
+		$categories = array();
+		foreach ( self::LOG_CATEGORIES as $cat ) {
+			if ( isset( $by[ $cat ] ) ) {
+				$categories[] = array(
+					'category'   => $cat,
+					'count'      => $by[ $cat ]['count'],
+					'first_seen' => null === $by[ $cat ]['first'] ? null : PaymentRules::iso( $by[ $cat ]['first'], $tz ),
+					'last_seen'  => null === $by[ $cat ]['last'] ? null : PaymentRules::iso( $by[ $cat ]['last'], $tz ),
+				);
+			}
+		}
+		// A partial read that observed nothing says nothing: null, never a checked zero.
+		$value  = $complete || $count > 0 ? $count : null;
+		$source = in_array( $r['source_label'] ?? null, self::SOURCE_LABELS, true ) ? $r['source_label'] : null;
+		return self::summary( $family, true, true, $complete ? 'complete' : 'partial', $complete ? null : $reason, $source, $value, ! $complete && null !== $value, $categories );
+	}
+
+	/**
+	 * Top-level log coverage over the summaries (pure). Not-applicable summaries are disclosed in
+	 * their own rows and do not lower coverage; nothing applicable is not_applicable.
+	 *
+	 * @param array<int,array<string,mixed>> $summaries LogSummary rows.
+	 * @return array{checked:bool,coverage:string,reason_code:?string}
+	 */
+	public static function logs_rollup( array $summaries ): array {
+		$applicable = array_values( array_filter( $summaries, static fn( $s ): bool => is_array( $s ) && ! empty( $s['applicable'] ) ) );
+		if ( array() === $applicable ) {
+			return array(
+				'checked'     => false,
+				'coverage'    => 'not_applicable',
+				'reason_code' => 'no_supported_log_mapping',
+			);
+		}
+		$checked = false;
+		$gap     = null;
+		foreach ( $applicable as $s ) {
+			$checked = $checked || ! empty( $s['checked'] );
+			if ( 'complete' !== ( $s['coverage'] ?? null ) && null === $gap ) {
+				$gap = is_string( $s['reason_code'] ?? null ) ? $s['reason_code'] : 'source_read_failed';
+			}
+		}
+		if ( null === $gap ) {
+			$coverage = 'complete';
+		} else {
+			$coverage = $checked ? 'partial' : 'unavailable';
+		}
+		return array(
+			'checked'     => $checked,
+			'coverage'    => $coverage,
+			'reason_code' => $gap,
+		);
+	}
+
+	/**
+	 * Plain-word reason for a log summary code, translated; null for null.
+	 *
+	 * @param string|null $code Reason code.
+	 */
+	public static function log_reason( ?string $code ): ?string {
+		if ( null === $code || '' === $code ) {
+			return null;
+		}
+		switch ( $code ) {
+			case 'diagnostics_denied':
+				return __( 'Not checked: your role is not allowed to see store diagnostics. A store administrator can check the payment plugin\'s logs.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'no_supported_log_mapping':
+				return __( 'This payment plugin\'s logs are not supported yet, so they were not checked. This does not mean it logged no errors.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'shared_log_source':
+				return __( 'This payment plugin\'s log is also linked to another payment plugin, so its errors could not be told apart and were not counted.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'logging_unavailable':
+				return __( 'WooCommerce logging could not be read, so payment plugin errors were not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'logging_disabled':
+				return __( 'WooCommerce logging is switched off, so payment plugin errors were not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'unsupported_log_handler':
+				return __( 'WooCommerce saves its logs in a way this check cannot read, so payment plugin errors were not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'logging_threshold_above_error':
+				return __( 'WooCommerce logging is set to skip ordinary errors, so payment plugin errors were not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'stale_retention':
+				return __( 'WooCommerce keeps logs for less time than this window, so older errors may be missing from the count.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'log_directory_unavailable':
+				return __( 'The WooCommerce log folder could not be read, so payment plugin errors were not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'no_matching_log_source':
+				return __( 'No log from this payment plugin was found for this window, so its errors were not checked.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'file_unreadable':
+				return __( 'A payment plugin log could not be read, so some errors may not have been counted.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'file_cap':
+				return __( 'There were more log files than this check reads at once, so some errors may not have been counted.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'byte_cap':
+				return __( 'Only part of the logs was read (size limit reached), so some errors may not have been counted.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'log_row_cap':
+				return __( 'The payment plugin\'s log had more recent entries than this check reads at once, so some errors may not have been counted.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'unparsed_entries':
+				return __( 'Some log entries were not in a format this check can read, so some errors may not have been counted.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'source_read_failed':
+				return __( 'The payment plugin\'s log could not be read.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case self::DECLINE_DETECTION_UNSUPPORTED:
+				return __( 'Payment plugin logs are checked for errors only. Declined cards are not read from the logs in this version, so logged errors point to a possible payment fault, not to card testing.', 'blaze-mcp-toolkit-for-woocommerce' );
+		}
+		return __( 'This log check could not be completed.', 'blaze-mcp-toolkit-for-woocommerce' );
+	}
+
+	/**
+	 * Valid, unique, sorted family keys from a list of keys or a family => lists map.
+	 *
+	 * @param array<int|string,mixed> $families Input.
+	 * @return string[]
+	 */
+	private static function requested_families( array $families ): array {
+		$keys = array();
+		foreach ( $families as $key => $value ) {
+			if ( is_array( $value ) ) {
+				$family = is_string( $key ) ? $key : null; // Map form: only string keys name a family.
+			} elseif ( is_string( $value ) || is_int( $value ) ) {
+				$family = (string) $value;
+			} else {
+				$family = null;
+			}
+			if ( null !== $family && 1 === preg_match( self::FAMILY_KEY, $family ) ) {
+				$keys[ $family ] = true;
+			}
+		}
+		$keys = array_map( 'strval', array_keys( $keys ) );
+		sort( $keys, SORT_STRING );
+		return $keys;
+	}
+
+	/**
+	 * The most specific reason for a reader result: the card-only `gap` where the shared `reason`
+	 * folds an unreadable file into file_cap or a cut-off source into no_matching_log_source.
+	 *
+	 * @param array<string,mixed> $r Reader result.
+	 */
+	private static function summary_reason( array $r ): string {
+		foreach ( array( $r['gap'] ?? null, $r['reason'] ?? null ) as $code ) {
+			if ( is_string( $code ) && in_array( $code, self::LOG_SUMMARY_REASONS, true ) ) {
+				return $code;
+			}
+		}
+		return 'source_read_failed';
+	}
+
+	/**
+	 * One C8 LogSummary row (Check fields first).
+	 *
+	 * @param string                           $family      Family key.
+	 * @param bool                             $checked     Some log data was read.
+	 * @param bool                             $applicable  A supported log source applies.
+	 * @param string                           $coverage    complete|partial|unavailable|not_applicable.
+	 * @param string|null                      $reason_code Fixed reason code.
+	 * @param string|null                      $source      Source label.
+	 * @param int|null                         $count       Entry count (null when unknown).
+	 * @param bool                             $lower_bound The count is a lower bound.
+	 * @param array<int,array<string,mixed>>   $categories  Category rows.
+	 * @return array<string,mixed>
+	 */
+	private static function summary( string $family, bool $checked, bool $applicable, string $coverage, ?string $reason_code, ?string $source = null, ?int $count = null, bool $lower_bound = false, array $categories = array() ): array {
+		try {
+			$reason = self::log_reason( $reason_code );
+		} catch ( \Throwable $e ) {
+			$reason = null; // A failing translation filter never removes the row or its code.
+		}
+		return array(
+			'checked'     => $checked,
+			'applicable'  => $applicable,
+			'coverage'    => $coverage,
+			'reason_code' => $reason_code,
+			'reason'      => $reason,
+			'family'      => $family,
+			'source'      => $source,
+			'count'       => array(
+				'value'       => $count,
+				'lower_bound' => $lower_bound,
+			),
+			'categories'  => $categories,
+		);
+	}
+
 	// ------------------------------------------------------------------ logs.
 
 	/**
@@ -147,9 +529,10 @@ final class PaymentErrors {
 	 * @param array<string,array<string,mixed>>|null $logs        Per-family results.
 	 * @param \DateTimeZone                          $tz          Store timezone.
 	 * @param int                                    $groups_left Response-wide group budget (by reference).
+	 * @param bool                                   $shared      The family's log source is also another family's (not read).
 	 * @return array<string,mixed>
 	 */
-	private static function log_check( bool $allowed, bool $manual, ?string $family, ?array $logs, \DateTimeZone $tz, int &$groups_left ): array {
+	private static function log_check( bool $allowed, bool $manual, ?string $family, ?array $logs, \DateTimeZone $tz, int &$groups_left, bool $shared = false ): array {
 		$base = array(
 			'count'                => null,
 			'count_is_lower_bound' => false,
@@ -167,6 +550,11 @@ final class PaymentErrors {
 		}
 		if ( ! $allowed ) {
 			return self::check( 'unknown', false, true, 'unavailable', 'diagnostics_not_permitted' ) + $base;
+		}
+		if ( $shared ) {
+			// Ruling Q2(b): entries of a shared source belong to no one family, so this is unknown,
+			// never another family's count and never a complete zero.
+			return self::check( 'unknown', false, true, 'unavailable', 'shared_log_source' ) + $base;
 		}
 		if ( ! isset( $logs[ $family ] ) ) {
 			return self::check( 'unknown', false, true, 'unavailable', 'source_read_failed' ) + $base;
@@ -419,6 +807,9 @@ final class PaymentErrors {
 				'groups'           => array(),
 				'files'            => 0,
 				'source_label'     => 'woocommerce_log_file',
+				// Card summaries only (log_check() never copies it): `reason` above reports an
+				// unreadable matching file as file_cap.
+				'gap'              => $found['ok'] && 'file_unreadable' === $found['reason'] ? 'file_unreadable' : null,
 			);
 			foreach ( $found['files'] as $file ) {
 				if ( isset( $seen[ $file['path'] ] ) ) {
@@ -466,10 +857,12 @@ final class PaymentErrors {
 		}
 		foreach ( $out as $f => $r ) {
 			if ( $r['ok'] && 0 === $r['files'] ) {
-				// No matching source file: unavailable, not an empty healthy log.
+				// No matching source file: unavailable, not an empty healthy log. The card-only gap
+				// keeps why, when matching files existed but were cut by the file cap or unreadable.
 				$out[ $f ] = array(
 					'ok'     => false,
 					'reason' => 'no_matching_log_source',
+					'gap'    => $r['gap'] ?? ( in_array( $r['reason'], array( 'file_cap', 'file_unreadable' ), true ) ? $r['reason'] : null ),
 				);
 				continue;
 			}
@@ -480,6 +873,7 @@ final class PaymentErrors {
 				$out[ $f ] = array(
 					'ok'     => false,
 					'reason' => 'unparsed_entries',
+					'gap'    => $r['gap'] ?? null,
 				);
 				continue;
 			}

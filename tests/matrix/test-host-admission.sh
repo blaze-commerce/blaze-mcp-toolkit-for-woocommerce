@@ -179,12 +179,19 @@ out=$(ha_foreign_wpenv)
 rc=$?
 eq "the owner's port-8888 wp-env is refused (rc 1)" 1 "$rc"
 eq '  ... named with its port (and its tests container on 8889), each once' '86c7-wordpress-1:8888 86c7-tests-wordpress-1:8889' "$out"
-printf '%s\n' 'a1-wordpress-1|0.0.0.0:8896->80/tcp' 'a1-tests-wordpress-1|0.0.0.0:8897->80/tcp' 'b2-wordpress-1|0.0.0.0:8890->80/tcp' 'c3-tests-wordpress-1|0.0.0.0:8901->80/tcp' 'd4-tests-wordpress-1|0.0.0.0:8903->80/tcp' 'a1-mysql-1|0.0.0.0:55001->3306/tcp' 'a1-cli-1|' 'other-db|0.0.0.0:5432->5432/tcp' >"$STUB/docker-ps"
+printf '%s\n' 'a1-wordpress-1|0.0.0.0:8896->80/tcp' 'a1-tests-wordpress-1|0.0.0.0:8897->80/tcp' 'b2-wordpress-1|0.0.0.0:8890->80/tcp' 'c3-tests-wordpress-1|0.0.0.0:8901->80/tcp' 'd4-tests-wordpress-1|0.0.0.0:8903->80/tcp' 'e5-wordpress-1|0.0.0.0:8904->80/tcp' 'e5-tests-wordpress-1|0.0.0.0:8905->80/tcp' 'a1-mysql-1|0.0.0.0:55001->3306/tcp' 'a1-cli-1|' 'other-db|0.0.0.0:5432->5432/tcp' >"$STUB/docker-ps"
 out=$(ha_foreign_wpenv)
-eq "the matrix states' own ports 8890-8903 are allowed; mysql, cli and other containers ignored" '0 []' "$? [$out]"
-printf '%s\n' 'x-wordpress-1|0.0.0.0:8904->80/tcp' >"$STUB/docker-ps"
+eq "the matrix states' own ports 8890-8905 (easy-2.5.2 on 8904/8905) are allowed; mysql, cli and other containers ignored" '0 []' "$? [$out]"
+printf '%s\n' 'x-wordpress-1|0.0.0.0:8906->80/tcp' >"$STUB/docker-ps"
 out=$(ha_foreign_wpenv)
-eq 'port 8904 (just outside the matrix range) is refused' '1 x-wordpress-1:8904' "$? $out"
+eq 'port 8906 (just outside the matrix range) is refused' '1 x-wordpress-1:8906' "$? $out"
+# Every state config's ports lie inside the allowed range, and no two states share a port (the
+# range is the configs' own, so a new state outside it fails here before any matrix run).
+cfg_ports=$(cat "$REPO"/tests/matrix/*.wp-env.json | sed -nE 's/.*"(port|testsPort)": *([0-9]+).*/\2/p' | sort -n)
+eq 'the 8 state configs carry 16 ports' 16 "$(printf '%s\n' $cfg_ports | grep -c .)"
+eq 'every state config port is inside 8890-8905' '' "$(for p in $cfg_ports; do if [ "$p" -lt "$HA_MATRIX_PORT_MIN" ] || [ "$p" -gt "$HA_MATRIX_PORT_MAX" ]; then printf '%s ' "$p"; fi; done)"
+eq 'no two state configs share a port' '' "$(printf '%s\n' $cfg_ports | uniq -d | tr '\n' ' ')"
+eq 'the easy-2.5.2 state listens on 8904 and 8905' '8904 8905' "$(sed -nE 's/.*"(port|testsPort)": *([0-9]+).*/\2/p' "$REPO"/tests/matrix/easy-2.5.2.wp-env.json | tr '\n' ' ' | sed 's/ $//')"
 printf '%s\n' 'y_wordpress_1|127.0.0.1:8889->80/tcp' >"$STUB/docker-ps"
 out=$(ha_foreign_wpenv)
 eq 'port 8889 (just below, older underscore naming) is refused' '1 y_wordpress_1:8889' "$? $out"
@@ -220,7 +227,7 @@ mkdir -p "$FAKE/tests/matrix" "$FAKE/tests/Integration" "$FAKE/node_modules/.bin
 cp "$REPO/tests/matrix/run-matrix.sh" "$REPO/tests/matrix/host-admission.sh" "$FAKE/tests/matrix/"
 printf '%s\n' '#!/bin/sh' 'echo "wp-env must not run in this test" >&2' 'exit 1' >"$FAKE/node_modules/.bin/wp-env"
 chmod +x "$FAKE/node_modules/.bin/wp-env"
-touch "$FAKE/tests/Integration/test-payment-orders.php" "$FAKE/tests/Integration/test-payment-health.php"
+touch "$FAKE/tests/Integration/test-payment-orders.php" "$FAKE/tests/Integration/test-payment-health.php" "$FAKE/tests/Integration/test-card-testing-orders.php" "$FAKE/tests/Integration/test-card-testing.php"
 echo 'not a zip' >"$WORK/candidate.zip"
 leftover() { ps -A -o command= 2>/dev/null | grep -F "$FAKE/tests/matrix/run-matrix.sh" | grep -v grep; }
 
@@ -291,6 +298,25 @@ not 'run-matrix gates no admission step behind a variable' grep -nE '^[[:space:]
 yes 'run-matrix stops the sampler on EXIT, INT and TERM' grep -q "^trap 'ha_sampler_stop' EXIT$" "$RM"
 yes '  ... INT' grep -q "^trap 'ha_sampler_stop; exit 130' INT$" "$RM"
 yes '  ... TERM' grep -q "^trap 'ha_sampler_stop; exit 143' TERM$" "$RM"
+# 1.3 (item 8): the card storage suites are required, the card performance phase runs inside the
+# performance admission, and a subset scope is explicit, never the release matrix.
+reset_stubs
+mv "$FAKE/tests/Integration/test-card-testing.php" "$WORK/held-card-suite.php"
+out=$(TMPDIR="$WORK/tmp" "$BASH" "$FAKE/tests/matrix/run-matrix.sh" "$WORK/candidate.zip" 2>&1)
+eq 'run-matrix: a missing card storage suite refuses the matrix before any admission (exit 1)' '1 yes' "$? $(grep -qF 'MATRIX FAILED: required storage suite test-card-testing.php does not exist' <<<"$out" && echo yes)"
+mv "$WORK/held-card-suite.php" "$FAKE/tests/Integration/test-card-testing.php"
+out=$(BLZMCP_MATRIX_SCOPE=subset TMPDIR="$WORK/tmp" "$BASH" "$FAKE/tests/matrix/run-matrix.sh" "$WORK/candidate.zip" 2>&1)
+eq 'run-matrix: a subset scope without its states is refused (exit 1)' '1 yes' "$? $(grep -qF 'MATRIX FAILED: BLZMCP_MATRIX_SCOPE=subset needs BLZMCP_MATRIX_STATES' <<<"$out" && echo yes)"
+out=$(BLZMCP_MATRIX_SCOPE=partial TMPDIR="$WORK/tmp" "$BASH" "$FAKE/tests/matrix/run-matrix.sh" "$WORK/candidate.zip" 2>&1)
+eq 'run-matrix: an unknown scope is refused (exit 1)' '1 yes' "$? $(grep -qF "MATRIX FAILED: unknown BLZMCP_MATRIX_SCOPE 'partial'" <<<"$out" && echo yes)"
+out=$(BLZMCP_MATRIX_SCOPE=subset bash "$REPO/scripts/run-integration.sh" --matrix "$WORK/candidate.zip" 2>&1)
+eq 'run-integration --matrix refuses a subset scope (exit 2)' '2 yes' "$? $(grep -qF 'MATRIX FAILED: --matrix is the full release matrix' <<<"$out" && echo yes)"
+yes 'run-matrix lists all 8 release states, easy-2.5.2 included' grep -qF "FULL_STATES='recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 easy-2.5.2 both none'" "$RM"
+yes 'run-matrix prints a subset verdict that never contains MATRIX PASSED' grep -qF 'echo "MATRIX SUBSET PASSED (states: $STATES; not the release matrix)"' "$RM"
+card_perf_run=$(grep -n 'card-testing-perf-suite.sh"' "$RM" | head -1 | cut -d: -f1)
+yes 'the card performance phase runs inside the performance admission, after perf-suite.sh, with no second admission' before "$perf_run" "$card_perf_run"
+yes '  ... (one ha_wait_admitted perf call only)' [ "$(grep -c 'ha_wait_admitted perf' "$RM")" -eq 1 ]
+yes 'the summary ends with END=<attempt> and names attempt, scope and date restarts' grep -qE '^	echo "END=\$ATTEMPT_ID"$' "$RM"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

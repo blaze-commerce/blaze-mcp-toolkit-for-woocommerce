@@ -10,6 +10,22 @@
 # post-storage cleanup leaves 3 tagged orders) | cleanup-short (it removes one order fewer than
 # were seeded) | cleanup-silent (no CLEANUP result) | diag-leftover (diagnostics cleanup leaves 2
 # fixture jobs) | restore-fail (the final switch back to the original storage fails).
+#
+# 1.3 card workload (tests/matrix/test-card-testing-perf-suite.sh; the modes above that are about
+# cleanup and the storage restore apply to it too): card-seed-fail (the first hpos card-orders
+# chunk fails) | card-verify-fail (card-verify on hpos is not ok) | card-undetected-<orders|logs>
+# (that forced probe comes back as a success) | card-bound-fail (the hpos 5,001-network bound case
+# fails its assertions) | card-interrupt (the first hpos trial touches $FAKE_DIR/interrupt-ready
+# and waits 2 s, so the test can interrupt the suite there). FAKE_CARD_TIMES, a list of
+# <storage>/<window>/<logger>=<t1>,<t2>,... entries, sets the n-th normal trial's elapsed_ms of
+# that partition ("invalid" makes it fail its orders reader, "null" drops its elapsed_ms).
+# Workflow and Analytics (1.3 wave 3), each on hpos only: card-analytics-not-ready (the guard still
+# reports orders_not_imported after the import) | card-import-short (the import's first chunk
+# imports one order fewer than it was given) | card-analytics-leftover (the cleanup after the
+# trials leaves 2 Analytics rows) | card-workflow-unplanned (the plan leaves the order totals out:
+# 2 step records, ok false) | card-workflow-failed (the order totals step fails with
+# blzmcp_analytics_unavailable while the measurement still says ok, the R1 hole) |
+# card-workflow-reordered (card testing and order totals swapped, still saying ok).
 set -uo pipefail
 
 FAKE_DIR=${FAKE_DIR:?FAKE_DIR}
@@ -73,9 +89,19 @@ seed-payment-volume.php)
 		removed=$seeded
 		[ "$MODE" == cleanup-leftover ] && [ "$seeded" -gt 0 ] && left=3 && removed=$((seeded - 3))
 		[ "$MODE" == cleanup-short ] && [ "$seeded" -gt 0 ] && removed=$((seeded - 1))
+		# Analytics rows an import wrote (card-analytics-import) are removed with the orders.
+		stats=0
+		if compgen -G "$FAKE_DIR/imported.*" >/dev/null; then
+			stats=$(cat "$FAKE_DIR"/imported.* | paste -sd+ - | bc)
+			rm -f "$FAKE_DIR"/imported.*
+		fi
+		rows_left=0
+		[ "$MODE" == card-analytics-leftover ] && [ "$storage" == hpos ] && [ "$stats" -gt 0 ] && rows_left=2
+		customers=0
+		[ "$stats" -gt 0 ] && customers=50
 		echo "REMOVED=$removed"
 		[ "$MODE" == cleanup-silent ] && exit 0
-		echo "CLEANUP={\"mode\":\"orders\",\"orders_removed\":$removed,\"tagged_remaining\":$left,\"diag_log_rows_remaining\":0,\"diag_log_files_remaining\":0,\"diag_jobs_remaining\":0,\"settings_restored\":true,\"ok\":$([ "$left" == 0 ] && echo true || echo false)}"
+		echo "CLEANUP={\"mode\":\"orders\",\"orders_removed\":$removed,\"tagged_remaining\":$left,\"diag_log_rows_remaining\":0,\"diag_log_files_remaining\":0,\"diag_jobs_remaining\":0,\"settings_restored\":true,\"analytics_stats_removed\":$((stats - rows_left)),\"analytics_lookup_rows_removed\":0,\"analytics_customers_removed\":$customers,\"import_jobs_removed\":0,\"failed_imports_cleared\":0,\"analytics_cache_cleared\":true,\"analytics_rows_remaining\":$rows_left,\"analytics_customers_remaining\":0,\"import_jobs_remaining\":0,\"failed_imports_remaining\":0,\"ok\":$([ "$left" == 0 ] && [ "$rows_left" == 0 ] && echo true || echo false)}"
 		;;
 	diag-cleanup)
 		jobs=0
@@ -84,6 +110,95 @@ seed-payment-volume.php)
 		echo "CLEANUP={\"mode\":\"diagnostics\",\"orders_removed\":null,\"tagged_remaining\":0,\"diag_log_rows_remaining\":0,\"diag_log_files_remaining\":0,\"diag_jobs_remaining\":$jobs,\"settings_restored\":true,\"ok\":$([ "$jobs" == 0 ] && echo true || echo false)}"
 		;;
 	distribution) echo 'DISTRIBUTION={"cycle":20}' ;;
+	card-settings) echo 'CARD_SETTINGS={"ok":true,"options":["woocommerce_stripe_settings","woocommerce_woocommerce_payments_settings","woocommerce_square_credit_card_settings","woocommerce_feature_order_attribution_enabled"],"kinds":{"stripe":"instant","woocommerce_payments":"instant","square_credit_card":"instant"},"stripe_mode":"live"}' ;;
+	card-orders | card-old | card-cap-methods | card-cap-networks)
+		if [ "$MODE" == card-seed-fail ] && [ "$1" == card-orders ] && [ "$2" == 0 ] && [ "$storage" == hpos ]; then
+			echo "seeding failed" >&2
+			exit 1
+		fi
+		echo "$3" >"$FAKE_DIR/seeded.$1.$2"
+		echo "SEEDED=$3"
+		;;
+	card-verify)
+		ok=true
+		[ "$MODE" == card-verify-fail ] && [ "$storage" == hpos ] && ok=false
+		echo "CARD_VERIFY={\"ok\":$ok,\"authority\":\"$storage\",\"orders\":$(($2 + $3)),\"expected\":$(($2 + $3)),\"recent\":$2,\"old\":$3,\"crud_sample\":35,\"crud_ok\":35,\"crud_mismatch\":[],\"untagged\":0,\"checks\":{\"orders\":true,\"crud\":$ok}}"
+		;;
+	card-distribution) echo "CARD_DISTRIBUTION={\"orders\":$2,\"old_orders\":$3,\"methods\":[\"stripe\",\"woocommerce_payments\",\"square_credit_card\"],\"drafts\":3486,\"missing_origin\":2848,\"store_api_origin\":4200,\"other_origin\":1400,\"bursts\":{\"a\":150,\"b\":150,\"c\":60}}" ;;
+	card-analytics-eligible) echo "CARD_ANALYTICS_ELIGIBLE=34720" ;;
+	card-analytics-import)
+		n=$3
+		[ "$MODE" == card-import-short ] && [ "$storage" == hpos ] && [ "$2" == 0 ] && n=$(($3 - 1))
+		echo "$n" >"$FAKE_DIR/imported.$2"
+		echo "IMPORTED=$n"
+		echo "FAILED_IMPORTS=0"
+		;;
+	card-analytics-ready)
+		stats=0
+		compgen -G "$FAKE_DIR/imported.*" >/dev/null && stats=$(cat "$FAKE_DIR"/imported.* | paste -sd+ - | bc)
+		reason=null
+		[ "$MODE" == card-analytics-not-ready ] && [ "$storage" == hpos ] && reason='"orders_not_imported"'
+		[ "$stats" != 34720 ] && reason='"orders_not_imported"'
+		ok=false
+		[ "$reason" == null ] && ok=true
+		echo "CARD_ANALYTICS_READY={\"period\":\"$3\",\"compare\":true,\"reason\":$reason,\"cache_cleared\":true,\"eligible\":34720,\"stats_rows\":$stats,\"missing\":$((34720 - stats)),\"failed_imports\":0,\"pending_import_jobs\":0,\"counted_statuses\":[\"wc-processing\",\"wc-completed\",\"wc-on-hold\",\"wc-refunded\"],\"date_basis\":\"date_paid\",\"windows\":[\"2026-11-22..2026-11-28\",\"2026-11-15..2026-11-21\"],\"ok\":$ok}"
+		;;
+	esac
+	;;
+measure-card-testing.php)
+	case "$1" in
+	trial)
+		window=$2 force=${7:-}
+		readers='{"response":true,"workload":true,"orders":true,"methods":true,"signals":true,"logs":true}'
+		if [ -n "$force" ]; then
+			if [ "$MODE" == "card-undetected-$force" ]; then
+				echo "MEASURE={\"ok\":true,\"forced\":\"$force\",\"detected\":false,\"elapsed_ms\":90,\"validation\":{\"readers\":$readers,\"failures\":[]}}"
+			else
+				echo "MEASURE={\"ok\":false,\"forced\":\"$force\",\"detected\":true,\"elapsed_ms\":90,\"validation\":{\"readers\":$(jq -c --arg r "$force" '.[$r] = false' <<<"$readers"),\"failures\":[\"$force: forced\"]}}"
+			fi
+			exit 0
+		fi
+		cf="$FAKE_DIR/count.$storage.$window.$logger"
+		n=$(($(cat "$cf" 2>/dev/null || echo 0) + 1))
+		echo "$n" >"$cf"
+		if [ "$MODE" == card-interrupt ] && [ "$storage" == hpos ] && [ ! -f "$FAKE_DIR/interrupt-ready" ]; then
+			: >"$FAKE_DIR/interrupt-ready"
+			sleep 2
+		fi
+		v=''
+		for e in ${FAKE_CARD_TIMES:-}; do [ "${e%%=*}" == "$storage/$window/$logger" ] && v=$(cut -d, -f"$n" <<<"${e#*=}"); done
+		m="{\"ok\":true,\"forced\":null,\"detected\":null,\"since_hours\":$window,\"elapsed_ms\":120,\"warm_ms\":1.5,\"queries\":90,\"rows_examined\":64000,\"rows_selected\":12000,\"meta_rows\":63000,\"peak_memory_delta_bytes\":9000000,\"verdict\":\"likely_attack\",\"coverage\":\"partial\",\"slowest\":[{\"ms\":40,\"sql\":\"SELECT ?\",\"plan\":[{\"table\":\"o\",\"type\":\"range\",\"key\":\"k\",\"rows\":64000,\"extra\":null}]}],\"validation\":{\"readers\":$readers,\"failures\":[]},\"versions\":{\"php\":\"8.3.0\",\"wp\":\"7.1.5\",\"wc\":\"11.3.1\",\"db\":\"11.4.0-MariaDB\",\"cache\":\"none\"}}"
+		case "$v" in
+		'') ;;
+		invalid) m=$(jq -c '.ok = false | .validation.readers.orders = false | .validation.failures = ["orders: totals.failed_unpaid 3, expected 4"]' <<<"$m") ;;
+		null) m=$(jq -c 'del(.elapsed_ms)' <<<"$m") ;;
+		*) m=$(jq -c --argjson v "$v" '.elapsed_ms = $v' <<<"$m") ;;
+		esac
+		echo "MEASURE=$m"
+		;;
+	bound)
+		ok=true
+		[ "$MODE" == card-bound-fail ] && [ "$storage" == hpos ] && [ "$2" == networks ] && [ "$3" == 5001 ] && ok=false
+		echo "BOUND={\"case\":\"$2\",\"k\":$3,\"ok\":$ok,\"failures\":$([ "$ok" == true ] && echo '[]' || echo '["above the cap: network_cap limitation no"]'),\"observed\":{\"coverage\":\"partial\"},\"elapsed_ms\":800,\"queries\":1100,\"counted_as_trial\":false}"
+		;;
+	workflow)
+		# The plan's own first 3 steps, each a full step record; the modes change it on hpos only.
+		step() { # position ability arguments elapsed success error_code
+			printf '{"position":%s,"ability":"%s","planned":true,"plan_arguments":%s,"arguments":%s,"available":true,"elapsed_ms":%s,"queries":40,"success":%s,"error_code":%s}' "$1" "$2" "$3" "$3" "$4" "$5" "$6"
+		}
+		ph=$(step 0 blaze-mcp-toolkit/payment-health '{"since_hours":168}' 300 true null)
+		ct=$(step 1 blaze-mcp-toolkit/card-testing '{"since_hours":168}' 400 true null)
+		ta=$(step 2 wc-analytics/totals '{"subject":"orders","period":"last_7_days","compare":true}' 50 true null)
+		steps="[$ph,$ct,$ta]" ok=true failures='[]' total=750
+		if [ "$storage" == hpos ]; then
+			case "$MODE" in
+			card-workflow-unplanned) steps="[$ph,$ct]" ok=false total=700 failures='["2 step records, expected exactly the 3 planned steps","step 3 (wc-analytics/totals orders) missing"]' ;;
+			card-workflow-failed) steps="[$ph,$ct,$(step 2 wc-analytics/totals '{"subject":"orders","period":"last_7_days","compare":true}' 50 false '"blzmcp_analytics_unavailable"')]" ;;
+			card-workflow-reordered) steps="[$ph,$(step 1 wc-analytics/totals '{"subject":"orders","period":"last_7_days","compare":true}' 50 true null),$(step 2 blaze-mcp-toolkit/card-testing '{"since_hours":168}' 400 true null)]" ;;
+			esac
+		fi
+		echo "WORKFLOW={\"workflow\":\"blaze-mcp-toolkit/weekly-store-review\",\"period\":\"${2:-}\",\"plan_period\":\"${2:-}\",\"plan_ok\":true,\"plan_ms\":120,\"plan_steps_total\":10,\"gap_cache_cleared\":true,\"steps\":$steps,\"total_ms\":$total,\"failures\":$failures,\"ok\":$ok,\"pooled_budget\":false}"
+		;;
 	esac
 	;;
 measure-outside-cap.php)

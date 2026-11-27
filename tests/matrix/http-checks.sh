@@ -99,8 +99,9 @@ call_refusal() {
 	fi
 }
 
-# Method facts of the payment fixture that a denied caller must never receive, in a body or an error.
-BLZMCP_METHOD_FACTS='blzmcp_phone|blzmcp_gone|taken_28d|outside_checkout_observed|inventory_only|gateway_jobs_failed|gateway_job_failed'
+# Method facts of the payment fixture, and (1.3) the card-testing result's verdicts, counts,
+# protection and log facts, that a denied caller must never receive, in a body or an error.
+BLZMCP_METHOD_FACTS='blzmcp_phone|blzmcp_gone|taken_28d|outside_checkout_observed|inventory_only|gateway_jobs_failed|gateway_job_failed|likely_attack|possible_attack|failed_unpaid|baseline_attempt_orders|store_api_checkout|core_checkout_rate_limit|gateway_error|recorded networks'
 
 # blzmcp_leaks file: the method-fact check (REVIEW-pass4b R4). Defined here, in the helper the suite
 # sources before any case runs, so the none branch and the Easy override reach it too; the

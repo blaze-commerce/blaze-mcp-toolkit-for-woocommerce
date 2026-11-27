@@ -153,6 +153,7 @@ try {
 		'wp_abilities_api_categories_init',
 		'wp_abilities_api_init',
 		'wp_register_ability_args',
+		'wp_ability_validate_input', // Abilities API input validation: the card-testing check rejects raw non-integer hours (WordPress 7.1+).
 		'rest_endpoints', // REST-only filter: RequestContext wraps connector route callbacks.
 		'upgrader_process_complete',
 		'upgrader_pre_install',

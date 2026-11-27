@@ -23,14 +23,27 @@
 # Every state runs inside one site-local reporting date (tests/matrix/.window). If a state seeds
 # on a different date than the first one, the whole matrix is reseeded once from the start.
 #
-# Env: BLZMCP_MATRIX_STATES  space-separated subset (default: all seven, in order; record.sh fails a
-#                            subset as incomplete evidence)
+# 1.3 (FEATURE-PLAN items 8 and 9): the storage loop also runs the card-testing orders and ability
+# suites (4 suites per combination); the HTTP suite prints CARD_ROW lines for the card-testing cases
+# (tests/matrix/card-testing-http.sh), collected as CARD= lines; in recommended, straight after the
+# payment-health performance phase and inside the same admission, the card-testing performance
+# workload runs (tests/matrix/card-testing-perf-suite.sh) and its receipt is CARD_PERF_FILE. The
+# summary names its attempt (ATTEMPT), scope and date restarts, and its last line is END=<attempt>.
+#
+# Env: BLZMCP_MATRIX_SCOPE   full (default: the release matrix, every state) or subset (the branch
+#                            merge gate of owner decision D1: only BLZMCP_MATRIX_STATES, which must
+#                            then be set and include recommended). A subset is recorded and
+#                            labelled as such (SUBSET PASSED, never MATRIX PASSED); it can never
+#                            qualify a release candidate. scripts/run-integration.sh --matrix refuses
+#                            a subset scope; --matrix-subset is its own entry point.
+#      BLZMCP_MATRIX_STATES  space-separated states (default: all eight, in order; with scope full,
+#                            record.sh fails a narrowed list as incomplete evidence)
 #      BLZMCP_MATRIX_KEEP=1  leave the environments running afterwards (default: wp-env stop)
 #      BLZMCP_MATRIX_TZ      site timezone for every state (default Australia/Melbourne)
 #
 # Host admission (ruling Q8, REVIEW-pass4e; tests/matrix/host-admission.sh), always on, no switch:
 # the matrix refuses to start while a wp-env WordPress container runs on a host port outside the
-# states' own 8890-8903; a background sampler appends `<UTC> host= ncpu= load1= load5=` every 60 s
+# states' own 8890-8905; a background sampler appends `<UTC> host= ncpu= load1= load5=` every 60 s
 # to $LOG_DIR/load-samples.txt for the whole run; before the first state and again immediately
 # before the performance phase it waits, sampling every 60 s inside this same run, until
 # load5 < 0.25 x N and load1 < 0.33 x N (N logical CPUs). It gives up after 12 hours with
@@ -45,7 +58,18 @@ case "$ZIP" in /*) ;; *) ZIP="$REPO/$ZIP" ;; esac
 WPE="$REPO/node_modules/.bin/wp-env"
 [ -x "$WPE" ] || { echo "MATRIX FAILED: $WPE missing (npm install)"; exit 1; }
 MATRIX_DIR=${BLZMCP_MATRIX_DIR:-$HOME/.blzmcp-matrix}
-STATES=${BLZMCP_MATRIX_STATES:-recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 both none}
+FULL_STATES='recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 easy-2.5.2 both none'
+SCOPE=${BLZMCP_MATRIX_SCOPE:-full}
+case "$SCOPE" in
+full) STATES=${BLZMCP_MATRIX_STATES:-$FULL_STATES} ;;
+subset)
+	[ -n "${BLZMCP_MATRIX_STATES:-}" ] || { echo "MATRIX FAILED: BLZMCP_MATRIX_SCOPE=subset needs BLZMCP_MATRIX_STATES"; exit 1; }
+	STATES=$BLZMCP_MATRIX_STATES
+	;;
+*) echo "MATRIX FAILED: unknown BLZMCP_MATRIX_SCOPE '$SCOPE' (full or subset)"; exit 1 ;;
+esac
+# One attempt identity for the summary, the card performance receipt and the record (1.3).
+ATTEMPT_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
 TZ_NAME=${BLZMCP_MATRIX_TZ:-Australia/Melbourne}
 SLUG=blaze-mcp-toolkit-for-woocommerce
 T=wp-content/blzmcp-tests
@@ -56,10 +80,10 @@ export PATH="$REPO/node_modules/.bin:$PATH" # so frontend-curl.sh's `npx wp-env`
 # shared-invariant suites plus the connector-aware ones. None: lifecycle plus the none setup checks.
 # The storage suites run in the order-storage loop (every authority/sync combination, each switched
 # in one process and asserted in a fresh one), not in the plain list.
-STORAGE_SUITES="test-payment-orders.php test-payment-health.php"
+STORAGE_SUITES="test-payment-orders.php test-payment-health.php test-card-testing-orders.php test-card-testing.php"
 STORAGE_COMBOS="hpos:no hpos:yes legacy:yes legacy:no"
-ALL_SUITES=$(cd "$REPO/tests/Integration" && ls test-*.php | grep -vxF -e test-payment-orders.php -e test-payment-health.php | tr '\n' ' ')
-SHARED_SUITES="test-permission-matrix.php test-health-summary.php test-update-history.php test-access-check.php test-no-frontend.php test-uninstall.php test-bundled.php test-payment-methods.php test-payment-errors.php"
+ALL_SUITES=$(cd "$REPO/tests/Integration" && ls test-*.php | grep -vxF -e test-payment-orders.php -e test-payment-health.php -e test-card-testing-orders.php -e test-card-testing.php | tr '\n' ' ')
+SHARED_SUITES="test-permission-matrix.php test-health-summary.php test-update-history.php test-access-check.php test-no-frontend.php test-uninstall.php test-bundled.php test-payment-methods.php test-payment-errors.php test-card-testing-logs.php test-checkout-protection.php"
 CONNECTOR_SUITES="test-connectors.php test-connector-availability.php test-workflows.php test-setup-checks.php test-analytics-naming.php"
 suites_for() {
 	case "$1" in
@@ -89,7 +113,10 @@ sget() { # name state [default when unset]
 sadd() { sset "$1" "$2" $(($(sget "$1" "$2" 0) + $3)); }
 STORAGE_LINES=()
 TRANSPORT_LINES=()
+CARD_LINES=()
 PERF_FILE=''
+CARD_PERF_FILE=''
+COMMIT_SHA=$(git -C "$REPO" rev-parse HEAD)
 ZIP_SHA256=$(shasum -a 256 "$ZIP" | awk '{print $1}')
 CAND_VERSION=$(unzip -p "$ZIP" "$SLUG/$SLUG.php" | sed -n 's/^ \* Version:[[:space:]]*//p' | head -1 | tr -d '\r')
 for f in $STORAGE_SUITES; do
@@ -353,6 +380,9 @@ run_state() {
 	# The transport receipt rows (route x authority x principal x case), checked by record.sh.
 	while IFS= read -r line; do TRANSPORT_LINES+=("${line#TRANSPORT_ROW=}"); done < <(grep '^TRANSPORT_ROW=' "$LOG_DIR/$state-http.log")
 	echo "transport rows [$state]: $(grep -c '^TRANSPORT_ROW=.*|PASSED$' "$LOG_DIR/$state-http.log") passed, $(grep -c '^TRANSPORT_ROW=.*|FAILED$' "$LOG_DIR/$state-http.log") failed"
+	# The card-testing rows (1.3 item 8), their own row type, checked by record.sh the same way.
+	while IFS= read -r line; do CARD_LINES+=("${line#CARD_ROW=}"); done < <(grep '^CARD_ROW=' "$LOG_DIR/$state-http.log")
+	echo "card rows [$state]: $(grep -c '^CARD_ROW=.*|PASSED$' "$LOG_DIR/$state-http.log") passed, $(grep -c '^CARD_ROW=.*|FAILED$' "$LOG_DIR/$state-http.log") failed"
 	p=$(sed -E 's/^([0-9]+) passed.*/\1/' <<<"${summary:-0 passed}")
 	q=$(sed -E 's/.* ([0-9]+) failed.*/\1/' <<<"${summary:-x 1 failed}")
 	sadd PASSES "$state" "$p"
@@ -413,6 +443,23 @@ run_state() {
 				grep -E '^(partition|FAIL|CLEANUP)' "$LOG_DIR/$state-perf.log" | head -10
 				sadd FAILS "$state" 1
 			fi
+			# Card testing (1.3 item 9): its own workload and receipt, straight after payment health
+			# and inside the same admission (a second performance admission cannot qualify, Q8/Q9).
+			# The receipt is bound to this zip, the source commit and this attempt; record.sh decides
+			# it with card-testing-perf-validate.php on the raw trials. Any miss returns to the lead.
+			CARD_PERF_FILE="$LOG_DIR/card-performance.json"
+			wp action-scheduler migrate >>"$LOG_DIR/$state-start.log"
+			if WPE="$WPE" BLZMCP_T="$T" BLZMCP_CARD_PERF_OUT="$CARD_PERF_FILE" BLZMCP_PERF_CANDIDATE="$ZIP" \
+				BLZMCP_PERF_SOURCE_SHA="$COMMIT_SHA" BLZMCP_MATRIX_ATTEMPT="$ATTEMPT_ID" BLZMCP_PERF_REQUIRE_DBSTORE=1 \
+				BLZMCP_PERF_PORT="$port" BLZMCP_PERF_LOGIN=admin BLZMCP_PERF_APP_PASSWORD="$perf_secret" \
+				"$BASH" "$REPO/tests/matrix/card-testing-perf-suite.sh" >"$LOG_DIR/$state-card-perf.log" 2>&1; then
+				echo "PASS  [$state] card-testing-perf-suite.sh ($(grep -c '^partition' "$LOG_DIR/$state-card-perf.log") partitions under 1500 ms)"
+				sadd PASSES "$state" 1
+			else
+				echo "FAIL  [$state] card-testing-perf-suite.sh (card-testing cold budget; see card-performance.json)"
+				grep -E '^(partition|FAIL|CLEANUP|CARD PERF)' "$LOG_DIR/$state-card-perf.log" | head -10
+				sadd FAILS "$state" 1
+			fi
 		fi
 		unset perf_secret
 		if [ -n "$perf_id" ] && ! wp eval-file "$T/matrix/credentials.php" app-password revoke admin "$perf_id" >/dev/null; then
@@ -434,7 +481,9 @@ while :; do
 	restart=0
 	STORAGE_LINES=()
 	TRANSPORT_LINES=()
+	CARD_LINES=()
 	PERF_FILE=''
+	CARD_PERF_FILE=''
 	FIRST_DATE=''
 	for state in $STATES; do
 		[ -f "$REPO/tests/matrix/$state.wp-env.json" ] || { echo "INCOMPLETE COVERAGE: no config for $state"; sset RESULT "$state" FAILED; sset FAILS "$state" 1; continue; }
@@ -466,9 +515,14 @@ echo "Host load (ruling Q8): $HA_COUNT samples, max load1 $HA_MAX1, max load5 $H
 	echo "ZIP=$ZIP"
 	echo "ZIP_SHA256=$ZIP_SHA256"
 	echo "VERSION=$CAND_VERSION"
-	echo "COMMIT=$(git -C "$REPO" rev-parse HEAD)"
+	echo "COMMIT=$COMMIT_SHA"
+	echo "ATTEMPT=$ATTEMPT_ID"
+	echo "SCOPE=$SCOPE"
+	[ "$SCOPE" == subset ] && echo "SCOPE_STATES=$STATES"
+	echo "WINDOW_RESTARTS=$((attempt - 1))"
 	echo "WINDOW_FILE=$(ls "$LOG_DIR"/*.window 2>/dev/null | head -1)"
 	echo "PERF_FILE=$PERF_FILE"
+	echo "CARD_PERF_FILE=$CARD_PERF_FILE"
 	echo "HTTP_CHECKS=$HTTP_CHECKS"
 	echo "HOST=$HA_HOST"
 	for line in ${ADMISSION_LINES[@]+"${ADMISSION_LINES[@]}"}; do
@@ -486,8 +540,15 @@ echo "Host load (ruling Q8): $HA_COUNT samples, max load1 $HA_MAX1, max load5 $H
 	for line in ${TRANSPORT_LINES[@]+"${TRANSPORT_LINES[@]}"}; do
 		echo "TRANSPORT=$line"
 	done
+	for line in ${CARD_LINES[@]+"${CARD_LINES[@]}"}; do
+		echo "CARD=$line"
+	done
+	echo "END=$ATTEMPT_ID"
 } >"$LOG_DIR/summary.txt"
 "$BASH" "$REPO/tests/matrix/record.sh" "$LOG_DIR/summary.txt" "$([ "$fail" -eq 0 ] && echo PASSED || echo FAILED)" || fail=1
 echo "Logs: $LOG_DIR"
-if [ "$fail" -eq 0 ]; then echo "MATRIX PASSED"; else echo "MATRIX FAILED"; fi
+if [ "$SCOPE" == subset ]; then
+	# Never the release verdict: a subset prints its own line (MATRIX PASSED is not a substring of it).
+	if [ "$fail" -eq 0 ]; then echo "MATRIX SUBSET PASSED (states: $STATES; not the release matrix)"; else echo "MATRIX SUBSET FAILED (states: $STATES)"; fi
+elif [ "$fail" -eq 0 ]; then echo "MATRIX PASSED"; else echo "MATRIX FAILED"; fi
 exit $fail

@@ -15,15 +15,32 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 if [ "${1:-}" == --matrix ]; then
 	[ -n "${2:-}" ] || { echo "usage: bash scripts/run-integration.sh --matrix CANDIDATE.zip"; exit 2; }
-	exec "$BASH" tests/matrix/run-matrix.sh "$2"
+	# The release gate is always the full matrix (1.3, owner decision D1): no subset scope here.
+	case "${BLZMCP_MATRIX_SCOPE:-full}" in
+	full) ;;
+	*) echo "MATRIX FAILED: --matrix is the full release matrix; BLZMCP_MATRIX_SCOPE=${BLZMCP_MATRIX_SCOPE} is refused (use --matrix-subset)"; exit 2 ;;
+	esac
+	BLZMCP_MATRIX_SCOPE=full exec "$BASH" tests/matrix/run-matrix.sh "$2"
+fi
+# The branch merge gate of owner decision D1: the same matrix on named states only, recorded and
+# labelled as a subset (MATRIX SUBSET PASSED, never MATRIX PASSED; it cannot qualify a release).
+#   bash scripts/run-integration.sh --matrix-subset CANDIDATE.zip "recommended easy-2.5.2"
+if [ "${1:-}" == --matrix-subset ]; then
+	[ -n "${2:-}" ] && [ -n "${3:-}" ] || { echo "usage: bash scripts/run-integration.sh --matrix-subset CANDIDATE.zip \"STATE ...\""; exit 2; }
+	BLZMCP_MATRIX_SCOPE=subset BLZMCP_MATRIX_STATES="$3" exec "$BASH" tests/matrix/run-matrix.sh "$2"
 fi
 echo "FAST CHECKS ONLY — NOT THE RELEASE GATE (the gate is: bash scripts/run-integration.sh --matrix CANDIDATE.zip)"
 fail=0
-# test-payment-orders.php and test-payment-health.php run in the storage loop below instead.
-# test-payment-methods.php and test-payment-errors.php run here, in the default storage mode.
+# The storage suites (STORAGE_SUITES: payment orders and health, card-testing orders and the card
+# ability) run in the storage loop below instead. test-payment-methods.php, test-payment-errors.php,
+# test-card-testing-logs.php and test-checkout-protection.php run here, in the default storage mode.
+STORAGE_SUITES="tests/Integration/test-payment-orders.php tests/Integration/test-payment-health.php tests/Integration/test-card-testing-orders.php tests/Integration/test-card-testing.php"
+for f in $STORAGE_SUITES; do
+	[ -f "$f" ] || { echo "FAIL  storage suite $f does not exist"; fail=1; }
+done
 for f in tests/Integration/test-*.php; do
-	case "$f" in
-		tests/Integration/test-payment-orders.php | tests/Integration/test-payment-health.php) continue ;;
+	case " $STORAGE_SUITES " in
+		*" $f "*) continue ;;
 	esac
 	out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 	status=$?
@@ -36,7 +53,24 @@ for f in tests/Integration/test-*.php; do
 		echo "PASS  $f ($summary)"
 	fi
 done
-# Order storage loop (payment health, FEATURE-PLAN items 3 and 7): each authority/sync combination is
+# Checkout protection, interrupted-run recovery (1.3 item 5): the first process leaves its changes
+# behind on purpose, the second must find and restore them before its own checks.
+cp_f=tests/Integration/test-checkout-protection.php
+cp_int=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_CP_STEP=interrupt wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$cp_f" 2>&1)
+cp_int_status=$?
+cp_rec=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$cp_f" 2>&1)
+cp_rec_status=$?
+cp_int_sum=$(printf '%s\n' "$cp_int" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
+cp_rec_sum=$(printf '%s\n' "$cp_rec" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
+# (A pattern test, not `printf | grep -q`: under pipefail a long output can SIGPIPE printf.)
+if [ "$cp_int_status" -ne 0 ] || ! printf '%s' "$cp_int_sum" | grep -q ', 0 failed' || [ "$cp_rec_status" -ne 0 ] || ! printf '%s' "$cp_rec_sum" | grep -q ', 0 failed' || [[ $'\n'"$cp_rec" != *$'\n''NOTE  restoring options and pages left by an interrupted run'* ]]; then
+	echo "FAIL  $cp_f [interrupted run, then recovery] (interrupt: ${cp_int_sum:-no summary}; recovery: ${cp_rec_sum:-no summary})"
+	printf '%s\n%s\n' "$cp_int" "$cp_rec" | awk '/^FAIL/ && n++ < 20'
+	fail=1
+else
+	echo "PASS  $cp_f [interrupted run, then recovery] (interrupt: $cp_int_sum; recovery: $cp_rec_sum)"
+fi
+# Order storage loop (payment health and card testing, 1.2 items 3 and 7, 1.3 item 8): each authority/sync combination is
 # switched in one process and asserted in a fresh one, so the reader sees a fully initialised store.
 # The store's original storage mode is restored on every exit path and checked at the end.
 pf_dir=wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/tests/Integration
@@ -63,7 +97,7 @@ for combo in hpos:no hpos:yes legacy:yes legacy:no; do
 		fail=1
 		continue
 	fi
-	for f in tests/Integration/test-payment-orders.php tests/Integration/test-payment-health.php; do
+	for f in $STORAGE_SUITES; do
 		out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_FIXTURE_ENV="${BLZMCP_FIXTURE_ENV:-}" BLZMCP_EXPECT_AUTHORITY="$pf_set" BLZMCP_EXPECT_SYNC="$pf_sync" wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
 		status=$?
 		summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
@@ -76,6 +110,23 @@ for combo in hpos:no hpos:yes legacy:yes legacy:no; do
 			echo "PASS  $f [$label] ($summary)"
 		fi
 	done
+	# The card fixture's Analytics readiness (1.3 wave 3, REVIEW-pass4a R3), in each authoritative
+	# storage (sync off): the cold-guard / pending-asynchronous-import case, then the synchronously
+	# imported fixture with the order-totals step back in the plan.
+	if [ "$pf_sync" == no ]; then
+		f=tests/matrix/test-card-fixture-analytics.php
+		out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_EXPECT_AUTHORITY="$pf_set" wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+		status=$?
+		summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
+		seen=$(printf '%s\n' "$out" | grep -E '^STORAGE ' | tail -1)
+		if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed' || ! printf '%s' "$seen" | grep -q "authority=$pf_set sync=$pf_sync"; then
+			echo "FAIL  $f [$label] (${summary:-no summary}; ${seen:-no STORAGE line})"
+			printf '%s\n' "$out" | awk '/^FAIL/ && n++ < 20'
+			fail=1
+		else
+			echo "PASS  $f [$label] ($summary)"
+		fi
+	fi
 	# Gateway registry genuinely unbuilt: seed, check (no rest_api_init, so nothing builds it), clean.
 	for entry in "tests/Integration/test-payment-methods.php|BLZMCP_PM_STEP" "tests/Integration/test-payment-health.php|BLZMCP_PH_STEP"; do
 		IFS='|' read -r f step_var <<<"$entry"
@@ -263,7 +314,7 @@ if "$host_bash" tests/Integration/frontend-curl.sh; then :; else fail=1; fi
 # only place they run, so a syntax error must fail here first. http-suite.sh re-runs itself under
 # bash 4+, the others must parse under the host bash (3.2 on macOS).
 parse_fail=''
-for f in tests/matrix/run-matrix.sh tests/matrix/record.sh tests/matrix/perf-suite.sh tests/matrix/fake-wp-env.sh; do
+for f in tests/matrix/run-matrix.sh tests/matrix/record.sh tests/matrix/perf-suite.sh tests/matrix/card-testing-perf-suite.sh tests/matrix/host-admission.sh tests/matrix/fake-wp-env.sh; do
 	"$host_bash" -n "$f" 2>/dev/null || parse_fail="$parse_fail $f"
 done
 modern_bash=''
@@ -271,7 +322,9 @@ for b in "$BASH" /opt/homebrew/bin/bash /usr/local/bin/bash; do
 	[ -x "$b" ] && [ "$("$b" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 4 ] 2>/dev/null && { modern_bash=$b; break; }
 done
 if [ -n "$modern_bash" ]; then
-	"$modern_bash" -n tests/matrix/http-suite.sh 2>/dev/null || parse_fail="$parse_fail tests/matrix/http-suite.sh"
+	for f in tests/matrix/http-suite.sh tests/matrix/http-checks.sh tests/matrix/card-testing-http.sh; do
+		"$modern_bash" -n "$f" 2>/dev/null || parse_fail="$parse_fail $f"
+	done
 else
 	parse_fail="$parse_fail tests/matrix/http-suite.sh(no-bash-4)"
 fi
@@ -295,7 +348,7 @@ fi
 # The performance gate's own self-tests, the release-zip exclusion canaries and the build-once
 # promotion tooling (artifact checker, release-candidate.sh, deploy.yml checks; offline stubs)
 # and the matrix host admission (ruling Q8; stubbed sysctl, /proc and docker).
-for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh" "$host_bash tests/matrix/test-http-checks.sh" "$host_bash tests/matrix/test-host-admission.sh" "$host_bash tests/release/test-promotion.sh"; do
+for t in "php tests/matrix/test-perf-validate.php" "$host_bash tests/matrix/test-perf-suite.sh" "php tests/matrix/test-card-testing-perf-validate.php" "$host_bash tests/matrix/test-card-testing-perf-suite.sh" "$host_bash tests/matrix/test-distignore.sh" "$host_bash tests/matrix/test-http-checks.sh" "$host_bash tests/matrix/test-host-admission.sh" "$host_bash tests/release/test-promotion.sh"; do
 	if t_out=$($t 2>&1); then
 		echo "PASS  $t ($(printf '%s\n' "$t_out" | tail -1))"
 	else

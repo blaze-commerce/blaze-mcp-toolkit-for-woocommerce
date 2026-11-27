@@ -1245,6 +1245,8 @@ final class PaymentHealth extends AbstractAbility {
 				return __( 'A log or job record could not be read.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'unparsed_entries':
 				return __( 'Some log entries could not be parsed, so the count may be incomplete.', 'blaze-mcp-toolkit-for-woocommerce' );
+			case 'shared_log_source':
+				return __( 'This payment plugin\'s log is also linked to another payment plugin, so its errors could not be told apart and were not counted.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'jobs_unavailable':
 				return __( 'Background jobs could not be read.', 'blaze-mcp-toolkit-for-woocommerce' );
 			case 'sampled_store':

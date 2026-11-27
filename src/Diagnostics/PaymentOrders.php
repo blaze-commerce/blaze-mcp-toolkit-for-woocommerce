@@ -21,6 +21,12 @@ defined( 'ABSPATH' ) || exit;
  * Field and precedence choices are pinned by item 1 (tests/fixtures/payment-gateway-contracts.json):
  * HPOS reads wc_orders + wc_order_operational_data; legacy reads posts + the first (lowest
  * meta_id) postmeta row of each key, `_date_paid` before `_paid_date`.
+ *
+ * Card-testing mode (1.3, C4; tests/fixtures/card-testing-contracts.json) is a separate entry,
+ * read_card_testing(), over the same authority guard, keyset chunks, date parsing and first-row
+ * metadata machinery. It selects by creation time only, adds the saved customer IP and the
+ * default attribution source type, omits the transaction reference, and folds into the separate
+ * CardTestingOrders accumulator. read() and its SQL are unchanged.
  */
 final class PaymentOrders {
 
@@ -90,15 +96,21 @@ final class PaymentOrders {
 	/**
 	 * One bound, or its test override.
 	 *
-	 * @param string $name chunk|candidates|meta_batch|meta_call|outside_ids.
+	 * @param string $name chunk|candidates|meta_batch|meta_call|outside_ids, or for card mode only
+	 *                     rows|methods|networks|bucket_cells|network_cells.
 	 */
 	private static function limit( string $name ): int {
 		$defaults = array(
-			'chunk'       => self::CHUNK,
-			'candidates'  => self::MAX_CANDIDATES,
-			'meta_batch'  => self::MAX_META_BATCH,
-			'meta_call'   => self::MAX_META_CALL,
-			'outside_ids' => self::MAX_OUTSIDE_IDS,
+			'chunk'         => self::CHUNK,
+			'candidates'    => self::MAX_CANDIDATES,
+			'meta_batch'    => self::MAX_META_BATCH,
+			'meta_call'     => self::MAX_META_CALL,
+			'outside_ids'   => self::MAX_OUTSIDE_IDS,
+			'rows'          => self::MAX_ROWS,
+			'methods'       => CardTestingOrders::MAX_METHODS,
+			'networks'      => CardTestingOrders::MAX_NETWORKS,
+			'bucket_cells'  => CardTestingOrders::MAX_BUCKET_CELLS,
+			'network_cells' => CardTestingOrders::MAX_NETWORK_BUCKET_CELLS,
 		);
 		$value = self::$limits_override[ $name ] ?? null;
 		return is_int( $value ) && $value > 0 ? $value : $defaults[ $name ];
@@ -656,9 +668,7 @@ final class PaymentOrders {
 		$from       = gmdate( 'Y-m-d H:i:s', $start );
 		// Site-local paid strings: widen by the largest possible offset (14 hours) and filter exactly in PHP.
 		$local_from = gmdate( 'Y-m-d H:i:s', $start - 14 * 3600 );
-		$pm         = $wpdb->postmeta;
 		$keys       = array( '_payment_method', '_created_via', '_transaction_id', '_date_paid', '_paid_date' );
-		$key_ph     = implode( ',', array_fill( 0, count( $keys ), '%s' ) );
 		// Selection is unchanged: the first CHUNK `shop_order` rows with ID > $after whose
 		// post_date_gmt is in the history OR that have any paid-looking meta row in range. The
 		// former correlated EXISTS is evaluated instead as the same SQL expressions on each row of
@@ -698,99 +708,28 @@ final class PaymentOrders {
 				break;
 			}
 			$work['candidates'] += count( $cands );
-			$meta_left           = self::limit( 'meta_call' ) - (int) $work['meta_rows'];
-			if ( $meta_left <= 0 ) {
-				$work['budget'] = true;
-				break;
-			}
-			$meta_limit = min( self::limit( 'meta_batch' ), $meta_left );
-			$ids   = array_map( static fn( $r ) => (int) $r['id'], $cands );
-			$id_ph = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
-			// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- only generated %d/%s placeholder lists are interpolated; every value is a placeholder.
-			// Access path only (the row set is identical either way): when the batch's post IDs are
-			// dense, the exact meta_id span of these orders' meta rows is read with a loose index
-			// scan of the post_id index (per-post MIN/MAX of meta_id, which that index holds: two
-			// index reads per post, no row lookups), restricted to the batch's IDs in PHP. When that
-			// span is dense too, the meta rows are read by a primary-key range (sequential) bounded
-			// by the span and the batch's post-ID range, and rows of posts outside the batch are
-			// dropped in PHP by their integer post_id; otherwise by one post_id index probe per
-			// order, as before. The span is the true bound of the batch's meta rows, so both reads
-			// keep exactly the batch's rows of the five keys.
-			$in_batch = array_flip( $ids );
-			$lo       = null;
-			$hi       = null;
-			$min_i    = min( $ids );
-			$max_i    = max( $ids );
-			$force    = self::$legacy_path_override;
-			if ( 'fallback' !== $force && ( 'span' === $force || $max_i - $min_i + 1 <= self::DENSE_IDS * count( $ids ) ) ) {
-				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
-				$spans = $wpdb->get_results(
-					$wpdb->prepare( 'SELECT post_id AS p, MIN( meta_id ) AS lo, MAX( meta_id ) AS hi FROM %i WHERE post_id BETWEEN %d AND %d GROUP BY post_id', $pm, $min_i, $max_i ),
-					ARRAY_A
-				);
-				if ( '' !== $wpdb->last_error || ! is_array( $spans ) ) {
-					return false;
-				}
-				foreach ( $spans as $sp ) {
-					if ( isset( $in_batch[ (int) $sp['p'] ] ) ) {
-						$lo = null === $lo ? (int) $sp['lo'] : min( $lo, (int) $sp['lo'] );
-						$hi = null === $hi ? (int) $sp['hi'] : max( $hi, (int) $sp['hi'] );
-					}
-				}
-				unset( $spans );
-			}
-			if ( null !== $lo && ( 'span' === $force || $hi - $lo + 1 <= self::DENSE_META * count( $ids ) ) ) {
-				++self::$legacy_paths['span'];
-				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
-				$mrows = $wpdb->get_results(
-					$wpdb->prepare(
-						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE meta_id BETWEEN %d AND %d AND post_id BETWEEN %d AND %d AND meta_key IN ({$key_ph}) LIMIT %d",
-						array_merge( array( '_date_paid', '^[0-9]+$', $start, '_paid_date', $local_from, $pm, $lo, $hi, $min_i, $max_i ), $keys, array( $meta_limit + 1 ) )
-					),
-					ARRAY_A
-				);
-			} else {
-				++self::$legacy_paths['fallback'];
-				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
-				$mrows = $wpdb->get_results(
-					$wpdb->prepare(
-						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE post_id IN ({$id_ph}) AND meta_key IN ({$key_ph}) LIMIT %d",
-						array_merge( array( '_date_paid', '^[0-9]+$', $start, '_paid_date', $local_from, $pm ), $ids, $keys, array( $meta_limit + 1 ) )
-					),
-					ARRAY_A
-				);
-			}
-			// phpcs:enable
-			if ( '' !== $wpdb->last_error || ! is_array( $mrows ) ) {
+			$ids                 = array_map( static fn( $r ) => (int) $r['id'], $cands );
+			$read                = self::legacy_meta(
+				$ids,
+				$keys,
+				$work,
+				array(
+					'start'      => $start,
+					'local_from' => $local_from,
+				),
+				null
+			);
+			if ( false === $read ) {
 				return false;
 			}
-			if ( count( $mrows ) > $meta_limit ) {
-				// The sentinel row came back: this batch's metadata cannot be read completely
-				// within the bound. Fold none of it; stop with the earlier, complete batches.
-				$work['budget'] = true;
-				unset( $mrows );
+			if ( null === $read ) {
+				// A work or metadata bound stopped this batch (legacy_meta() set the budget flag):
+				// fold none of it; stop with the earlier, complete batches.
 				break;
 			}
-			$work['meta_rows'] += count( $mrows );
-			$bmeta              = array();
-			$first = array();
-			$hit   = array();
-			foreach ( $mrows as $mr ) {
-				$pid = (int) $mr['post_id'];
-				if ( ! isset( $in_batch[ $pid ] ) ) {
-					continue;
-				}
-				$key = (string) $mr['meta_key'];
-				$mid = (int) $mr['meta_id'];
-				if ( null !== $mr['h'] && 1 === (int) $mr['h'] ) {
-					$hit[ $pid ] = true;
-				}
-				if ( ! isset( $first[ $pid ][ $key ] ) || $mid < $first[ $pid ][ $key ] ) {
-					$first[ $pid ][ $key ] = $mid;
-					$bmeta[ $pid ][ $key ] = null === $mr['meta_value'] ? null : (string) $mr['meta_value'];
-				}
-			}
-			unset( $mrows, $first, $in_batch );
+			$bmeta = $read['meta'];
+			$hit   = $read['hit'];
+			unset( $read );
 			foreach ( $cands as $c ) {
 				$cid = (int) $c['id'];
 				if ( ( null !== $c['r'] && 1 === (int) $c['r'] ) || isset( $hit[ $cid ] ) ) {
@@ -827,6 +766,569 @@ final class PaymentOrders {
 				'valid'   => $created['valid'] && $paid['valid'],
 				'via'     => $m['_created_via'] ?? null,
 				'txn'     => isset( $m['_transaction_id'] ) && '' !== $m['_transaction_id'],
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * One bounded metadata read for a batch of legacy order IDs, shared by both modes: the access
+	 * path, the per-batch and per-call bounds with one sentinel row, and the first-row precedence.
+	 *
+	 * Access path only (the row set is identical either way): when the batch's post IDs are dense,
+	 * the exact meta_id span of these orders' meta rows is read with a loose index scan of the
+	 * post_id index (per-post MIN/MAX of meta_id, which that index holds: two index reads per post,
+	 * no row lookups), restricted to the batch's IDs in PHP. When that span is dense too, the meta
+	 * rows are read by a primary-key range (sequential) bounded by the span and the batch's post-ID
+	 * range, and rows of posts outside the batch are dropped in PHP by their integer post_id;
+	 * otherwise by one post_id index probe per order. The span is the true bound of the batch's
+	 * meta rows, so both reads keep exactly the batch's rows of the requested keys.
+	 *
+	 * Payment mode ($paid set) computes the paid-looking flag `h` on each row, with the SQL of
+	 * 1.2.1 unchanged. Card mode ($bounds set) reads no flag and bounds the listed keys' values in
+	 * SQL to the given number of characters, so an over-long value is seen as over-long, never cut
+	 * into a valid one.
+	 *
+	 * @param int[]                $ids    Batch order IDs.
+	 * @param string[]             $keys   Meta keys.
+	 * @param array                $work   Per-call work accounting (by reference): meta_rows, budget.
+	 * @param array|null           $paid   Payment mode: start (UTC) and local_from (site-local string).
+	 * @param array<string,int>|null $bounds Card mode: meta key => characters kept (exactly 2 keys).
+	 * @return array{meta:array<int,array<string,?string>>,hit:array<int,bool>}|false|null False on a
+	 *         read failure; null when a bound stopped the batch (budget set, nothing to fold).
+	 */
+	private static function legacy_meta( array $ids, array $keys, array &$work, ?array $paid, ?array $bounds ): array|false|null {
+		global $wpdb;
+		$meta_left = self::limit( 'meta_call' ) - (int) $work['meta_rows'];
+		if ( $meta_left <= 0 ) {
+			$work['budget'] = true;
+			return null;
+		}
+		$meta_limit = min( self::limit( 'meta_batch' ), $meta_left );
+		$pm         = $wpdb->postmeta;
+		$key_ph     = implode( ',', array_fill( 0, count( $keys ), '%s' ) );
+		$id_ph      = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+		$bound      = array();
+		foreach ( (array) $bounds as $bkey => $chars ) {
+			$bound[] = (string) $bkey;
+			$bound[] = (int) $chars;
+		}
+		$bound    = array_slice( array_pad( $bound, 4, '' ), 0, 4 );
+		$in_batch = array_flip( $ids );
+		$lo       = null;
+		$hi       = null;
+		$min_i    = min( $ids );
+		$max_i    = max( $ids );
+		$force    = self::$legacy_path_override;
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- only generated %d/%s placeholder lists are interpolated; every value is a placeholder.
+		if ( 'fallback' !== $force && ( 'span' === $force || $max_i - $min_i + 1 <= self::DENSE_IDS * count( $ids ) ) ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
+			$spans = $wpdb->get_results(
+				$wpdb->prepare( 'SELECT post_id AS p, MIN( meta_id ) AS lo, MAX( meta_id ) AS hi FROM %i WHERE post_id BETWEEN %d AND %d GROUP BY post_id', $pm, $min_i, $max_i ),
+				ARRAY_A
+			);
+			if ( '' !== $wpdb->last_error || ! is_array( $spans ) ) {
+				return false;
+			}
+			foreach ( $spans as $sp ) {
+				if ( isset( $in_batch[ (int) $sp['p'] ] ) ) {
+					$lo = null === $lo ? (int) $sp['lo'] : min( $lo, (int) $sp['lo'] );
+					$hi = null === $hi ? (int) $sp['hi'] : max( $hi, (int) $sp['hi'] );
+				}
+			}
+			unset( $spans );
+		}
+		if ( null !== $lo && ( 'span' === $force || $hi - $lo + 1 <= self::DENSE_META * count( $ids ) ) ) {
+			++self::$legacy_paths['span'];
+			if ( null !== $paid ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
+				$mrows = $wpdb->get_results(
+					$wpdb->prepare(
+						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE meta_id BETWEEN %d AND %d AND post_id BETWEEN %d AND %d AND meta_key IN ({$key_ph}) LIMIT %d",
+						array_merge( array( '_date_paid', '^[0-9]+$', $paid['start'], '_paid_date', $paid['local_from'], $pm, $lo, $hi, $min_i, $max_i ), $keys, array( $meta_limit + 1 ) )
+					),
+					ARRAY_A
+				);
+			} else {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (C4); the ability caches the result.
+				$mrows = $wpdb->get_results(
+					$wpdb->prepare(
+						"SELECT meta_id, post_id, meta_key, CASE meta_key WHEN %s THEN LEFT( meta_value, %d ) WHEN %s THEN LEFT( meta_value, %d ) ELSE meta_value END AS meta_value FROM %i WHERE meta_id BETWEEN %d AND %d AND post_id BETWEEN %d AND %d AND meta_key IN ({$key_ph}) LIMIT %d",
+						array_merge( $bound, array( $pm, $lo, $hi, $min_i, $max_i ), $keys, array( $meta_limit + 1 ) )
+					),
+					ARRAY_A
+				);
+			}
+		} else {
+			++self::$legacy_paths['fallback'];
+			if ( null !== $paid ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (R6); the ability caches the result.
+				$mrows = $wpdb->get_results(
+					$wpdb->prepare(
+						"SELECT meta_id, post_id, meta_key, meta_value, ( ( meta_key = %s AND meta_value REGEXP %s AND CAST( meta_value AS UNSIGNED ) >= %d ) OR ( meta_key = %s AND meta_value >= %s ) ) AS h FROM %i WHERE post_id IN ({$id_ph}) AND meta_key IN ({$key_ph}) LIMIT %d",
+						array_merge( array( '_date_paid', '^[0-9]+$', $paid['start'], '_paid_date', $paid['local_from'], $pm ), $ids, $keys, array( $meta_limit + 1 ) )
+					),
+					ARRAY_A
+				);
+			} else {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (C4); the ability caches the result.
+				$mrows = $wpdb->get_results(
+					$wpdb->prepare(
+						"SELECT meta_id, post_id, meta_key, CASE meta_key WHEN %s THEN LEFT( meta_value, %d ) WHEN %s THEN LEFT( meta_value, %d ) ELSE meta_value END AS meta_value FROM %i WHERE post_id IN ({$id_ph}) AND meta_key IN ({$key_ph}) LIMIT %d",
+						array_merge( $bound, array( $pm ), $ids, $keys, array( $meta_limit + 1 ) )
+					),
+					ARRAY_A
+				);
+			}
+		}
+		// phpcs:enable
+		if ( '' !== $wpdb->last_error || ! is_array( $mrows ) ) {
+			return false;
+		}
+		if ( count( $mrows ) > $meta_limit ) {
+			// The sentinel row came back: this batch's metadata cannot be read completely within
+			// the bound. Fold none of it; the caller stops with the earlier, complete batches.
+			$work['budget'] = true;
+			return null;
+		}
+		$work['meta_rows'] += count( $mrows );
+		$bmeta              = array();
+		$first              = array();
+		$hit                = array();
+		foreach ( $mrows as $mr ) {
+			$pid = (int) $mr['post_id'];
+			if ( ! isset( $in_batch[ $pid ] ) ) {
+				continue;
+			}
+			$key = (string) $mr['meta_key'];
+			$mid = (int) $mr['meta_id'];
+			if ( isset( $mr['h'] ) && 1 === (int) $mr['h'] ) {
+				$hit[ $pid ] = true;
+			}
+			if ( ! isset( $first[ $pid ][ $key ] ) || $mid < $first[ $pid ][ $key ] ) {
+				$first[ $pid ][ $key ] = $mid;
+				$bmeta[ $pid ][ $key ] = null === $mr['meta_value'] ? null : (string) $mr['meta_value'];
+			}
+		}
+		unset( $mrows, $first, $in_batch );
+		return array(
+			'meta' => $bmeta,
+			'hit'  => $hit,
+		);
+	}
+
+	/**
+	 * Card-testing order aggregates for one uncached call (1.3, C3/C4), the only order-reader entry
+	 * CardTesting uses. One bounded scan of the authoritative store over the 28-day history, by
+	 * creation time, folded into CardTestingOrders. Never reads billing name, email, address or
+	 * country, user agent, notes, order key or transaction reference; never reads the
+	 * non-authoritative store, a shadow copy or Analytics tables.
+	 *
+	 * @param int           $now         Captured UTC now.
+	 * @param int           $since_hours Current window (1-168).
+	 * @param \DateTimeZone $tz          Store timezone (legacy site-local paid dates).
+	 * @return array<string,mixed> CardTestingOrders::result() or ::unavailable() shape.
+	 */
+	public static function read_card_testing( int $now, int $since_hours, \DateTimeZone $tz ): array {
+		$since_hours = max( 1, min( 168, $since_hours ) );
+		$start       = $now - CardTestingOrders::HISTORY_DAYS * 86400;
+		$auth        = self::authority();
+		if ( ! $auth['ok'] ) {
+			return CardTestingOrders::unavailable( $now, $since_hours, $auth['authority'], (string) $auth['reason'], CardTestingOrders::signal_support( array( 'ip' => false, 'meta' => false ) ) );
+		}
+		$authority = (string) $auth['authority'];
+		$storage   = self::card_storage( $authority );
+		if ( null === $storage ) {
+			return CardTestingOrders::unavailable( $now, $since_hours, $authority, 'read_failed', CardTestingOrders::signal_support( array( 'ip' => false, 'meta' => false ) ) );
+		}
+		$signals = CardTestingOrders::signal_support( $storage );
+		if ( 'hpos' === $authority ) {
+			$probe = self::hpos_missing_operational_row( $start );
+			if ( null === $probe ) {
+				return CardTestingOrders::unavailable( $now, $since_hours, $authority, 'read_failed', $signals );
+			}
+			if ( $probe ) {
+				return CardTestingOrders::unavailable( $now, $since_hours, $authority, 'operational_data_missing', $signals );
+			}
+		}
+
+		$acc     = new CardTestingOrders(
+			$now,
+			$since_hours,
+			$signals,
+			array(
+				'methods'       => self::limit( 'methods' ),
+				'networks'      => self::limit( 'networks' ),
+				'bucket_cells'  => self::limit( 'bucket_cells' ),
+				'network_cells' => self::limit( 'network_cells' ),
+			)
+		);
+		$work    = array(
+			'candidates' => 0,
+			'meta_rows'  => 0,
+			'budget'     => false,
+		);
+		$card    = array(
+			'ip'          => $signals['ip']['supported'],
+			'attribution' => $signals['attribution']['supported'],
+			'rows_left'   => 0,
+		);
+		$last_id = 0;
+		$rows    = 0;
+		$stopped = null;
+		try {
+			do {
+				$card['rows_left'] = self::limit( 'rows' ) - $rows;
+				if ( $card['rows_left'] <= 0 ) {
+					// The previous chunk's sentinel row showed more rows than the row bound allows.
+					$stopped = 'row_cap';
+					break;
+				}
+				$work['more'] = false;
+				$chunk        = 'hpos' === $authority ? self::hpos_card_chunk( $last_id, $start, $work, $card ) : self::legacy_card_chunk( $last_id, $start, $tz, $work, $card );
+				if ( false === $chunk ) {
+					return CardTestingOrders::unavailable( $now, $since_hours, $authority, 'read_failed', $signals );
+				}
+				foreach ( array_keys( $chunk ) as $i ) {
+					if ( ! empty( $chunk[ $i ]['op_missing'] ) ) {
+						// Missing required data is unavailable, never a missing origin; it is never
+						// recovered from the posts shadow.
+						return CardTestingOrders::unavailable( $now, $since_hours, $authority, 'operational_data_missing', $signals );
+					}
+					$last_id = max( $last_id, (int) $chunk[ $i ]['id'] );
+					++$rows;
+					$acc->fold( $chunk[ $i ] );
+					// Raw IP and source values exist only in this batch: release each row once folded.
+					unset( $chunk[ $i ] );
+				}
+				unset( $chunk );
+				if ( $work['budget'] ) {
+					$stopped = 'order_scan_budget';
+					break;
+				}
+			} while ( $work['more'] );
+		} catch ( \Throwable $e ) {
+			return CardTestingOrders::unavailable( $now, $since_hours, $authority, 'read_failed', $signals );
+		}
+		unset( $work['more'] );
+		return $acc->result( $authority, $stopped, $rows, $work );
+	}
+
+	/**
+	 * Optional card-signal storage of the authoritative store: the HPOS ip_address column and
+	 * orders meta table. Legacy keeps both in postmeta, which authority() already verified.
+	 *
+	 * @param string $authority hpos|legacy.
+	 * @return array{ip:bool,meta:bool}|null Null on a read failure.
+	 */
+	private static function card_storage( string $authority ): ?array {
+		if ( 'hpos' !== $authority ) {
+			return array(
+				'ip'   => true,
+				'meta' => true,
+			);
+		}
+		global $wpdb;
+		$wpdb->last_error = '';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- read-only existence check; the ability caches its result.
+		$meta = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix . 'wc_orders_meta' ) ) );
+		if ( '' !== $wpdb->last_error ) {
+			return null;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- read-only column existence check; the ability caches its result.
+		$column = $wpdb->get_var( $wpdb->prepare( 'SHOW COLUMNS FROM %i LIKE %s', $wpdb->prefix . 'wc_orders', $wpdb->esc_like( 'ip_address' ) ) );
+		if ( '' !== $wpdb->last_error ) {
+			return null;
+		}
+		return array(
+			'ip'   => 'ip_address' === $column,
+			'meta' => $wpdb->prefix . 'wc_orders_meta' === $meta,
+		);
+	}
+
+	/**
+	 * One HPOS card-mode keyset chunk, or false on a read failure. Selects by creation time only;
+	 * reads the operational row for paid date and origin, the bounded saved IP when supported, and
+	 * (one bounded meta read per chunk, lowest meta ID first) the default attribution source type
+	 * when supported. No transaction reference expression.
+	 *
+	 * @param int                 $after Rows with id > $after.
+	 * @param int                 $start History start (UTC).
+	 * @param array               $work  Per-call work accounting (by reference): candidates, meta_rows, more, budget.
+	 * @param array<string,mixed> $card  ip, attribution (bool), rows_left (int).
+	 * @return array<int,array<string,mixed>>|false
+	 */
+	private static function hpos_card_chunk( int $after, int $start, array &$work, array $card ): array|false {
+		global $wpdb;
+		$left = self::limit( 'candidates' ) - (int) $work['candidates'];
+		if ( $left <= 0 ) {
+			$work['budget'] = true;
+			return array();
+		}
+		$limit            = min( self::limit( 'chunk' ), $left, max( 1, (int) $card['rows_left'] ) );
+		$from             = gmdate( 'Y-m-d H:i:s', $start );
+		$orders           = $wpdb->prefix . 'wc_orders';
+		$ops              = $wpdb->prefix . 'wc_order_operational_data';
+		$wpdb->last_error = '';
+		if ( ! empty( $card['ip'] ) ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (C4); the ability caches the result.
+			$rows = $wpdb->get_results(
+				$wpdb->prepare(
+					'SELECT o.id, o.payment_method AS m, o.status AS s, o.date_created_gmt AS c, d.date_paid_gmt AS p, d.created_via AS v, d.order_id AS op, LEFT( o.ip_address, %d ) AS ip FROM %i o LEFT JOIN %i d ON d.order_id = o.id WHERE o.type = %s AND o.id > %d AND o.date_created_gmt >= %s ORDER BY o.id ASC LIMIT %d',
+					CardTestingOrders::IP_MAX_BYTES + 1,
+					$orders,
+					$ops,
+					'shop_order',
+					$after,
+					$from,
+					$limit + 1
+				),
+				ARRAY_A
+			);
+		} else {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (C4); the ability caches the result.
+			$rows = $wpdb->get_results(
+				$wpdb->prepare(
+					'SELECT o.id, o.payment_method AS m, o.status AS s, o.date_created_gmt AS c, d.date_paid_gmt AS p, d.created_via AS v, d.order_id AS op, NULL AS ip FROM %i o LEFT JOIN %i d ON d.order_id = o.id WHERE o.type = %s AND o.id > %d AND o.date_created_gmt >= %s ORDER BY o.id ASC LIMIT %d',
+					$orders,
+					$ops,
+					'shop_order',
+					$after,
+					$from,
+					$limit + 1
+				),
+				ARRAY_A
+			);
+		}
+		if ( '' !== $wpdb->last_error || ! is_array( $rows ) ) {
+			return false;
+		}
+		// One sentinel row shows whether more rows follow; it is re-read by the next chunk.
+		$work['more'] = count( $rows ) > $limit;
+		$rows         = array_slice( $rows, 0, $limit );
+		if ( array() === $rows ) {
+			return array();
+		}
+		$work['candidates'] += count( $rows );
+		if ( $work['more'] && $work['candidates'] >= self::limit( 'candidates' ) ) {
+			$work['budget'] = true;
+		}
+
+		$attr = array();
+		if ( ! empty( $card['attribution'] ) ) {
+			$meta_left = self::limit( 'meta_call' ) - (int) $work['meta_rows'];
+			if ( $meta_left <= 0 ) {
+				$work['budget'] = true;
+				return array();
+			}
+			$meta_limit = min( self::limit( 'meta_batch' ), $meta_left );
+			$ids        = array_map( static fn( $r ) => (int) $r['id'], $rows );
+			$id_ph      = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+			// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- only a generated %d placeholder list is interpolated; every value is a placeholder.
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (C4); the ability caches the result.
+			$mrows = $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT id, order_id, LEFT( meta_value, %d ) AS v FROM %i WHERE order_id IN ({$id_ph}) AND meta_key = %s LIMIT %d",
+					array_merge( array( CardTestingOrders::ATTRIBUTION_MAX_BYTES + 1, $wpdb->prefix . 'wc_orders_meta' ), $ids, array( CardTestingOrders::ATTRIBUTION_KEY, $meta_limit + 1 ) )
+				),
+				ARRAY_A
+			);
+			// phpcs:enable
+			if ( '' !== $wpdb->last_error || ! is_array( $mrows ) ) {
+				return false;
+			}
+			if ( count( $mrows ) > $meta_limit ) {
+				// Sentinel: this chunk's attribution rows cannot be read completely within the bound.
+				// Fold none of it.
+				$work['budget'] = true;
+				return array();
+			}
+			$work['meta_rows'] += count( $mrows );
+			$first              = array();
+			foreach ( $mrows as $mr ) {
+				$oid = (int) $mr['order_id'];
+				$mid = (int) $mr['id'];
+				if ( ! isset( $first[ $oid ] ) || $mid < $first[ $oid ] ) {
+					$first[ $oid ] = $mid;
+					$attr[ $oid ]  = null === $mr['v'] ? null : (string) $mr['v'];
+				}
+			}
+			unset( $mrows, $first );
+		}
+
+		$out = array();
+		foreach ( $rows as $r ) {
+			$id      = (int) $r['id'];
+			$created = PaymentRules::utc_datetime( null === $r['c'] ? null : (string) $r['c'] );
+			$paid    = PaymentRules::utc_datetime( null === $r['p'] ? null : (string) $r['p'] );
+			$out[]   = array(
+				'id'            => $id,
+				'method'        => (string) $r['m'],
+				'status'        => (string) $r['s'],
+				'created'       => $created['ts'],
+				'created_valid' => $created['valid'],
+				'paid'          => $paid['ts'],
+				'paid_valid'    => $paid['valid'],
+				'via'           => null === $r['v'] ? null : (string) $r['v'],
+				'op_missing'    => null === $r['op'],
+				'ip'            => null === $r['ip'] ? null : (string) $r['ip'],
+				'attr'          => $attr[ $id ] ?? null,
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * One legacy card-mode chunk, or false on a read failure. Candidates are `shop_order` posts
+	 * created in the history (by post_date_gmt), so every candidate is selected; their metadata is
+	 * read through legacy_meta() (both access paths, first row per key) for the payment method,
+	 * origin, both paid-date keys and, when supported, the saved IP and the attribution source
+	 * type. `_transaction_id` is not read.
+	 *
+	 * @param int                 $after Rows with ID > $after.
+	 * @param int                 $start History start (UTC).
+	 * @param \DateTimeZone       $tz    Store timezone.
+	 * @param array               $work  Per-call work accounting (by reference): candidates, meta_rows, more, budget.
+	 * @param array<string,mixed> $card  ip, attribution (bool), rows_left (int).
+	 * @return array<int,array<string,mixed>>|false
+	 */
+	private static function legacy_card_chunk( int $after, int $start, \DateTimeZone $tz, array &$work, array $card ): array|false {
+		global $wpdb;
+		$left = self::limit( 'candidates' ) - (int) $work['candidates'];
+		if ( $left <= 0 ) {
+			$work['budget'] = true;
+			return array();
+		}
+		$limit            = min( self::limit( 'chunk' ), $left, max( 1, (int) $card['rows_left'] ) );
+		$wpdb->last_error = '';
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- bounded read-only aggregate scan (C4); the ability caches the result.
+		$cands = $wpdb->get_results(
+			$wpdb->prepare(
+				'SELECT p.ID AS id, p.post_status AS s, p.post_date_gmt AS c FROM %i p WHERE p.post_type = %s AND p.ID > %d AND p.post_date_gmt >= %s ORDER BY p.ID ASC LIMIT %d',
+				$wpdb->posts,
+				'shop_order',
+				$after,
+				gmdate( 'Y-m-d H:i:s', $start ),
+				$limit + 1
+			),
+			ARRAY_A
+		);
+		if ( '' !== $wpdb->last_error || ! is_array( $cands ) ) {
+			return false;
+		}
+		$work['more'] = count( $cands ) > $limit;
+		$cands        = array_slice( $cands, 0, $limit );
+		if ( array() === $cands ) {
+			return array();
+		}
+		$work['candidates'] += count( $cands );
+		$keys                = array( '_payment_method', '_created_via', '_date_paid', '_paid_date' );
+		if ( ! empty( $card['ip'] ) ) {
+			$keys[] = CardTestingOrders::IP_META_KEY;
+		}
+		if ( ! empty( $card['attribution'] ) ) {
+			$keys[] = CardTestingOrders::ATTRIBUTION_KEY;
+		}
+		$read = self::legacy_meta(
+			array_map( static fn( $r ) => (int) $r['id'], $cands ),
+			$keys,
+			$work,
+			null,
+			array(
+				CardTestingOrders::IP_META_KEY     => CardTestingOrders::IP_MAX_BYTES + 1,
+				CardTestingOrders::ATTRIBUTION_KEY => CardTestingOrders::ATTRIBUTION_MAX_BYTES + 1,
+			)
+		);
+		if ( false === $read ) {
+			return false;
+		}
+		if ( null === $read ) {
+			return array(); // Budget set: fold none of this batch.
+		}
+		if ( $work['more'] && $work['candidates'] >= self::limit( 'candidates' ) ) {
+			$work['budget'] = true;
+		}
+		$out = array();
+		foreach ( $cands as $r ) {
+			$id      = (int) $r['id'];
+			$m       = $read['meta'][ $id ] ?? array();
+			$created = PaymentRules::utc_datetime( null === $r['c'] ? null : (string) $r['c'] );
+			$paid    = PaymentRules::legacy_paid( $m['_date_paid'] ?? null, $m['_paid_date'] ?? null, $tz );
+			$out[]   = array(
+				'id'            => $id,
+				'method'        => (string) ( $m['_payment_method'] ?? '' ),
+				'status'        => (string) $r['s'],
+				'created'       => $created['ts'],
+				'created_valid' => $created['valid'],
+				'paid'          => $paid['paid'],
+				'paid_valid'    => $paid['valid'],
+				'via'           => $m['_created_via'] ?? null,
+				'ip'            => ! empty( $card['ip'] ) ? ( $m[ CardTestingOrders::IP_META_KEY ] ?? null ) : null,
+				'attr'          => ! empty( $card['attribution'] ) ? ( $m[ CardTestingOrders::ATTRIBUTION_KEY ] ?? null ) : null,
+			);
+		}
+		unset( $read );
+		return $out;
+	}
+
+	/**
+	 * Hydrate at most 5 card-testing example candidates (C4) through wc_get_order() after the rules
+	 * chose them, revalidating each against the captured window: still a failed shop order with no
+	 * paid date, created in the window, with the same origin scope and safe method ID. Changed or
+	 * deleted orders are omitted and reported as changed; aggregate counts are never touched.
+	 *
+	 * @param array<int,array{id:int,method_id:string,origin_scope:string}> $candidates  Candidates from CardTestingRules::evaluate().
+	 * @param string|null                                                   $authority   hpos|legacy.
+	 * @param int                                                           $now         Captured now.
+	 * @param int                                                           $since_hours Window.
+	 * @param \DateTimeZone                                                 $tz          Store timezone.
+	 * @return array{examples:array<int,array<string,string>>,changed:bool}
+	 */
+	public static function card_examples( array $candidates, ?string $authority, int $now, int $since_hours, \DateTimeZone $tz ): array {
+		$out = array(
+			'examples' => array(),
+			'changed'  => false,
+		);
+		if ( array() === $candidates ) {
+			return $out;
+		}
+		if ( ! function_exists( 'wc_get_order' ) || ! in_array( $authority, array( 'hpos', 'legacy' ), true ) ) {
+			$out['changed'] = true;
+			return $out;
+		}
+		$w_start  = $now - max( 1, min( 168, $since_hours ) ) * 3600;
+		$decimals = function_exists( 'wc_get_price_decimals' ) ? (int) wc_get_price_decimals() : 2;
+		foreach ( array_slice( array_values( $candidates ), 0, CardTestingOrders::MAX_EXAMPLES ) as $c ) {
+			$id    = is_array( $c ) && is_int( $c['id'] ?? null ) ? $c['id'] : 0;
+			$order = $id > 0 ? wc_get_order( $id ) : false;
+			$ok    = $order instanceof \WC_Order && 'shop_order' === $order->get_type() && 'failed' === $order->get_status() && null === $order->get_date_paid();
+			$ts    = null;
+			if ( $ok ) {
+				$created = $order->get_date_created();
+				$ts      = null === $created ? null : $created->getTimestamp();
+				$ok      = null !== $ts && $ts >= $w_start && $ts < $now;
+			}
+			$method = '';
+			if ( $ok ) {
+				$via    = (string) $order->get_created_via();
+				$scope  = '' === $via ? 'missing_origin' : ( in_array( $via, array( 'checkout', 'store-api' ), true ) ? 'verified_checkout' : null );
+				$method = PaymentRules::safe_method_id( (string) $order->get_payment_method() );
+				$ok     = '' !== $method && ( $c['origin_scope'] ?? null ) === $scope && ( $c['method_id'] ?? null ) === $method;
+			}
+			if ( ! $ok ) {
+				$out['changed'] = true;
+				continue;
+			}
+			$currency          = (string) $order->get_currency();
+			$path              = 'hpos' === $authority ? 'admin.php?page=wc-orders&action=edit&id=' . $id : 'post.php?post=' . $id . '&action=edit';
+			$out['examples'][] = array(
+				'number'    => (string) $id,
+				'created'   => PaymentRules::iso( (int) $ts, $tz ),
+				'status'    => 'failed',
+				'method_id' => $method,
+				'total'     => number_format( (float) $order->get_total(), max( 0, $decimals ), '.', '' ),
+				'currency'  => 1 === preg_match( '/^[A-Z]{3}$/', $currency ) ? $currency : '',
+				'edit_url'  => admin_url( $path ),
 			);
 		}
 		return $out;

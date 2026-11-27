@@ -1,0 +1,446 @@
+{
+  "schema_version": 1,
+  "verified_on": "2026-11-27",
+  "purpose": "Source-verified, non-secret facts for the 1.3 checkout-path protection reader (FEATURE-PLAN.md item 5 and the protection half of item 1, contract C7). Every fact below was read from the WooCommerce release packages named in sources; citations are version:path:line with paths relative to the WooCommerce plugin root (wp- prefixed versions are WordPress core). These are source facts, not site configuration and not proof that any protection is enforced. All values in synthetic_cases are invented test shapes, never store data.",
+  "sources": {
+    "woocommerce_floor": {
+      "version": "10.9.0",
+      "package": "WordPress.org woocommerce 10.9.0 package (full plugin)"
+    },
+    "woocommerce_current": {
+      "version": "11.3.1",
+      "package": "WordPress.org woocommerce 11.3.1 package (src/, includes/ and woocommerce.php)"
+    },
+    "wordpress": {
+      "version": "7.1.5",
+      "cross_check": "7.2-RC3",
+      "note": "REST routing, batch dispatch, block delimiter and shortcode grammar. Same behaviour in 7.2-RC3 at the lines given under each fact."
+    }
+  },
+  "supported_range": {
+    "ruling": "REVIEW-pass4 Q3 (b): one stable-release range for both readers, the same as CardTestingOrders::SUPPORTED_WC_MIN / SUPPORTED_WC_BELOW",
+    "min": "10.9.0",
+    "below": "11.4.0",
+    "source_pins": ["10.9.0", "11.3.1"],
+    "stable_grammar": "^(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$",
+    "display_grammar": "^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}(-[0-9A-Za-z.]{1,24})?$",
+    "rule": "A version is supported only when it matches stable_grammar exactly and min <= version < below. A prerelease, build suffix, leading zero, extra part or any other malformed value is unsupported; suffixes are never stripped. Facts identical at both source pins are used for every supported release; releases other than the pins (later 11.3 patches included) are covered by this compatibility policy, not by a new source read. A fact that differs between the pins is used only at the exact pin where it was read and reported as not known for every other supported release. Outside the range, prerelease, malformed or missing: wc_version_unsupported, and no source default is assumed. A new minor release needs a source review before below moves.",
+    "disclosure": "Every permitted call returns the limitation protection_source_versions (scope protection): its fixed text names the pins and the range, followed by one fixed sentence naming the installed version when it matches display_grammar (installed_version_text()), never raw constant text."
+  },
+  "rate_limit_checkout": {
+    "feature_id": "rate_limit_checkout",
+    "ui_name": "Rate limit Checkout",
+    "ui_path": "WooCommerce > Settings > Advanced > Features > Rate limit Checkout",
+    "option": "woocommerce_feature_rate_limit_checkout_enabled",
+    "option_name_rule": "woocommerce_feature_{feature_id}_enabled when the definition has no option_key",
+    "saved_values": {
+      "yes": "on",
+      "no": "off",
+      "other": "WooCommerce treats every value other than the string 'yes' as off; the toolkit reports any other saved value as unrecognised (state unknown, configured null), never off"
+    },
+    "default": "no",
+    "absent_means": "off by the source default (the same at both pins), used only inside the supported range",
+    "opt_in_limit": 3,
+    "opt_in_seconds": 60,
+    "opt_in_filter_priority": 1,
+    "route_pattern": {
+      "10.9.0": "#/wc/store(?:/v\\d+)?/checkout#",
+      "11.3.1": "#/wc/store(?:/v\\d+)?/checkout#i"
+    },
+    "pattern_subject": "$GLOBALS['wp']->query_vars['rest_route'] of the outer request",
+    "methods": "POST only; an X-HTTP-Method-Override header must be empty or POST",
+    "routes_in_scope": [
+      "POST /wc/store/v1/checkout",
+      "POST /wc/store/v1/checkout/{id}"
+    ],
+    "unanchored_note": "The pattern has no end anchor, so it also matches /checkout/{id}.",
+    "bypass": "users with the edit_posts capability are never rate limited by the Store API",
+    "identity": "signed-in user ID, else md5 of the visitor IP address; proxy support is off by default",
+    "not_covered": [
+      "classic checkout form (wc-ajax checkout handler)",
+      "classic order payment page (pay_action)",
+      "add payment method form (add_payment_method_action)",
+      "checkout sub-requests sent inside the Store API batch route (outer route /wc/store/v1/batch does not match the pattern, and WordPress runs authentication once per outer request)"
+    ],
+    "rate_limit_defaults_without_opt_in": {
+      "enabled": false,
+      "proxy_support": false,
+      "limit": 25,
+      "seconds": 10
+    },
+    "filters": {
+      "options": "woocommerce_store_api_rate_limit_options",
+      "identity": "woocommerce_store_api_rate_limit_id"
+    },
+    "evidence": {
+      "10.9.0": [
+        { "fact": "feature definition, name Rate limit Checkout", "at": "10.9.0:src/Internal/Features/FeaturesController.php:318" },
+        { "fact": "enabled_by_default false", "at": "10.9.0:src/Internal/Features/FeaturesController.php:327" },
+        { "fact": "option name woocommerce_feature_{id}_enabled", "at": "10.9.0:src/Internal/Features/FeaturesController.php:1202" },
+        { "fact": "enabled only when the saved value is exactly 'yes'; default 'no'", "at": "10.9.0:src/Internal/Features/FeaturesController.php:915" },
+        { "fact": "Authentication hooks only for Store API requests", "at": "10.9.0:src/StoreApi/Authentication.php:17" },
+        { "fact": "check_authentication hooked on rest_authentication_errors", "at": "10.9.0:src/StoreApi/Authentication.php:20" },
+        { "fact": "opt_in_checkout_endpoint hooked at priority 9", "at": "10.9.0:src/StoreApi/Authentication.php:21" },
+        { "fact": "edit_posts bypass", "at": "10.9.0:src/StoreApi/Authentication.php:163" },
+        { "fact": "feature check in the opt-in", "at": "10.9.0:src/StoreApi/Authentication.php:192" },
+        { "fact": "case-sensitive route pattern", "at": "10.9.0:src/StoreApi/Authentication.php:194" },
+        { "fact": "opt-in adds woocommerce_store_api_rate_limit_options", "at": "10.9.0:src/StoreApi/Authentication.php:198" },
+        { "fact": "enabled true, limit 3, seconds 60", "at": "10.9.0:src/StoreApi/Authentication.php:200" },
+        { "fact": "rate limit identity filter", "at": "10.9.0:src/StoreApi/Authentication.php:287" },
+        { "fact": "is_request_to_store_api uses case-sensitive strpos", "at": "10.9.0:src/StoreApi/Authentication.php:301" },
+        { "fact": "POST-only check", "at": "10.9.0:src/StoreApi/Authentication.php:312" },
+        { "fact": "RateLimits ENABLED false", "at": "10.9.0:src/StoreApi/Utilities/RateLimits.php:22" },
+        { "fact": "RateLimits PROXY_SUPPORT false", "at": "10.9.0:src/StoreApi/Utilities/RateLimits.php:29" },
+        { "fact": "options filter applied in get_options", "at": "10.9.0:src/StoreApi/Utilities/RateLimits.php:231" }
+      ],
+      "11.3.1": [
+        { "fact": "feature definition, name Rate limit Checkout", "at": "11.3.1:src/Internal/Features/FeaturesController.php:368" },
+        { "fact": "enabled_by_default false", "at": "11.3.1:src/Internal/Features/FeaturesController.php:377" },
+        { "fact": "option name woocommerce_feature_{id}_enabled", "at": "11.3.1:src/Internal/Features/FeaturesController.php:1258" },
+        { "fact": "enabled only when the saved value is exactly 'yes'; default 'no'", "at": "11.3.1:src/Internal/Features/FeaturesController.php:971" },
+        { "fact": "Authentication hooks only for Store API requests", "at": "11.3.1:src/StoreApi/Authentication.php:20" },
+        { "fact": "check_authentication hooked on rest_authentication_errors", "at": "11.3.1:src/StoreApi/Authentication.php:23" },
+        { "fact": "opt_in_checkout_endpoint hooked at priority 9", "at": "11.3.1:src/StoreApi/Authentication.php:24" },
+        { "fact": "edit_posts bypass", "at": "11.3.1:src/StoreApi/Authentication.php:221" },
+        { "fact": "feature check in the opt-in", "at": "11.3.1:src/StoreApi/Authentication.php:250" },
+        { "fact": "case-insensitive route pattern", "at": "11.3.1:src/StoreApi/Authentication.php:252" },
+        { "fact": "opt-in adds woocommerce_store_api_rate_limit_options", "at": "11.3.1:src/StoreApi/Authentication.php:256" },
+        { "fact": "enabled true, limit 3, seconds 60", "at": "11.3.1:src/StoreApi/Authentication.php:258" },
+        { "fact": "rate limit identity filter", "at": "11.3.1:src/StoreApi/Authentication.php:345" },
+        { "fact": "is_request_to_store_api uses case-insensitive stripos", "at": "11.3.1:src/StoreApi/Authentication.php:359" },
+        { "fact": "POST-only check", "at": "11.3.1:src/StoreApi/Authentication.php:370" },
+        { "fact": "RateLimits file byte-identical to 10.9.0", "at": "11.3.1:src/StoreApi/Utilities/RateLimits.php:22" }
+      ],
+      "wordpress": [
+        { "fact": "authentication runs once per outer request in serve_request", "at": "wp-7.1.5:wp-includes/rest-api/class-wp-rest-server.php:438", "cross_check": "wp-7.2-RC3:wp-includes/rest-api/class-wp-rest-server.php:486" },
+        { "fact": "route matching is case-insensitive", "at": "wp-7.1.5:wp-includes/rest-api/class-wp-rest-server.php:1172", "cross_check": "wp-7.2-RC3:wp-includes/rest-api/class-wp-rest-server.php:1388" },
+        { "fact": "serve_batch_request_v1 dispatches sub-requests without check_authentication", "at": "wp-7.1.5:wp-includes/rest-api/class-wp-rest-server.php:1741", "cross_check": "wp-7.2-RC3:wp-includes/rest-api/class-wp-rest-server.php:1926" }
+      ]
+    },
+    "differences": [
+      {
+        "fact": "letter case of the request address",
+        "10.9.0": "case-sensitive (strpos and a pattern without the i flag) while WordPress routes in any case, so a differently cased address reaches the route outside the pattern",
+        "11.3.1": "case-insensitive (stripos and the i flag)",
+        "runtime": "scope_known true only at exactly 10.9.0 or 11.3.1; every other supported release (between the pins, or a later 11.3 patch) reports rate_limit_scope_unverified"
+      }
+    ]
+  },
+  "store_api_routes": {
+    "checkout": {
+      "path": "/checkout",
+      "identifier": "checkout",
+      "post_method": "CREATABLE (POST), permission_callback __return_true",
+      "evidence": [
+        "10.9.0:src/StoreApi/Routes/V1/Checkout.php:57",
+        "10.9.0:src/StoreApi/Routes/V1/Checkout.php:86",
+        "11.3.1:src/StoreApi/Routes/V1/Checkout.php:63",
+        "11.3.1:src/StoreApi/Routes/V1/Checkout.php:92"
+      ]
+    },
+    "checkout_order": {
+      "path": "/checkout/(?P<id>[\\d]+)",
+      "identifier": "checkout-order",
+      "post_method": "CREATABLE (POST), permission_callback is_authorized",
+      "authorisation": "signed-in owner of a customer order; otherwise order key and billing email must match (not a bot check)",
+      "evidence": [
+        "10.9.0:src/StoreApi/Routes/V1/CheckoutOrder.php:53",
+        "10.9.0:src/StoreApi/Routes/V1/CheckoutOrder.php:64",
+        "10.9.0:src/StoreApi/Routes/V1/CheckoutOrder.php:66",
+        "10.9.0:src/StoreApi/Utilities/OrderAuthorizationTrait.php:35",
+        "10.9.0:src/StoreApi/Utilities/OrderAuthorizationTrait.php:45",
+        "10.9.0:src/StoreApi/Utilities/OrderAuthorizationTrait.php:46",
+        "11.3.1:src/StoreApi/Routes/V1/CheckoutOrder.php:54",
+        "11.3.1:src/StoreApi/Routes/V1/CheckoutOrder.php:65",
+        "11.3.1:src/StoreApi/Routes/V1/CheckoutOrder.php:67",
+        "11.3.1:src/StoreApi/Utilities/OrderAuthorizationTrait.php:35",
+        "11.3.1:src/StoreApi/Utilities/OrderAuthorizationTrait.php:45",
+        "11.3.1:src/StoreApi/Utilities/OrderAuthorizationTrait.php:46"
+      ]
+    },
+    "batch": {
+      "path": "/batch",
+      "methods": "POST; sub-request methods POST, PUT, PATCH, DELETE (filterable); sub-request paths must start with /wc/store",
+      "evidence": [
+        "10.9.0:src/StoreApi/Routes/V1/Batch.php:42",
+        "10.9.0:src/StoreApi/Routes/V1/Batch.php:77",
+        "10.9.0:src/StoreApi/Routes/V1/Batch.php:121",
+        "10.9.0:src/StoreApi/Routes/V1/Batch.php:125",
+        "11.3.1:src/StoreApi/Routes/V1/Batch.php:43",
+        "11.3.1:src/StoreApi/Routes/V1/Batch.php:78",
+        "11.3.1:src/StoreApi/Routes/V1/Batch.php:122",
+        "11.3.1:src/StoreApi/Routes/V1/Batch.php:126"
+      ]
+    },
+    "exposure_rule": "Inside the supported range these routes are available_in_core. That is a source fact, not a claim that a remote client can reach them; the toolkit never builds the REST server or dispatches a request to check."
+  },
+  "checkout_page": {
+    "option": "woocommerce_checkout_page_id",
+    "page_id_filter": "woocommerce_get_{page}_page_id (woocommerce_get_checkout_page_id), applied by wc_get_page_id; the toolkit reads the option and records only whether the filter has callbacks",
+    "max_bytes_read": 262144,
+    "published_status": "publish",
+    "block_marker": {
+      "name": "woocommerce/checkout",
+      "rule": "an opening block delimiter whose full name is exactly woocommerce/checkout (inner blocks such as woocommerce/checkout-fields-block do not count)",
+      "evidence": [
+        "10.9.0:src/Blocks/BlockTypes/Checkout.php:25",
+        "10.9.0:src/Blocks/BlockTypes/AbstractBlock.php:21",
+        "10.9.0:assets/client/blocks/checkout/block.json:2",
+        "11.3.1:src/Blocks/BlockTypes/Checkout.php:26",
+        "11.3.1:src/Blocks/BlockTypes/AbstractBlock.php:24",
+        "10.9.0:src/Blocks/Utils/CartCheckoutUtils.php:181",
+        "11.3.1:src/Blocks/Utils/CartCheckoutUtils.php:181"
+      ],
+      "delimiter_grammar": "wp-7.1.5:wp-includes/class-wp-block-parser.php:248"
+    },
+    "classic_markers": {
+      "shortcode": "woocommerce_checkout",
+      "shortcode_tag_filter": "woocommerce_checkout_shortcode_tag (the tag is filterable, so a renamed tag makes the classic marker unreliable)",
+      "shortcode_rule": "[woocommerce_checkout] with or without attributes, not escaped as [[...]], not inside an HTML comment, tag not followed by a word character or hyphen",
+      "classic_shortcode_block": "woocommerce/classic-shortcode with attribute shortcode equal to checkout; a missing attribute means cart",
+      "evidence": [
+        "10.9.0:includes/class-wc-shortcodes.php:41",
+        "10.9.0:includes/class-wc-shortcodes.php:46",
+        "11.3.1:includes/class-wc-shortcodes.php:41",
+        "11.3.1:includes/class-wc-shortcodes.php:46",
+        "10.9.0:src/Blocks/BlockTypes/ClassicShortcode.php:19",
+        "10.9.0:src/Blocks/BlockTypes/ClassicShortcode.php:56",
+        "11.3.1:src/Blocks/BlockTypes/ClassicShortcode.php:19",
+        "11.3.1:src/Blocks/BlockTypes/ClassicShortcode.php:56",
+        "10.9.0:assets/client/blocks/classic-shortcode/block.json:18",
+        "10.9.0:src/Blocks/Utils/CartCheckoutUtils.php:54",
+        "11.3.1:src/Blocks/Utils/CartCheckoutUtils.php:54",
+        "10.9.0:src/Blocks/Utils/CartCheckoutUtils.php:134",
+        "11.3.1:src/Blocks/Utils/CartCheckoutUtils.php:134"
+      ],
+      "shortcode_grammar": [
+        "wp-7.1.5:wp-includes/shortcodes.php:324",
+        "wp-7.1.5:wp-includes/shortcodes.php:396",
+        "wp-7.1.5:wp-includes/shortcodes.php:496"
+      ]
+    },
+    "classic_handler": {
+      "fact": "the classic checkout form submits to the wc-ajax checkout event, not the Store API",
+      "evidence": [
+        "10.9.0:includes/class-wc-ajax.php:149",
+        "10.9.0:includes/class-wc-ajax.php:596",
+        "11.3.1:includes/class-wc-ajax.php:153",
+        "11.3.1:includes/class-wc-ajax.php:659"
+      ]
+    },
+    "types": {
+      "block": "block marker only",
+      "classic": "classic marker only",
+      "mixed": "both markers",
+      "unknown": "no marker, page not set, invalid setting, missing, not published, larger than max_bytes_read, unreadable, shortcode tag renamed with no block-only marker, or WooCommerce version outside the supported range"
+    },
+    "template_note": "WooCommerce's own block-theme checkout template renders the page content (10.9.0:templates/templates/page-checkout.html:6), but a customised theme template or page builder can change what shows; the toolkit reads the page only and says so."
+  },
+  "order_pay": {
+    "endpoint_option": "woocommerce_checkout_pay_endpoint (default order-pay); not read by the toolkit",
+    "handler": "WC_Form_Handler::pay_action on wp at priority 20",
+    "checks": {
+      "10.9.0": "nonce woocommerce-pay, order key, needs_payment",
+      "11.3.1": "nonce woocommerce-pay, order key, needs_payment, not a checkout draft, pay_for_order capability or email verification"
+    },
+    "bot_check": false,
+    "rate_limit_checkout_covers": false,
+    "evidence": [
+      "10.9.0:includes/class-wc-form-handler.php:36",
+      "10.9.0:includes/class-wc-form-handler.php:425",
+      "10.9.0:includes/class-wc-form-handler.php:436",
+      "10.9.0:includes/class-wc-query.php:90",
+      "11.3.1:includes/class-wc-form-handler.php:64",
+      "11.3.1:includes/class-wc-form-handler.php:555",
+      "11.3.1:includes/class-wc-form-handler.php:567",
+      "11.3.1:includes/class-wc-form-handler.php:569",
+      "11.3.1:includes/class-wc-query.php:94"
+    ],
+    "difference_note": "The extra 11.3.1 checks are authorisation checks, not bot checks; the toolkit's facts for this path name only the nonce and order key, which both versions share."
+  },
+  "add_payment_method": {
+    "myaccount_option": "woocommerce_myaccount_page_id",
+    "myaccount_page_id_filter": "woocommerce_get_myaccount_page_id",
+    "endpoint_option": "woocommerce_myaccount_add_payment_method_endpoint (default add-payment-method); not read by the toolkit",
+    "handler": "WC_Form_Handler::add_payment_method_action on wp at priority 20; runs on any front-end request carrying the form fields and a valid nonce",
+    "delay_filter": "woocommerce_payment_gateway_add_payment_method_delay",
+    "delay_default_seconds": 20,
+    "delay_key": "add_payment_method_{current user ID}, so the wait is per account",
+    "effective_value": "not asserted; the filter can change it and the toolkit never applies it",
+    "rate_limit_checkout_covers": false,
+    "evidence": [
+      "10.9.0:includes/class-wc-form-handler.php:37",
+      "10.9.0:includes/class-wc-form-handler.php:515",
+      "10.9.0:includes/class-wc-form-handler.php:525",
+      "10.9.0:includes/class-wc-form-handler.php:526",
+      "10.9.0:includes/class-wc-form-handler.php:528",
+      "10.9.0:includes/class-wc-query.php:101",
+      "11.3.1:includes/class-wc-form-handler.php:65",
+      "11.3.1:includes/class-wc-form-handler.php:650",
+      "11.3.1:includes/class-wc-form-handler.php:660",
+      "11.3.1:includes/class-wc-form-handler.php:661",
+      "11.3.1:includes/class-wc-form-handler.php:663",
+      "11.3.1:includes/class-wc-query.php:105"
+    ]
+  },
+  "order_attribution": {
+    "feature_id": "order_attribution",
+    "option": "woocommerce_feature_order_attribution_enabled",
+    "default": "yes",
+    "saved_values": {
+      "yes": "on",
+      "no": "off",
+      "other": "unrecognised (enabled null)"
+    },
+    "filters": {
+      "prefix": "wc_order_attribution_tracking_field_prefix",
+      "fields": "wc_order_attribution_tracking_fields",
+      "allow_tracking": "wc_order_attribution_allow_tracking"
+    },
+    "note": "Attribution support is reported separately from checkout-path protection: it improves evidence and does not block anything. Order-side attribution meta facts are pinned by card-testing-contracts.json.",
+    "evidence": [
+      "10.9.0:src/Internal/Features/FeaturesController.php:347",
+      "10.9.0:src/Internal/Features/FeaturesController.php:353",
+      "11.3.1:src/Internal/Features/FeaturesController.php:406",
+      "11.3.1:src/Internal/Features/FeaturesController.php:412",
+      "10.9.0:src/Internal/Orders/OrderAttributionController.php:111",
+      "11.3.1:src/Internal/Orders/OrderAttributionController.php:111",
+      "10.9.0:src/Internal/Traits/OrderAttributionMeta.php:96",
+      "10.9.0:src/Internal/Traits/OrderAttributionMeta.php:115",
+      "11.3.1:src/Internal/Traits/OrderAttributionMeta.php:96",
+      "11.3.1:src/Internal/Traits/OrderAttributionMeta.php:115",
+      "10.9.0:src/Internal/Orders/OrderAttributionController.php:327",
+      "11.3.1:src/Internal/Orders/OrderAttributionController.php:327"
+    ]
+  },
+  "woocommerce_version": {
+    "constant": "WC_VERSION",
+    "evidence": [
+      "10.9.0:includes/class-woocommerce.php:521",
+      "11.3.1:includes/class-woocommerce.php:565"
+    ]
+  },
+  "watched_filters": {
+    "rate_limit_options": "woocommerce_store_api_rate_limit_options",
+    "rate_limit_id": "woocommerce_store_api_rate_limit_id",
+    "saved_method_delay": "woocommerce_payment_gateway_add_payment_method_delay",
+    "checkout_page_id": "woocommerce_get_checkout_page_id",
+    "myaccount_page_id": "woocommerce_get_myaccount_page_id",
+    "checkout_shortcode_tag": "woocommerce_checkout_shortcode_tag",
+    "attribution_prefix": "wc_order_attribution_tracking_field_prefix",
+    "attribution_fields": "wc_order_attribution_tracking_fields",
+    "attribution_allow_tracking": "wc_order_attribution_allow_tracking"
+  },
+  "never": [
+    "render blocks, run shortcodes or apply the_content",
+    "apply any watched filter (presence only, through has_filter)",
+    "call RateLimits, WC_Rate_Limiter, Authentication, a form handler or a gateway",
+    "build the REST server or dispatch a request",
+    "read post_password or any captcha or gateway secret",
+    "enumerate option names or read options outside the four allowlisted ones",
+    "output page text, page IDs, URLs or query tokens"
+  ],
+  "path_ids": [
+    "checkout_page",
+    "store_api_checkout",
+    "store_api_order_pay",
+    "order_pay",
+    "add_payment_method"
+  ],
+  "enums": {
+    "exposure": ["configured", "available_in_core", "unknown", "not_applicable"],
+    "checkout_type": ["classic", "block", "mixed", "unknown", null],
+    "protection_state": ["configured", "not_configured", "unknown", "not_applicable"],
+    "enforcement": ["unverified", "not_applicable"],
+    "protection_id": ["core_checkout_rate_limit", "core_saved_payment_delay"]
+  },
+  "reason_codes": {
+    "protection_enforcement_unverified": "This check reads settings and the checkout page only. It cannot confirm that any protection works, and it cannot see protection added by other plugins, the server, a CDN or the payment provider.",
+    "protection_source_versions": "The checkout protection facts come from WooCommerce 10.9.0 and 11.3.1 source code. They are used for stable WooCommerce releases from 10.9.0 up to, not including, 11.4.0; other releases in that range, including later 11.3 patches, are covered by that compatibility policy, not by a separate source check.",
+    "wc_version_unsupported": "This WooCommerce version is outside the range this check supports (stable releases from 10.9.0 up to, not including, 11.4.0), so facts that depend on WooCommerce's own code were not described.",
+    "checkout_page_not_set": "No checkout page is set in WooCommerce.",
+    "checkout_page_invalid_setting": "The saved checkout page setting is not a valid page.",
+    "checkout_page_missing": "The checkout page set in WooCommerce no longer exists.",
+    "checkout_page_unpublished": "The checkout page set in WooCommerce is not published.",
+    "checkout_page_oversize": "The checkout page is too large for this check to read.",
+    "checkout_page_unreadable": "The checkout page could not be read.",
+    "checkout_page_no_marker": "The checkout page has no standard checkout block or shortcode, so a page builder, pattern or theme template may supply the checkout.",
+    "checkout_page_mixed": "The checkout page contains both the checkout block and the classic checkout shortcode, so which one shoppers use is not known.",
+    "checkout_shortcode_renamed": "A plugin or theme renames WooCommerce's checkout shortcode, so a classic checkout could not be recognised.",
+    "no_readable_protection": "No setting this check can read covers this path.",
+    "rate_limit_checkout_off": "WooCommerce's Rate limit Checkout setting is off. This does not mean nothing else protects this path.",
+    "rate_limit_setting_unrecognised": "Rate limit Checkout has an unexpected saved value, so whether it is on is not known.",
+    "rate_limit_filter_present": "A plugin or theme changes Store API rate limits, so the limits in use are not known.",
+    "rate_limit_scope_unverified": "Whether Rate limit Checkout matches request addresses written in any letter case was checked only for WooCommerce 10.9.0 and 11.3.1, so it is not known for this version.",
+    "attribution_disabled": "WooCommerce order attribution is off, so where orders came from is not recorded.",
+    "attribution_setting_unrecognised": "The order attribution setting has an unexpected saved value, so whether it is on is not known.",
+    "attribution_prefix_override": "A plugin or theme changes how order attribution is stored, so it could not be read.",
+    "attribution_fields_override": "A plugin or theme changes which order attribution details are recorded, so they could not be read."
+  },
+  "synthetic_cases": {
+    "versions": [
+      { "raw": "10.8.9", "display": "10.8.9", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "10.8.99", "display": "10.8.99", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "10.9.0", "display": "10.9.0", "supported": true, "pinned": true, "case_insensitive": false, "sentence": "pinned" },
+      { "raw": "10.9.1", "display": "10.9.1", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.0.0", "display": "11.0.0", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.3.0", "display": "11.3.0", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.3.1", "display": "11.3.1", "supported": true, "pinned": true, "case_insensitive": true, "sentence": "pinned" },
+      { "raw": "11.3.2", "display": "11.3.2", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.3.99", "display": "11.3.99", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.3.9999", "display": "11.3.9999", "supported": true, "pinned": false, "case_insensitive": null, "sentence": "supported" },
+      { "raw": "11.4.0", "display": "11.4.0", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "11.4.1", "display": "11.4.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "11.10.0", "display": "11.10.0", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "9.9.9", "display": "9.9.9", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "12.0.0", "display": "12.0.0", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "011.3.1", "display": "011.3.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "11.03.1", "display": "11.03.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "outside" },
+      { "raw": "11.3.1-beta.1", "display": "11.3.1-beta.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.3.2-rc.1", "display": "11.3.2-rc.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "10.9.0-rc.1", "display": "10.9.0-rc.1", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.0.0-beta", "display": "11.0.0-beta", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.4.0-dev", "display": "11.4.0-dev", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.3", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1.1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "v11.3.1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": " 11.3.1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1 ", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1+build.5", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1-", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1-beta_1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1-beta-1", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.1-aaaaaaaaaaaaaaaaaaaaaaaa", "display": "11.3.1-aaaaaaaaaaaaaaaaaaaaaaaa", "supported": false, "pinned": false, "case_insensitive": null, "sentence": "prerelease" },
+      { "raw": "11.3.1-aaaaaaaaaaaaaaaaaaaaaaaaa", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "11.3.10000", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" },
+      { "raw": "", "display": null, "supported": false, "pinned": false, "case_insensitive": null, "sentence": "unreadable" }
+    ],
+    "max_bytes_boundary": {
+      "at_limit": 262144,
+      "over_limit": 262145
+    },
+    "markers": [
+      { "id": "classic_plain", "content": "[woocommerce_checkout]", "expect": "classic" },
+      { "id": "classic_attrs", "content": "<p>Intro</p>[woocommerce_checkout foo=\"bar\"]", "expect": "classic" },
+      { "id": "classic_self_closing", "content": "[woocommerce_checkout/]", "expect": "classic" },
+      { "id": "classic_in_shortcode_block", "content": "<!-- wp:shortcode -->\n[woocommerce_checkout]\n<!-- /wp:shortcode -->", "expect": "classic" },
+      { "id": "classic_shortcode_block_checkout", "content": "<!-- wp:woocommerce/classic-shortcode {\"shortcode\":\"checkout\"} /-->", "expect": "classic" },
+      { "id": "classic_shortcode_block_cart_default", "content": "<!-- wp:woocommerce/classic-shortcode /-->", "expect": "none" },
+      { "id": "classic_shortcode_block_cart", "content": "<!-- wp:woocommerce/classic-shortcode {\"shortcode\":\"cart\"} /-->", "expect": "none" },
+      { "id": "classic_escaped", "content": "Use [[woocommerce_checkout]] to show the checkout.", "expect": "none" },
+      { "id": "classic_in_html_comment", "content": "<!-- old: [woocommerce_checkout] -->", "expect": "none" },
+      { "id": "classic_longer_tag", "content": "[woocommerce_checkout_extra]", "expect": "none" },
+      { "id": "classic_hyphen_tag", "content": "[woocommerce_checkout-x]", "expect": "none" },
+      { "id": "cart_shortcode", "content": "[woocommerce_cart]", "expect": "none" },
+      { "id": "block_plain", "content": "<!-- wp:woocommerce/checkout -->\n<div class=\"wp-block-woocommerce-checkout\"></div>\n<!-- /wp:woocommerce/checkout -->", "expect": "block" },
+      { "id": "block_attrs", "content": "<!-- wp:woocommerce/checkout {\"showOrderNotes\":false} -->\n<div></div>\n<!-- /wp:woocommerce/checkout -->", "expect": "block" },
+      { "id": "block_inner_only", "content": "<!-- wp:woocommerce/checkout-fields-block -->\n<div></div>\n<!-- /wp:woocommerce/checkout-fields-block -->", "expect": "none" },
+      { "id": "block_closer_only", "content": "<!-- /wp:woocommerce/checkout -->", "expect": "none" },
+      { "id": "mixed", "content": "<!-- wp:woocommerce/checkout -->\n<div></div>\n<!-- /wp:woocommerce/checkout -->\n[woocommerce_checkout]", "expect": "mixed" },
+      { "id": "builder", "content": "[builder_section id=\"12\"][/builder_section]", "expect": "none" },
+      { "id": "synced_pattern", "content": "<!-- wp:block {\"ref\":123} /-->", "expect": "none" },
+      { "id": "empty", "content": "", "expect": "none" }
+    ]
+  }
+}

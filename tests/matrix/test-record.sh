@@ -151,6 +151,46 @@ transport_rows() {
 	return 0
 }
 
+# The card-testing rows for one state (CARD= lines, 1.3 item 8), with mutations: card-missing
+# (drops one recommended legacy:yes row), card-dup (repeats a both row), card-failed (one easy-2.5.2
+# row FAILED), card-unknown (an extra case), card-none (no card rows at all), card-auth-label (an
+# existing-style hpos authority label instead of a storage:sync one).
+card_rows() {
+	local state=$1 mut=$2 routes r a c
+	case "$state" in recommended) routes=rec ;; easy-*) routes=easy ;; *) routes='rec easy' ;; esac
+	[ "$mut" == card-none ] && return 0
+	for r in $routes; do
+		if [ "$state" == none ]; then
+			echo "CARD=$state|$r|any|admin|card_no_tool|PASSED"
+			continue
+		fi
+		for c in 'admin|card_discovery' 'admin|card_workflows' 'admin|card_analytics_off' 'admin|card_tool_off' 'manager|card_roles'; do echo "CARD=$state|$r|any|$c|PASSED"; done
+		for a in hpos:no hpos:yes legacy:yes legacy:no; do
+			for c in 'admin|card_recent' 'admin|card_earlier' 'admin|card_low_volume' 'admin|card_gaps' 'admin|card_protection' 'admin|card_diag_off' 'admin|card_diag_on' 'admin|card_diag_off_again' 'manager|card_diag_off' 'manager|card_diag_on' 'manager|card_diag_off_again' 'customer|card_denied' 'subscriber|card_denied' 'anonymous|card_denied' 'manager|card_warm_downgrade'; do
+				[ "$mut" == card-missing ] && [ "$state" == recommended ] && [ "$a" == legacy:yes ] && [ "$c" == 'admin|card_gaps' ] && continue
+				if [ "$mut" == card-failed ] && [ "$state" == easy-2.5.2 ] && [ "$a" == hpos:yes ] && [ "$c" == 'manager|card_diag_off' ]; then
+					echo "CARD=$state|$r|$a|$c|FAILED"
+					continue
+				fi
+				if [ "$mut" == card-auth-label ] && [ "$state" == both ] && [ "$a" == hpos:no ]; then
+					echo "CARD=$state|$r|hpos|$c|PASSED"
+					continue
+				fi
+				echo "CARD=$state|$r|$a|$c|PASSED"
+				[ "$mut" == card-dup ] && [ "$state" == both ] && [ "$r" == easy ] && [ "$a" == legacy:no ] && [ "$c" == 'admin|card_recent' ] && echo "CARD=$state|$r|$a|$c|PASSED"
+			done
+		done
+		[ "$mut" == card-unknown ] && [ "$state" == both ] && echo "CARD=$state|$r|legacy:no|admin|card_extra_case|PASSED"
+	done
+	return 0
+}
+
+# A card performance receipt the validator accepts for zip SHA $1, source $2 and attempt $3, from
+# the card suite's own sample builder; card-perf-* mutations change it afterwards.
+card_perf_receipt() {
+	php "$REPO/tests/matrix/card-testing-perf-sample.php" "$1" "$2" "$3"
+}
+
 # check <label> <expected exit> <stage dir> [mutation]
 # Mutations: bad-sha, stale-version, no-storage, failed-storage, no-perf, perf-unbound, perf-over,
 # perf-short, state-not-run, log-leak, log-path.
@@ -165,14 +205,27 @@ check() {
 		fail=$((fail + 1))
 		return
 	fi
-	rm -f "$zip" "$WORK"/*.log
+	[ "$mut" == stale-name ] && zip="$WORK/candidate-0123456789abcdef0123456789abcdef01234567.zip"
+	[ "$mut" == good-name ] && zip="$WORK/candidate-${COMMIT:0:12}.zip"
+	rm -f "$WORK"/candidate-*.zip "$WORK"/*.log
 	(cd "$dir" && zip -qr "$zip" .)
 	sha=$(shasum -a 256 "$zip" | awk '{print $1}')
 	version=$HEAD_VERSION
 	[ "$mut" == bad-sha ] && sha=0000000000000000000000000000000000000000000000000000000000000000
 	[ "$mut" == stale-version ] && version=1.0.0
+	local attempt=20261127T010203Z-4242-777 states="recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 easy-2.5.2 both none"
+	case "$mut" in subset-*) states="recommended easy-2.5.2" ;; esac
+	[ "$mut" == subset-no-recommended ] && states="easy-2.5.2 both"
 	{
 		printf 'ZIP=%s\nZIP_SHA256=%s\nVERSION=%s\nCOMMIT=%s\nWINDOW_FILE=\nPERF_FILE=%s\n' "$zip" "$sha" "$version" "$COMMIT" "$([ "$mut" == no-perf ] || echo "$WORK/perf.json")"
+		[ "$mut" == card-perf-missing ] || echo "CARD_PERF_FILE=$WORK/card-perf.json"
+		[ "$mut" == no-attempt ] || echo "ATTEMPT=$attempt"
+		case "$mut" in
+		scope-missing) ;;
+		subset-*) echo 'SCOPE=subset'; [ "$mut" == subset-no-states ] || echo "SCOPE_STATES=$([ "$mut" == subset-unknown-state ] && echo "$states easy-9.9.9" || echo "$states")" ;;
+		*) echo 'SCOPE=full' ;;
+		esac
+		[ "$mut" == restart ] && echo 'WINDOW_RESTARTS=1' || echo 'WINDOW_RESTARTS=0'
 		case "$mut" in
 		http-checks-missing) ;;
 		http-checks-failed) echo 'HTTP_CHECKS=68 passed, 3 failed' ;;
@@ -198,11 +251,13 @@ check() {
 		ha-perf-ncpu) echo 'ADMISSION=perf|2026-11-24T01:02:00Z|testhost|8|2.00|1.80|120|3' ;;
 		*) echo 'ADMISSION=perf|2026-11-24T01:02:00Z|testhost|12|3.50|2.80|120|3' ;;
 		esac
+		[ "$mut" == admission-repeated ] && echo 'ADMISSION=perf|2026-11-24T02:02:00Z|testhost|12|1.50|1.80|60|1'
 		[ "$mut" == ha-no-samples ] && echo 'LOAD_SAMPLES=0' || echo 'LOAD_SAMPLES=180'
 		echo 'LOAD_MAX=5.10|3.40'
 		echo 'LOAD_OVER=4'
-		for state in recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 both none; do
+		for state in $states; do
 			[ "$mut" == drop-easy-2.5.1 ] && [ "$state" == easy-2.5.1 ] && continue
+			{ [ "$mut" == drop-easy-2.5.2 ] || [ "$mut" == missing-easy-2.5.2 ]; } && [ "$state" == easy-2.5.2 ] && continue
 			if [ "$mut" == state-not-run ] && [ "$state" == both ]; then
 				echo "STATE=$state|NOT RUN|0|1|||[]"
 				continue
@@ -210,10 +265,17 @@ check() {
 			echo "STATE=$state|PASSED|10|0|6.9|8.3|[]"
 			[ "$mut" == state-dup ] && [ "$state" == easy-2.4.0 ] && echo "STATE=$state|PASSED|10|0|6.9|8.3|[]"
 			transport_rows "$state" "$mut"
+			card_rows "$state" "$mut"
 			[ "$state" == none ] && continue
 			for combo in hpos:no hpos:yes legacy:yes legacy:no; do
-				for suite in test-payment-orders.php test-payment-health.php; do
+				[ "$mut" == storage-unknown ] && [ "$state" == recommended ] && [ "$combo" == hpos:no ] && echo "STORAGE=$state|$combo|test-not-a-storage-suite.php|PASSED|10|0"
+				for suite in test-payment-orders.php test-payment-health.php test-card-testing-orders.php test-card-testing.php; do
 					[ "$mut" == no-storage ] && [ "$combo" == legacy:yes ] && continue
+					[ "$mut" == no-card-storage ] && [ "$state" == easy-2.5.2 ] && [ "$combo" == hpos:yes ] && [ "$suite" == test-card-testing.php ] && continue
+					if [ "$mut" == failed-card-storage ] && [ "$state" == both ] && [ "$combo" == legacy:no ] && [ "$suite" == test-card-testing-orders.php ]; then
+						echo "STORAGE=$state|$combo|$suite|FAILED|9|1"
+						continue
+					fi
 					[ "$mut" == storage-dup ] && [ "$state" == both ] && [ "$combo" == legacy:no ] && echo "STORAGE=$state|$combo|$suite|PASSED|10|0"
 					if [ "$mut" == failed-storage ] && [ "$combo" == hpos:yes ]; then
 						echo "STORAGE=$state|$combo|$suite|FAILED|9|1"
@@ -223,7 +285,25 @@ check() {
 				done
 			done
 		done
+		case "$mut" in
+		truncated) ;;
+		end-mismatch) echo 'END=20261127T999999Z-1-1' ;;
+		*) echo "END=$attempt" ;;
+		esac
 	} >"$WORK/summary.txt"
+	[ "$mut" == end-not-last ] && echo 'STATE=extra|PASSED|1|0|||[]' >>"$WORK/summary.txt"
+	# The card performance receipt (1.3 item 9): the card suite's own sample, bound to this run.
+	rm -f "$WORK/card-perf.json"
+	case "$mut" in
+	card-perf-missing) ;;
+	card-perf-stale-sha) card_perf_receipt "ffff$(shasum -a 256 "$zip" | awk '{print $1}' | cut -c5-)" "$COMMIT" "$attempt" >"$WORK/card-perf.json" ;;
+	card-perf-stale-source) card_perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 0000000000000000000000000000000000000000 "$attempt" >"$WORK/card-perf.json" ;;
+	card-perf-other-attempt) card_perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" "$COMMIT" 20261126T000000Z-1-1 >"$WORK/card-perf.json" ;;
+	card-perf-truncated) card_perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" "$COMMIT" "$attempt" | head -c 400 >"$WORK/card-perf.json" ;;
+	card-perf-slow) card_perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" "$COMMIT" "$attempt" | jq '(.trials[] | select(.storage == "legacy" and .window == 168 and .logger == "db" and .trial == 3)).elapsed_ms = 1500' >"$WORK/card-perf.json" ;;
+	card-perf-pass-flags) card_perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" "$COMMIT" "$attempt" | jq '(.trials[] | select(.storage == "hpos" and .window == 48 and .logger == "file" and .trial == 1)).elapsed_ms = 1700 | .all_pass = true | .partitions |= map(.pass = true)' >"$WORK/card-perf.json" ;;
+	*) card_perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" "$COMMIT" "$attempt" >"$WORK/card-perf.json" ;;
+	esac
 	case "$mut" in
 	perf-unbound) perf_receipt "ffff$(shasum -a 256 "$zip" | awk '{print $1}' | cut -c5-)" 900 >"$WORK/perf.json" ;;
 	perf-over) perf_receipt "$(shasum -a 256 "$zip" | awk '{print $1}')" 1500 >"$WORK/perf.json" ;;
@@ -268,6 +348,7 @@ check() {
 	LAST_OUT=$out
 	local states_env=()
 	[ "$mut" == drop-easy-2.5.1 ] && states_env=(BLZMCP_REQUIRED_STATES='recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 both none')
+	[ "$mut" == drop-easy-2.5.2 ] && states_env=(BLZMCP_REQUIRED_STATES='recommended easy-2.3.1 easy-2.4.0 easy-2.5.0 easy-2.5.1 both none')
 	env ${states_env[@]+"${states_env[@]}"} BLZMCP_MATRIX_OUT=$out BLZMCP_TRANSPORT_OUT="${out%.md}-t.md" BLZMCP_REPORTS_DIR=$WORK "$BASH" "$REPO/tests/matrix/record.sh" "$WORK/summary.txt" PASSED >"$WORK/log" 2>&1
 	local got=$?
 	if [ "$got" -eq "$want" ]; then
@@ -372,17 +453,23 @@ check 'a state that did not run is refused' 5 "$WORK/good" state-not-run
 check 'a duplicated STATE line is refused' 5 "$WORK/good" state-dup
 check 'a duplicated STORAGE line is refused' 5 "$WORK/good" storage-dup
 check 'faithful transport rows are accepted' 0 "$WORK/good"
-assert 'the transport receipt is written with every row and a TRANSPORT PASSED result' "$(grep -q '^- Result: \*\*TRANSPORT PASSED\*\*' "${LAST_OUT%.md}-t.md" && [ "$(grep -cE '^\| [a-z0-9.-]+ \| (rec|easy) \|' "${LAST_OUT%.md}-t.md")" == 191 ] && echo true)"
-assert 'the matrix record has the transport summary (required 191, received 191, passed 191)' "$(grep -q '^- Required 191 (gate 191), received 191, passed 191; missing 0' "$LAST_OUT" && grep -q '^| both | easy | hpos | 11 | 11 |' "$LAST_OUT" && grep -q '^| easy-2.5.0 | easy | legacy | 11 | 11 |' "$LAST_OUT" && grep -q '^| easy-2.5.1 | easy | legacy | 11 | 11 |' "$LAST_OUT" && echo true)"
-assert 'the matrix record has 48 storage rows (gate 48) and the HTTP safety-check self-test line' "$(grep -qxF -- '- Storage rows: required 48 (gate 48), received 48' "$LAST_OUT" && grep -qxF -- '- HTTP safety-check self-test (tests/matrix/test-http-checks.sh, offline injected replies): 71 passed, 0 failed' "$LAST_OUT" && echo true)"
-check 'a matrix narrowed to the 6 states before 1.3 (no easy-2.5.1) is refused' 5 "$WORK/good" drop-easy-2.5.1
-assert '  ... the record names both gate counts' "$(grep -qF 'required transport partitions come to 164, the release matrix needs 191' "$LAST_OUT" && grep -qF 'required storage partitions come to 40, the release matrix needs 48' "$LAST_OUT" && echo true)"
+assert 'the transport receipt is written with every row and a TRANSPORT PASSED result' "$(grep -q '^- Result: \*\*TRANSPORT PASSED\*\*' "${LAST_OUT%.md}-t.md" && [ "$(grep -E '^\| [a-z0-9.-]+ \| (rec|easy) \| (any|hpos|legacy) \| [a-z]+ \| [a-z_]+ \| PASSED \|$' "${LAST_OUT%.md}-t.md" | grep -cv '| card_')" == 218 ] && echo true)"
+assert '  ... and every one of the 522 card rows, each with its storage:sync label' "$(grep -cE '^\| [a-z0-9.-]+ \| (rec|easy) \| (any|hpos:no|hpos:yes|legacy:yes|legacy:no) \| [a-z]+ \| card_[a-z_]+ \| PASSED \|$' "${LAST_OUT%.md}-t.md" | grep -qx 522 && echo true)"
+assert 'the matrix record has the transport summary (required 218, received 218, passed 218)' "$(grep -q '^- Required 218 (gate 218), received 218, passed 218; missing 0' "$LAST_OUT" && grep -q '^| both | easy | hpos | 11 | 11 |' "$LAST_OUT" && grep -q '^| easy-2.5.0 | easy | legacy | 11 | 11 |' "$LAST_OUT" && grep -q '^| easy-2.5.2 | easy | legacy | 11 | 11 |' "$LAST_OUT" && echo true)"
+assert 'the matrix record has 112 storage rows (gate 112) and the HTTP safety-check self-test line' "$(grep -qxF -- '- Storage rows: required 112 (gate 112), received 112' "$LAST_OUT" && grep -qxF -- '- HTTP safety-check self-test (tests/matrix/test-http-checks.sh, offline injected replies): 71 passed, 0 failed' "$LAST_OUT" && echo true)"
+assert 'the matrix record has the card rows (required 522, received 522, passed 522; 740 with the transport rows)' "$(grep -q '^- Required 522 (gate 522; full release set 522, SHA-256 `57170eb243eb6dcc766fdf855906380e5eece343447f18cced9e6c6b236ce4c6`), received 522, passed 522; missing 0' "$LAST_OUT" && grep -qF 'Transport and card rows together: required 740 (full release matrix 740)' "$LAST_OUT" && grep -q '^| easy-2.5.2 | easy | legacy:no | 15 | 15 |' "$LAST_OUT" && grep -q '^| none | rec | any | 1 | 1 |' "$LAST_OUT" && echo true)"
+check 'a matrix narrowed to the states before easy-2.5.1 is refused' 5 "$WORK/good" drop-easy-2.5.1
+assert '  ... the record names every gate count' "$(grep -qF 'required transport partitions come to 164, the release matrix needs 218' "$LAST_OUT" && grep -qF 'required storage partitions come to 80, the release matrix needs 112' "$LAST_OUT" && grep -qF 'required card partitions come to 392, the release matrix needs 522' "$LAST_OUT" && echo true)"
+check 'a matrix narrowed (BLZMCP_REQUIRED_STATES) to the 7 states before easy-2.5.2 is refused' 5 "$WORK/good" drop-easy-2.5.2
+assert '  ... the record names every gate count' "$(grep -qF 'required card partitions come to 457, the release matrix needs 522' "$LAST_OUT" && grep -qF 'required storage partitions come to 96, the release matrix needs 112' "$LAST_OUT" && echo true)"
+check 'a run without the easy-2.5.2 state (no override) is refused' 5 "$WORK/good" missing-easy-2.5.2
+assert '  ... the record names the missing state, its storage rows and its 65 card rows' "$(grep -qF 'state easy-2.5.2 did not run' "$LAST_OUT" && grep -qF 'storage easy-2.5.2 hpos:no test-card-testing.php did not run' "$LAST_OUT" && grep -qF 'card rows missing: 65 of 522' "$LAST_OUT" && echo true)"
 check 'a run without the HTTP safety-check self-test is refused' 5 "$WORK/good" http-checks-missing
 assert '  ... recorded as not run, TRANSPORT FAILED' "$(grep -qF 'test-http-checks.sh) did not run (no HTTP_CHECKS line)' "$LAST_OUT" && grep -q 'TRANSPORT FAILED' "${LAST_OUT%.md}-t.md" && echo true)"
 check 'a run whose HTTP safety-check self-test failed is refused' 5 "$WORK/good" http-checks-failed
 assert '  ... recorded with its summary' "$(grep -qF 'test-http-checks.sh) did not pass: 68 passed, 3 failed' "$LAST_OUT" && echo true)"
 check 'a missing transport row is refused' 5 "$WORK/good" transport-missing
-assert '  ... the record names the missing partition' "$(grep -qF 'transport rows missing: 1 of 191 (first: easy-2.3.1|easy|legacy|anonymous|denied)' "$LAST_OUT" && echo true)"
+assert '  ... the record names the missing partition' "$(grep -qF 'transport rows missing: 1 of 218 (first: easy-2.3.1|easy|legacy|anonymous|denied)' "$LAST_OUT" && echo true)"
 check 'a duplicated transport row is refused' 5 "$WORK/good" transport-dup
 check 'a transport row outside the required set is refused' 5 "$WORK/good" transport-unknown
 check 'a state with no transport rows is refused' 5 "$WORK/good" transport-none
@@ -449,6 +536,70 @@ check 'Q8 boundary: a perf sample at load1 3.96 (N = 12) is refused' 5 "$WORK/go
 check 'Q8: a perf sample taken on another CPU count is refused' 5 "$WORK/good" ha-perf-ncpu
 check 'Q8: zero load samples is refused' 5 "$WORK/good" ha-no-samples
 assert '  ... named' "$(grep -qF 'no 60-second load samples recorded (LOAD_SAMPLES 0)' "$LAST_OUT" && echo true)"
+
+# 1.3 (FEATURE-PLAN items 8 and 9, C10): card rows, card storage suites, the card performance
+# receipt, attempt and scope binding, truncation, date restarts and repeated admissions. Each defect
+# is its own failure with its own message.
+check 'faithful package with complete 1.3 evidence is accepted' 0 "$WORK/good"
+assert '  ... the record names scope full, the attempt, the source and the package hash' "$(grep -qF -- "- Scope: full; attempt \`20261127T010203Z-4242-777\`; source \`$COMMIT\`; package SHA-256" "$LAST_OUT" && grep -q '^- Result: \*\*MATRIX PASSED\*\*' "$LAST_OUT" && echo true)"
+assert '  ... and the card performance validator verdict' "$(grep -qE 'validator .*: CARD PERF VALID' "$LAST_OUT" && echo true)"
+assert '  ... and the frozen required sets in the transport receipt (112 storage, 218 transport, 522 card keys)' "$(grep -qF -- '- Storage (112 keys)' "${LAST_OUT%.md}-t.md" && grep -qF -- '- Transport (218 keys)' "${LAST_OUT%.md}-t.md" && grep -qF -- '- Card (522 keys)' "${LAST_OUT%.md}-t.md" && echo true)"
+check 'a missing card row is refused' 5 "$WORK/good" card-missing
+assert '  ... the record names the missing card partition' "$(grep -qF 'card rows missing: 1 of 522 (first: recommended|rec|legacy:yes|admin|card_gaps)' "$LAST_OUT" && echo true)"
+check 'a duplicated card row is refused' 5 "$WORK/good" card-dup
+assert '  ... named as duplicated' "$(grep -qF 'card rows duplicated: both|easy|legacy:no|admin|card_recent' "$LAST_OUT" && echo true)"
+check 'a card row outside the required set is refused' 5 "$WORK/good" card-unknown
+assert '  ... named as not in the required set' "$(grep -qF 'card rows not in the required set: both|easy|legacy:no|admin|card_extra_case' "$LAST_OUT" && echo true)"
+check 'card rows under an authority label instead of storage:sync are refused' 5 "$WORK/good" card-auth-label
+check 'a run with no card rows at all is refused' 5 "$WORK/good" card-none
+check 'a FAILED card row fails the record' 0 "$WORK/good" card-failed
+assert '  ... recorded as MATRIX FAILED and TRANSPORT FAILED, naming the row' "$(grep -q 'MATRIX FAILED' "$LAST_OUT" && grep -q 'TRANSPORT FAILED' "${LAST_OUT%.md}-t.md" && grep -qF 'not PASSED easy-2.5.2|easy|hpos:yes|manager|card_diag_off' "$LAST_OUT" && echo true)"
+check 'a missing card storage row is refused' 5 "$WORK/good" no-card-storage
+assert '  ... the record names it' "$(grep -qF 'storage easy-2.5.2 hpos:yes test-card-testing.php did not run' "$LAST_OUT" && echo true)"
+check 'a FAILED card storage row fails the record' 0 "$WORK/good" failed-card-storage
+assert '  ... recorded as MATRIX FAILED' "$(grep -q 'MATRIX FAILED' "$LAST_OUT" && echo true)"
+check 'a STORAGE line for a suite outside the storage set is refused' 5 "$WORK/good" storage-unknown
+check 'a summary without its END line (truncated) is refused' 5 "$WORK/good" truncated
+assert '  ... named as truncated' "$(grep -qF 'the summary is truncated or not this attempt' "$LAST_OUT" && echo true)"
+check 'a summary whose END names another attempt is refused' 5 "$WORK/good" end-mismatch
+check 'a summary with lines after its END line is refused' 5 "$WORK/good" end-not-last
+check 'a summary that names no attempt is refused' 5 "$WORK/good" no-attempt
+check 'a summary without a SCOPE line is refused' 5 "$WORK/good" scope-missing
+check 'a run that restarted on a new date is refused (ruling Q9)' 5 "$WORK/good" restart
+assert '  ... named as a date restart' "$(grep -qF 'a date restart cannot qualify (ruling Q9; WINDOW_RESTARTS 1)' "$LAST_OUT" && echo true)"
+check 'a repeated performance admission is refused' 5 "$WORK/good" admission-repeated
+assert '  ... named as repeated' "$(grep -qF 'repeated perf admission (2 ADMISSION lines' "$LAST_OUT" && echo true)"
+check 'a candidate named for another commit (stale package) is refused' 3 "$WORK/good" stale-name
+check 'a candidate named for the evidence commit is accepted' 0 "$WORK/good" good-name
+check 'no card performance receipt is refused' 5 "$WORK/good" card-perf-missing
+check 'a card performance receipt bound to another zip is refused' 5 "$WORK/good" card-perf-stale-sha
+check 'a card performance receipt from another source commit is refused' 5 "$WORK/good" card-perf-stale-source
+check 'a card performance receipt from another attempt is refused' 5 "$WORK/good" card-perf-other-attempt
+check 'a truncated card performance receipt is refused' 5 "$WORK/good" card-perf-truncated
+check 'a card trial at exactly 1500 ms is refused (strictly below, no relaxed rule)' 5 "$WORK/good" card-perf-slow
+check 'a slow card trial is refused even when the receipt says it passed' 5 "$WORK/good" card-perf-pass-flags
+assert '  ... decided by the validator, named in the record' "$(grep -qF 'card performance receipt refused (validator exit' "$LAST_OUT" && echo true)"
+# Scope: a subset (owner decision D1's branch gate) is checked the same way and never reads as the matrix.
+check 'a complete subset (recommended and easy-2.5.2) is accepted as a subset' 0 "$WORK/good" subset-good
+assert '  ... written as a subset record, SUBSET PASSED, never MATRIX PASSED' "$(grep -q '^- Result: \*\*SUBSET PASSED\*\* (scope subset: recommended easy-2.5.2; NOT A FULL MATRIX' "$LAST_OUT" && ! grep -q 'MATRIX PASSED' "$LAST_OUT" && grep -q 'NOT A FULL MATRIX' "${LAST_OUT%.md}-t.md" && echo true)"
+assert '  ... with the subset counts from the frozen sets (32 storage, 54 transport, 130 card)' "$(grep -qxF -- '- Storage rows: required 32 (gate 32), received 32' "$LAST_OUT" && grep -q '^- Required 54 (gate 54), received 54' "$LAST_OUT" && grep -q '^- Required 130 (gate 130; full release set 522' "$LAST_OUT" && echo true)"
+check 'a subset without its state list is refused' 5 "$WORK/good" subset-no-states
+check 'a subset naming a state outside the release matrix is refused' 5 "$WORK/good" subset-unknown-state
+check 'a subset without recommended (no performance phase) is refused' 5 "$WORK/good" subset-no-recommended
+# The frozen enumerations: the pinned counts and hashes are what record.sh's own lists produce, and
+# dropping any one case from a list changes the hash (so the pin check would refuse the edit).
+eval "$(grep -E '^(FULL_STATES|STORAGE_COMBOS|STORAGE_SUITES|GATE_[A-Z0-9_]+)=' "$REPO/tests/matrix/record.sh")"
+eval "$(sed -n '/^TRANSPORT_ANY=/,/^set_sha()/p' "$REPO/tests/matrix/record.sh" | grep -v '^set_sha()')"
+for k in storage transport card; do
+	case $k in storage) pin=$GATE_STORAGE_SET_SHA256 want=$GATE_STORAGE_ROWS ;; transport) pin=$GATE_TRANSPORT_SET_SHA256 want=$GATE_TRANSPORT_ROWS ;; card) pin=$GATE_CARD_SET_SHA256 want=$GATE_CARD_ROWS ;; esac
+	assert "frozen $k set: $want keys whose SHA-256 is the pinned one" "$([ "$("enum_$k" "$FULL_STATES" | wc -l | tr -d ' ')" == "$want" ] && [ "$("enum_$k" "$FULL_STATES" | shasum -a 256 | awk '{print $1}')" == "$pin" ] && echo true)"
+done
+assert 'the gate counts are 112 storage, 218 transport and 522 card rows (740 transport and card)' "$([ "$GATE_STORAGE_ROWS $GATE_TRANSPORT_ROWS $GATE_CARD_ROWS $((GATE_TRANSPORT_ROWS + GATE_CARD_ROWS))" == '112 218 522 740' ] && echo true)"
+CARD_STORAGE=${CARD_STORAGE% manager|card_warm_downgrade}
+assert 'dropping one card case changes the pinned card hash' "$([ "$(enum_card "$FULL_STATES" | shasum -a 256 | awk '{print $1}')" != "$GATE_CARD_SET_SHA256" ] && echo true)"
+STORAGE_SUITES=${STORAGE_SUITES% test-card-testing.php}
+assert 'dropping the card ability suite changes the pinned storage hash' "$([ "$(enum_storage "$FULL_STATES" | shasum -a 256 | awk '{print $1}')" != "$GATE_STORAGE_SET_SHA256" ] && echo true)"
+assert 'record.sh never lets an environment variable set a gate count or pin' "$(grep -qE '^GATE_[A-Z_]+=\$\{' "$REPO/tests/matrix/record.sh" || echo true)"
 
 # Privacy.
 check 'an e-mail address in a copied log line refuses the record' 5 "$WORK/good" log-leak

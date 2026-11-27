@@ -20,6 +20,7 @@
 // phpcs:disable WordPress.Security.EscapeOutput, WordPress.NamingConventions.PrefixAllGlobals, WordPress.DB
 
 require_once __DIR__ . '/assert.php';
+require_once __DIR__ . '/card-testing-fixtures.php';
 
 use Blaze\McpToolkit\Bundled\Commerce;
 use Blaze\McpToolkit\Connectors\Connectors;
@@ -64,12 +65,24 @@ $step_for = static function ( $result, string $tool, ?string $subject = null ) {
 
 $profile = 'blaze-mcp-toolkit/store-profile';
 $payment = 'blaze-mcp-toolkit/payment-health';
-// Workflows that list payment health first (RefundTriage gets no payment step).
+$card    = 'blaze-mcp-toolkit/card-testing';
+// Workflows that list payment health first and card testing second (RefundTriage gets neither).
 $payment_first = array( 'blaze-mcp-toolkit/weekly-store-review', 'blaze-mcp-toolkit/revenue-drop-triage', 'blaze-mcp-toolkit/failed-order-triage' );
-// Clauses from 1.1 that would contradict the Analytics-only stop or the payment-first lead (F03, F17).
+// Position of the first step running an ability (selected by ability, never assumed by position).
+$index_of = static function ( $result, string $ability, ?string $subject = null ): ?int {
+	foreach ( (array) ( is_array( $result ) ? $result['steps'] : array() ) as $i => $step ) {
+		$args = (array) $step['arguments'];
+		if ( ( $step['ability'] ?? null ) === $ability && ( null === $subject || ( $args['subject'] ?? null ) === $subject ) ) {
+			return (int) $i;
+		}
+	}
+	return null;
+};
+// Clauses from 1.1 that would contradict the Analytics-only stop or the payment-first lead (F03, F17),
+// and (1.3) every form of the removed failed > paid card-testing shortcut and its exceptions.
 $contradictions = static function ( string $text ): array {
 	$found = array();
-	foreach ( array( 'stop there', 'do not run the other steps', 'and stop.', 'do not run the steps below', 'report any numbers or write the review', 'The first step reads order totals', 'Lead with collected revenue:', 'Treat card-gateway on-hold orders as abnormal', 'Lead with the most important movement.' ) as $clause ) {
+	foreach ( array( 'stop there', 'do not run the other steps', 'and stop.', 'do not run the steps below', 'report any numbers or write the review', 'The first step reads order totals', 'Lead with collected revenue:', 'Treat card-gateway on-hold orders as abnormal', 'Lead with the most important movement.', 'failed orders exceed paid orders', 'greater than the number of paid orders', 'versus 15 paid orders', 'The only exception is the card-testing check', 'except for the card-testing check below', 'this overrides the paid-order rules', 'likely sign of card testing', 'or possible card testing' ) as $clause ) {
 		if ( str_contains( $text, $clause ) ) {
 			$found[] = $clause;
 		}
@@ -78,6 +91,103 @@ $contradictions = static function ( string $text ): array {
 };
 $whys_of = static function ( $result ): string {
 	return implode( "\n", array_column( (array) ( is_array( $result ) ? $result['steps'] : array() ), 'why' ) );
+};
+
+// 1.3 wave 2 (REVIEW-pass4 item 7): the card tool's own missing-origin possible_attack must be reported
+// and led with, while card testing is never inferred from payment-health inventory alone. Checked
+// sentence by sentence, so the directions agree, not merely that some wording is present: every
+// sentence that ties card testing to inventory_only methods, orders outside verified checkout or
+// orders with no recorded origin may only forbid inferring it, never forbid reporting it.
+$direction_problems = static function ( string $text ): array {
+	$problems = array();
+	foreach ( array( 'If its verdict is likely_attack or possible_attack, lead the answer with it', 'When that result is a possible_attack for orders with no record of where they came from, report and lead with it', 'never infer card testing from payment health' ) as $needed ) {
+		if ( ! str_contains( $text, $needed ) ) {
+			$problems[] = 'missing direction: ' . $needed;
+		}
+	}
+	foreach ( (array) preg_split( '/(?<=[.!?])\s+/', $text ) as $sentence ) {
+		$s          = strtolower( (string) $sentence );
+		$card_s     = str_contains( $s, 'card testing' ) || str_contains( $s, 'card-testing' );
+		$unverified = str_contains( $s, 'inventory_only' ) || str_contains( $s, 'outside verified checkout' ) || str_contains( $s, 'no record of where' );
+		$forbids    = 1 === preg_match( '/never (be )?(described|called|call|present|count|report|mention|treat)|never as\b|not as card testing/', $s );
+		if ( $card_s && $unverified && $forbids && ! str_contains( $s, 'infer' ) ) {
+			$problems[] = 'conflicting direction: ' . trim( (string) $sentence );
+		}
+	}
+	return $problems;
+};
+// The checker catches the wave 1 wording the lead rejected (AbstractWorkflow.php:478, FailedOrderTriage.php:140).
+$wave1_lines = array(
+	'- Keep it apart from payment health: a card-testing result never changes payment health\'s counts or statuses, and payment health\'s inventory_only methods and orders outside verified checkout are never described as card testing.',
+	'A payment method marked inventory_only was not assessed: mention it as a method to confirm, never as a failed checkout, a declined payment or card testing.',
+);
+foreach ( $wave1_lines as $i => $line ) {
+	blzmcp_it_assert( array() !== array_filter( $direction_problems( $line ), static fn( $p ) => str_starts_with( $p, 'conflicting direction' ) ), "direction checker: the rejected wave 1 sentence {$i} is reported as a conflict" );
+}
+
+/**
+ * A real missing-origin burst seen by both tools (wave 2): 100 failed orders in the last half hour with
+ * no recorded origin, for a method the kind filter marks instant and that is neither registered nor
+ * switched on. The card tool returns a qualified possible_attack for that missing-origin scope; payment
+ * health lists the same method as inventory_only. Then every payment workflow, under the connector this
+ * process runs, must direct the assistant to lead with the card tool's own result and its caveat and
+ * never to infer card testing from the inventory row. Orders are CRUD fixtures removed at finish.
+ */
+$paired_case = static function ( string $mode ) use ( $admins, $payment_first, $card, $payment, $index_of, $direction_problems ): void {
+	global $wpdb;
+	wp_set_current_user( $admins[0]->ID );
+	$mo   = blzmcp_ct_method( 'mo' );
+	$kind = static fn( $k, $id ) => $mo === $id ? 'instant' : $k;
+	add_filter( 'blaze_mcp_toolkit_payment_method_kind', $kind, 20, 2 );
+	add_filter( 'pre_wp_mail', '__return_false', 1 );
+	$now = time();
+	for ( $i = 0; $i < 100; $i++ ) {
+		blzmcp_ct_order(
+			array(
+				'method'  => $mo,
+				'via'     => '',
+				'status'  => 'failed',
+				'created' => $now - 1800 + 15 * $i,
+			)
+		);
+	}
+	remove_filter( 'pre_wp_mail', '__return_false', 1 );
+	// Results cached by earlier calls in this run would predate the fixtures: start cold.
+	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s', $wpdb->options, $wpdb->esc_like( '_transient_blzmcp_c_' ) . '%', $wpdb->esc_like( '_transient_timeout_blzmcp_c_' ) . '%' ) );
+	wp_cache_flush();
+	$card_r = wp_get_ability( $card )->execute( array( 'since_hours' => 48 ) );
+	$pay_r  = wp_get_ability( $payment )->execute( array( 'since_hours' => 24 ) );
+	$mo_card = null;
+	foreach ( (array) ( is_array( $card_r ) ? $card_r['assessments'] : array() ) as $a ) {
+		if ( $mo === $a['method_id'] && 'missing_origin' === $a['origin_scope'] ) {
+			$mo_card = $a;
+		}
+	}
+	$mo_find = '';
+	foreach ( (array) ( is_array( $card_r ) ? $card_r['findings'] : array() ) as $f ) {
+		if ( $mo === $f['method_id'] ) {
+			$mo_find = (string) $f['what'];
+		}
+	}
+	$mo_pay = null;
+	foreach ( (array) ( is_array( $pay_r ) ? $pay_r['methods'] : array() ) as $m ) {
+		if ( $mo === $m['id'] ) {
+			$mo_pay = $m;
+		}
+	}
+	blzmcp_it_equals( array( 'possible_attack', 'origin_unverified' ), array( $mo_card['verdict'] ?? null, $mo_card['reason_code'] ?? null ), "{$mode} paired case: the card tool returns its own qualified possible_attack for the missing-origin orders" );
+	blzmcp_it_assert( str_contains( $mo_find, 'whether they came through the checkout could not be established' ), "{$mode} paired case: the card finding carries the could-not-be-established caveat the instructions refer to" );
+	blzmcp_it_equals( 'inventory_only', $mo_pay['assessment'] ?? null, "{$mode} paired case: payment health lists the same method as inventory_only (not assessed)" );
+	foreach ( $payment_first as $wf ) {
+		$r    = wp_get_ability( $wf )->execute();
+		$text = is_array( $r ) ? $r['instructions'] : '';
+		blzmcp_it_equals( 1, $index_of( $r, $card ), "{$mode} paired case {$wf}: the card step is in the plan" );
+		blzmcp_it_equals( array(), $direction_problems( $text ), "{$mode} paired case {$wf}: the directions agree (lead with the card tool's own result, never infer card testing from inventory)" );
+		// The two real results meet the directions: the card verdict is one the lead rule covers, and the
+		// inventory row is one the inference ban covers.
+		blzmcp_it_assert( in_array( $mo_card['verdict'] ?? null, array( 'likely_attack', 'possible_attack' ), true ) && 'inventory_only' === ( $mo_pay['assessment'] ?? null ) && str_contains( $text, 'never infer card testing from payment health\'s inventory_only methods' ), "{$mode} paired case {$wf}: the card result is led with and the inventory row is never turned into card testing" );
+	}
+	remove_filter( 'blaze_mcp_toolkit_payment_method_kind', $kind, 20 );
 };
 
 // Connector naming (1.1): the run sentence 1.0 shipped, and helpers shared by the default and
@@ -233,9 +343,12 @@ if ( $easy_stub && Commerce::is_standing_aside() ) {
 		if ( in_array( $name, $payment_first, true ) ) {
 			$first = $result['steps'][0] ?? array();
 			blzmcp_it_assert( 'blaze-mcp-toolkit/payment-health' === ( $first['ability'] ?? null ) && 'wp_ability_blaze_mcp_toolkit_payment_health' === ( $first['tool'] ?? null ), "stand-aside+easy {$name}: payment health first under its Easy MCP name" );
-			blzmcp_it_assert( str_contains( $text, "PAYMENT CHECK\n" ), "stand-aside+easy {$name}: payment check paragraph" );
+			$second = $result['steps'][1] ?? array();
+			blzmcp_it_assert( ( $second['ability'] ?? null ) === $card && 'wp_ability_blaze_mcp_toolkit_card_testing' === ( $second['tool'] ?? null ), "stand-aside+easy {$name}: card testing second under its Easy MCP name" );
+			blzmcp_it_assert( str_contains( $text, "PAYMENT CHECK\n" ) && str_contains( $text, "CARD TESTING CHECK\n" ), "stand-aside+easy {$name}: payment and card-testing paragraphs" );
 		} else {
 			blzmcp_it_assert( null === $step_for( $result, $payment ) && ! str_contains( $text, 'PAYMENT CHECK' ), "stand-aside+easy {$name}: no payment step" );
+			blzmcp_it_assert( null === $index_of( $result, $card ) && ! str_contains( $text, 'CARD TESTING CHECK' ), "stand-aside+easy {$name}: no card-testing step" );
 		}
 		if ( is_array( $result ) && array() === $result['steps'] ) {
 			blzmcp_it_assert( str_contains( $text, 'No step in this plan can run here' ), "stand-aside+easy {$name}: zero steps give no impossible run order" );
@@ -272,6 +385,22 @@ if ( $easy_stub ) {
 		}
 	);
 	$all_names = array_map( static fn( $a ) => $a->get_name(), wp_get_abilities() );
+
+	// 1.3: an existing install that has not ticked the new card-testing tool. The step is left out
+	// as switched off with where to switch it on, explained once, and the review carries on without
+	// judging card testing from failed and paid counts. The owner's ticked list is never changed.
+	$no_card_ticked = array_values( array_diff( $all_names, array( $card ) ) );
+	update_option( $opt, $no_card_ticked );
+	$GLOBALS['blzmcp_toolstate_return'] = array( true, 'default' );
+	foreach ( $payment_first as $wf ) {
+		$r = wp_get_ability( $wf )->execute( array( 'period' => 'last_7_days' ) );
+		$t = is_array( $r ) ? $r['instructions'] : '';
+		blzmcp_it_assert( null === $index_of( $r, $card ) && 0 === $index_of( $r, $payment ) && 1 === $index_of( $r, 'wc-analytics/totals', 'orders' ), "easy-stub card unticked {$wf}: payment health first, totals second" );
+		blzmcp_it_assert( str_contains( $t, 'SWITCHED OFF' ) && str_contains( $t, 'wp_ability_blaze_mcp_toolkit_card_testing' ) && str_contains( $t, 'Easy MCP AI' ), "easy-stub card unticked {$wf}: listed as switched off in Easy MCP AI" );
+		blzmcp_it_assert( str_contains( $t, 'The card-testing check is not in this plan' ) && str_contains( $t, 'Never judge card testing from failed and paid order counts, or from payment health\'s inventory_only methods or orders outside verified checkout, instead.' ), "easy-stub card unticked {$wf}: explained once, no failed > paid or inventory fallback" );
+		blzmcp_it_equals( array(), $contradictions( $t ), "easy-stub card unticked {$wf}: no contradictory clause" );
+	}
+	blzmcp_it_equals( $no_card_ticked, get_option( $opt ), 'easy-stub card unticked: the owner\'s ticked list is left as it was' );
 
 	// All abilities ticked, Tool_State says on: Easy MCP names everywhere.
 	update_option( $opt, $all_names );
@@ -355,6 +484,11 @@ if ( $easy_stub ) {
 	$GLOBALS['blzmcp_toolstate_return'] = array( true, 'default' );
 	$shared_connector_checks( $easy_real ? 'real-easy' : 'easy-stub' );
 
+	// Paired missing-origin card / payment-inventory case under the Easy MCP AI connector (wave 2).
+	update_option( $opt, $all_names );
+	$GLOBALS['blzmcp_toolstate_return'] = array( true, 'default' );
+	$paired_case( $easy_real ? 'real-easy' : 'easy-stub' );
+
 	blzmcp_it_finish();
 	return;
 }
@@ -391,6 +525,7 @@ $wf_text   = is_array( $wf_week ) ? $wf_week['instructions'] : '';
 blzmcp_it_assert( str_starts_with( $wf_text, '[ANALYTICS_UNAVAILABLE] ' ) && str_contains( substr( $wf_text, 0, 800 ), 'STOP' ), "{$wf_mode}: weekly review for last_7_days stops on a missing 5-day-old order" );
 blzmcp_it_assert( array() === array_filter( $tools_of( $wf_week ), static fn( $t ) => str_starts_with( (string) $t, 'wc-analytics/' ) ), "{$wf_mode}: no wc-analytics steps while that week is incomplete" );
 blzmcp_it_assert( is_array( $wf_week ) && 'blaze-mcp-toolkit/payment-health' === ( $wf_week['steps'][0]['ability'] ?? null ), "{$wf_mode}: the incomplete week still runs payment health first" );
+blzmcp_it_equals( 1, $index_of( $wf_week, $card ), "{$wf_mode}: the incomplete week still runs card testing second" );
 $wf_day  = null === $wf_weekly ? null : $wf_weekly->execute( array( 'period' => 'yesterday' ) );
 $wf_text = is_array( $wf_day ) ? $wf_day['instructions'] : '';
 blzmcp_it_assert( ! str_starts_with( $wf_text, '[ANALYTICS_UNAVAILABLE]' ), "{$wf_mode}: weekly review for yesterday (and the day before) is not stopped by it" );
@@ -456,6 +591,10 @@ if ( Commerce::is_standing_aside() ) {
 		blzmcp_it_assert( ! str_contains( $text, '- wc-analytics/' ), "standaside analytics off {$name}: analytics steps not listed as skipped" );
 		if ( in_array( $name, $payment_first, true ) ) {
 			blzmcp_it_assert( 'blaze-mcp-toolkit/payment-health' === ( $result['steps'][0]['ability'] ?? null ), "standaside analytics off {$name}: payment health registered independently and still first" );
+			blzmcp_it_equals( 1, $index_of( $result, $card ), "standaside analytics off {$name}: card testing registered independently and still second" );
+			blzmcp_it_assert( str_contains( $text, 'likely or possible card-testing findings first, then payment health findings' ), "standaside analytics off {$name}: card evidence and protection advice still reported" );
+		} else {
+			blzmcp_it_assert( ! str_contains( $text, 'card-testing' ) && ! str_contains( $text, 'card testing' ), "standaside analytics off {$name}: no card-testing text without the card step" );
 		}
 		blzmcp_it_equals( array(), $contradictions( $text . "\n" . $whys_of( $result ) ), "standaside analytics off {$name}: no contradictory stop clause" );
 	}
@@ -512,8 +651,17 @@ foreach ( $workflows as $name => $default_period ) {
 	if ( in_array( $name, $payment_first, true ) ) {
 		blzmcp_it_assert( null !== $first && $payment === $first['ability'], "{$name} first step is payment health" );
 		blzmcp_it_equals( 168, ( (array) ( $first['arguments'] ?? array() ) )['since_hours'] ?? null, "{$name} payment health over the capped window (168 hours for {$default_period})" );
-		blzmcp_it_assert( ( $result['steps'][1]['ability'] ?? null ) === 'wc-analytics/totals' && 'orders' === ( (array) $result['steps'][1]['arguments'] )['subject'], "{$name} order totals come straight after payment health" );
-		blzmcp_it_assert( str_contains( $instructions, "PAYMENT CHECK\n" ) && str_contains( $instructions, 'lead the answer with its findings' ), "{$name} instructions lead with red or amber payment findings" );
+		// 1.3 item 7: payment health, then card testing, then the orders totals alone, selected by ability and subject.
+		blzmcp_it_equals( array( 0, 1, 2 ), array( $index_of( $result, $payment ), $index_of( $result, $card ), $index_of( $result, 'wc-analytics/totals', 'orders' ) ), "{$name} payment health, then card testing, then order totals" );
+		$card_step = $result['steps'][ (int) $index_of( $result, $card ) ] ?? array();
+		blzmcp_it_equals( 168, ( (array) ( $card_step['arguments'] ?? array() ) )['since_hours'] ?? null, "{$name} card testing over the shared capped window (168 hours for {$default_period})" );
+		blzmcp_it_assert( str_contains( (string) ( $card_step['why'] ?? '' ), 'A current rolling look-back, not the selected period.' ), "{$name} card step is a rolling look-back" );
+		blzmcp_it_assert( str_contains( $instructions, 'Then run the second step alone: it is the card-testing check. Whatever it returns, carry on. Then run the order totals step alone.' ), "{$name} run order: payment health alone, card testing alone, then totals alone" );
+		blzmcp_it_assert( str_contains( $instructions, "CARD TESTING CHECK\n" ) && strpos( $instructions, "CARD TESTING CHECK\n" ) < strpos( $instructions, "PAYMENT CHECK\n" ), "{$name} card-testing guidance comes before the payment guidance" );
+		foreach ( array( 'If its verdict is likely_attack or possible_attack, lead the answer with it, before any payment health finding or sales figure', 'how many failed orders were created, when, and its caveats', 'its caveat that a payment fault is still possible', 'Never call it confirmed, never say an attack is happening now and never make it stronger than returned', 'whose protection_state is not_configured or unknown', 'Never link them to card testing, or card testing to a sales movement, unless a returned result itself does', 'Unknown means not assessed, never a sign that checkout is fine', 'Never say the checkout is safe or protected', 'never build a total or a rate from its examples', 'never judge card testing by comparing failed orders with paid orders or with Analytics figures', 'enforcement is never verified, unknown does not mean unprotected', 'never for you to change', 'never infer card testing from payment health\'s inventory_only methods or its orders outside verified checkout', 'When that result is a possible_attack for orders with no record of where they came from, report and lead with it like any other possible result, keeping its caveat that whether those orders came through the checkout could not be established', 'mention once that the card-testing check could not run, and carry on' ) as $clause ) {
+			blzmcp_it_assert( str_contains( $instructions, $clause ), "{$name} card-testing guidance: {$clause}" );
+		}
+		blzmcp_it_assert( str_contains( $instructions, "PAYMENT CHECK\n" ) && str_contains( $instructions, 'report its findings straight after any likely or possible card-testing result and before any sales figures' ) && ! str_contains( $instructions, 'lead the answer with its findings' ), "{$name} red or amber payment findings follow card testing, never a second lead" );
 		blzmcp_it_assert( str_contains( $instructions, 'rolling look-back, not a reconstruction' ), "{$name} instructions say payment health is a rolling look-back" );
 		blzmcp_it_assert( str_contains( $instructions, 'never present them as Analytics sales, money lost or confirmed charges' ), "{$name} instructions keep payment counts apart from sales and charges" );
 		blzmcp_it_assert( str_contains( $instructions, 'Then run the order totals step alone' ), "{$name} instructions run totals alone after payment" );
@@ -528,13 +676,14 @@ foreach ( $workflows as $name => $default_period ) {
 		$own = array(
 			'blaze-mcp-toolkit/weekly-store-review' => 'list it in the Watch List as a method to confirm, never as a payment problem, a loss or a reason for a dip',
 			'blaze-mcp-toolkit/revenue-drop-triage' => 'mention it as a method to confirm, never as a cause of the drop, a lost sale or money at risk',
-			'blaze-mcp-toolkit/failed-order-triage' => 'mention it as a method to confirm, never as a failed checkout, a declined payment or card testing',
+			'blaze-mcp-toolkit/failed-order-triage' => 'mention it as a method to confirm, never as a failed checkout or a declined payment, and never infer card testing from it',
 		);
 		blzmcp_it_assert( str_contains( $instructions, $own[ $name ] ), "{$name} its own guidance keeps inventory-only methods out of its problem narrative" );
 	} else {
 		blzmcp_it_assert( null !== $first && 'wc-analytics/totals' === $first['tool'] && 'orders' === ( (array) $first['arguments'] )['subject'], "{$name} first step is totals orders" );
 		blzmcp_it_assert( null === $step_for( $result, $payment ), "{$name} has no payment step" );
 		blzmcp_it_assert( ! str_contains( $instructions, 'PAYMENT CHECK' ), "{$name} has no PAYMENT CHECK paragraph" );
+		blzmcp_it_assert( null === $index_of( $result, $card ) && ! str_contains( $instructions, 'CARD TESTING CHECK' ) && ! str_contains( $instructions, 'card-testing' ), "{$name} gains neither the card-testing step nor its preamble" );
 		blzmcp_it_assert( ! str_contains( $instructions, 'inventory_only' ), "{$name} has no payment inventory paragraph" );
 	}
 	blzmcp_it_equals( array(), $contradictions( $instructions . "\n" . $whys_of( $result ) ), "{$name} instructions and step reasons carry no contradictory stop or lead clause" );
@@ -607,6 +756,11 @@ if ( is_array( $weekly ) ) {
 	blzmcp_it_assert( ( (array) $step_for( $year, $history )['arguments'] )['days'] <= 180, 'long period caps update-history at 180 days' );
 	$today = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute( array( 'period' => 'today' ) );
 	blzmcp_it_equals( 24, ( (array) $step_for( $today, $health )['arguments'] )['since_hours'] ?? null, 'today maps to 24 hours of health' );
+	// Card hours use the shared rolling-window mapping, capped at 168 (1.3 item 7).
+	$card_hours = static fn( $r ) => ( (array) ( $r['steps'][ (int) $index_of( $r, $card ) ]['arguments'] ?? array() ) )['since_hours'] ?? null;
+	$yday       = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute( array( 'period' => 'yesterday' ) );
+	blzmcp_it_equals( array( 24, 48, 168 ), array( $card_hours( $today ), $card_hours( $yday ), $card_hours( $year ) ), 'card testing hours: today 24, yesterday 48 (rolling), this year capped at 168' );
+	blzmcp_it_assert( str_contains( (string) ( $yday['instructions'] ?? '' ), 'The card-testing step looks back over the last 48 hours from now' ) && str_contains( (string) ( $yday['instructions'] ?? '' ), 'for yesterday it covers the last 48 hours, not yesterday alone' ), 'yesterday: a rolling 48-hour observation, not a reconstruction of yesterday' );
 	blzmcp_it_equals( 1, ( (array) $step_for( $today, $history )['arguments'] )['days'] ?? null, 'today maps to 1 day of history' );
 }
 
@@ -628,8 +782,10 @@ if ( null !== $gateway && isset( $samples['blaze-mcp-toolkit/weekly-store-review
 	blzmcp_it_assert( is_array( $off ) && ! in_array( 'wc-analytics/totals', $tools_of( $off ), true ), 'analytics off: workflow drops the analytics steps' );
 	$off_text = is_array( $off ) ? $off['instructions'] : '';
 	blzmcp_it_assert( is_array( $off ) && 'blaze-mcp-toolkit/payment-health' === ( $off['steps'][0]['ability'] ?? null ), 'analytics off: payment health still runs first' );
+	blzmcp_it_equals( 1, $index_of( $off, $card ), 'analytics off: card testing still runs second' );
 	blzmcp_it_assert( null !== $step_for( $off, $health ) && null !== $step_for( $off, $history ), 'analytics off: site error and update steps still run' );
-	blzmcp_it_assert( str_contains( $off_text, 'STOP THE ANALYTICS WORK' ) && str_contains( $off_text, 'Still run the steps below' ) && str_contains( $off_text, 'payment health findings first' ), 'analytics off: only the Analytics work stops, payment findings first' );
+	blzmcp_it_assert( str_contains( $off_text, 'STOP THE ANALYTICS WORK' ) && str_contains( $off_text, 'Still run the steps below' ) && str_contains( $off_text, 'the card-testing result and its protection advice included' ) && str_contains( $off_text, 'likely or possible card-testing findings first, then payment health findings' ), 'analytics off: only the Analytics work stops; card evidence, protection advice and payment findings still reported' );
+	blzmcp_it_assert( str_contains( $off_text, "CARD TESTING CHECK\n" ) && str_contains( $off_text, 'Then run the second step alone: it is the card-testing check. Whatever it returns, carry on: run the remaining' ), 'analytics off: the card-testing guidance and run order survive' );
 	blzmcp_it_assert( str_contains( $off_text, 'No WooCommerce Analytics step is in this plan' ) && str_contains( $off_text, 'Whatever it returns, carry on: run the remaining' ), 'analytics off: run order and analytics check built from the surviving steps' );
 	blzmcp_it_equals( array(), $contradictions( $off_text . "\n" . $whys_of( $off ) ), 'analytics off: no contradictory stop clause' );
 	blzmcp_it_assert( is_array( $out ) && false === ( $out['success'] ?? null ), 'tripped guard: gateway reports failure' );
@@ -646,7 +802,10 @@ if ( is_array( $drop ) ) {
 // Failed orders: card-testing instruction and status-filtered row steps.
 $failed = $samples['blaze-mcp-toolkit/failed-order-triage'] ?? null;
 if ( is_array( $failed ) ) {
-	blzmcp_it_assert( str_contains( $failed['instructions'], 'card-testing' ), 'failed-order instructions carry the card-testing rule' );
+	blzmcp_it_assert( str_contains( $failed['instructions'], 'only the card-testing check says whether failed orders look like card testing' ) && str_contains( $failed['instructions'], 'Never decide it yourself from the failed and paid order counts' ), 'failed-order instructions defer card testing to the card-testing check, never failed > paid' );
+	$fdesc = wp_get_ability( 'blaze-mcp-toolkit/failed-order-triage' )->get_description();
+	blzmcp_it_assert( ! str_contains( $fdesc, 'possible card testing' ) && str_contains( $fdesc, 'starting with a payment health check and then a card-testing check' ), 'failed-order discovery description: no card-testing claim of its own, names the card-testing step' );
+	blzmcp_it_assert( ! str_contains( $failed['instructions'], 'except for the card-testing check' ) && str_contains( $failed['instructions'], 'treat the current paid-order count as background only)' ), 'failed-order required data: paid-order count is background only, no card-testing exception' );
 	$statuses = array();
 	foreach ( $failed['steps'] as $step ) {
 		$args = json_decode( (string) wp_json_encode( $step['arguments'] ), true );
@@ -667,14 +826,17 @@ if ( is_array( $refund ) ) {
 
 // Payment-first wording in each workflow's own guidance (F17).
 if ( is_array( $weekly ) ) {
-	blzmcp_it_assert( str_contains( $weekly['instructions'], 'If payment health returned red or amber findings, open with them. Then cover collected revenue' ), 'weekly headline: payment findings before revenue' );
+	blzmcp_it_assert( str_contains( $weekly['instructions'], 'If the card-testing check returned a likely or possible result, open with it. If payment health returned red or amber findings, report them next. Then cover collected revenue' ), 'weekly headline: card testing, then payment findings, then revenue' );
+	blzmcp_it_assert( str_contains( $weekly['instructions'], 'Never describe card testing as the reason for a dip' ), 'weekly: no invented causal link from card testing to a dip' );
 }
 if ( is_array( $drop ) ) {
-	blzmcp_it_assert( str_contains( $drop['instructions'], 'After any payment findings, lead with collected revenue' ) && str_contains( $drop['instructions'], 'possible link, not a proven cause' ), 'revenue drop: payment findings first, cautious link' );
+	blzmcp_it_assert( str_contains( $drop['instructions'], 'After any card-testing and payment findings, lead with collected revenue' ) && str_contains( $drop['instructions'], 'possible link, not a proven cause' ), 'revenue drop: card-testing and payment findings first, cautious link' );
+	blzmcp_it_assert( str_contains( $drop['instructions'], 'Never call card testing a cause of the drop' ), 'revenue drop: no invented causal link from card testing' );
 }
 if ( is_array( $failed ) ) {
 	$ft = $failed['instructions'];
-	blzmcp_it_assert( str_contains( $ft, 'straight after any red or amber payment health findings' ) && str_contains( $ft, 'Open with any red or amber payment health findings; then, if failed orders exceed paid orders, the card-testing check' ), 'failed orders: payment findings precede the card-testing narrative' );
+	blzmcp_it_assert( str_contains( $ft, 'Open with a likely or possible card-testing result, if the card-testing check returned one; then any red or amber payment health findings.' ), 'failed orders: card testing leads the Snapshot, then payment findings' );
+	blzmcp_it_assert( str_contains( $ft, 'make its check_next and the check_next of each checkout path whose protection is not_configured or unknown part of Next Actions' ), 'failed orders: protection gaps reach Next Actions' );
 	blzmcp_it_assert( str_contains( $ft, 'some legitimately hold orders while a payment is authorised and captured later' ), 'failed orders: authorisation holds are not called a fault' );
 	blzmcp_it_assert( null === $step_for( $failed, $health ), 'failed orders: still no health-summary step' );
 }
@@ -710,16 +872,104 @@ $no_totals   = wp_get_ability( 'blaze-mcp-toolkit/revenue-drop-triage' )->execut
 $deny_target = '';
 remove_filter( 'user_has_cap', $deny, 10 );
 $np = is_array( $no_pay ) ? $no_pay['instructions'] : '';
-blzmcp_it_assert( null === $step_for( $no_pay, $payment ) && 'wc-analytics/totals' === ( $no_pay['steps'][0]['ability'] ?? null ), 'payment denied: totals becomes the first step' );
+blzmcp_it_assert( null === $step_for( $no_pay, $payment ) && ( $no_pay['steps'][0]['ability'] ?? null ) === $card && 1 === $index_of( $no_pay, 'wc-analytics/totals', 'orders' ), 'payment denied: card testing becomes the first step, totals the second' );
 blzmcp_it_assert( str_contains( $np, 'NOT AVAILABLE FOR YOUR ROLE' ) && str_contains( $np, $payment ), 'payment denied: listed under not available for your role' );
 blzmcp_it_assert( str_contains( $np, 'The payment health check is not in this plan' ) && ! str_contains( $np, 'lead the answer with its findings' ), 'payment denied: explained once, review continues' );
 blzmcp_it_assert( ! str_contains( $np, 'Green never covers a method whose assessment is inventory_only' ), 'payment denied: no inventory guidance for a step that will not run' );
-blzmcp_it_assert( str_contains( $np, 'Run the first step alone. If it succeeds' ) && ! str_contains( $np, 'it is the payment health check' ), 'payment denied: run order names no payment step' );
+blzmcp_it_assert( str_contains( $np, 'Run the first step alone: it is the card-testing check. Whatever it returns, carry on. Then run the order totals step alone.' ) && ! str_contains( $np, 'it is the payment health check' ), 'payment denied: run order names no payment step, card testing first' );
 $nt = is_array( $no_totals ) ? $no_totals['instructions'] : '';
 blzmcp_it_assert( null === $step_for( $no_totals, 'wc-analytics/totals', 'orders' ) && 'blaze-mcp-toolkit/payment-health' === ( $no_totals['steps'][0]['ability'] ?? null ), 'totals denied: payment health still first' );
 blzmcp_it_assert( str_contains( $nt, 'Whatever it returns, carry on: run the remaining' ) && ! str_contains( $nt, 'Then run the order totals step alone' ), 'totals denied: run order names no totals step' );
 blzmcp_it_assert( ! str_contains( $nt, 'The order totals step also confirms' ) && str_contains( $nt, 'stop the Analytics work only' ), 'totals denied: the remaining Analytics steps keep the Analytics-only stop' );
 blzmcp_it_equals( array(), $contradictions( $np . "\n" . $nt ), 'denied steps: no contradictory stop clause' );
+
+// 1.3 item 7: the card-testing step denied, alone and with payment health. Explained once, the
+// review continues, and nothing falls back to judging card testing from failed and paid counts.
+add_filter( 'user_has_cap', $deny, 10, 2 );
+$deny_target = $card;
+blzmcp_it_assert( true !== wp_get_ability( $card )->check_permissions( array() ) && true === wp_get_ability( $payment )->check_permissions( array() ), 'denial mechanism: card testing is denied, payment health is not' );
+$no_card = array();
+foreach ( $payment_first as $wf ) {
+	$no_card[ $wf ] = wp_get_ability( $wf )->execute( array( 'period' => 'last_7_days' ) );
+}
+$deny_both = static function ( $allcaps, $caps ) use ( $payment, $card ) {
+	if ( ! in_array( 'manage_woocommerce', (array) $caps, true ) ) {
+		return $allcaps;
+	}
+	foreach ( debug_backtrace() as $frame ) { // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_debug_backtrace, PHPCompatibility.FunctionUse.ArgumentFunctionsReportCurrentValue.NeedsInspection -- only frame objects are read.
+		if ( 'check_permissions' === ( $frame['function'] ?? '' ) && ( $frame['object'] ?? null ) instanceof WP_Ability && in_array( $frame['object']->get_name(), array( $payment, $card ), true ) ) {
+			$allcaps['manage_woocommerce'] = false;
+			break;
+		}
+	}
+	return $allcaps;
+};
+$deny_target = '';
+remove_filter( 'user_has_cap', $deny, 10 );
+add_filter( 'user_has_cap', $deny_both, 10, 2 );
+$no_diag = wp_get_ability( 'blaze-mcp-toolkit/failed-order-triage' )->execute( array( 'period' => 'last_7_days' ) );
+remove_filter( 'user_has_cap', $deny_both, 10 );
+foreach ( $no_card as $wf => $r ) {
+	$t = is_array( $r ) ? $r['instructions'] : '';
+	blzmcp_it_assert( null === $index_of( $r, $card ) && 0 === $index_of( $r, $payment ) && 1 === $index_of( $r, 'wc-analytics/totals', 'orders' ), "card denied {$wf}: payment health first, totals second" );
+	blzmcp_it_assert( str_contains( $t, 'The card-testing check is not in this plan' ) && 1 === substr_count( $t, 'card testing was not checked' ) && str_contains( $t, 'Never judge card testing from failed and paid order counts, or from payment health\'s inventory_only methods or orders outside verified checkout, instead.' ), "card denied {$wf}: explained once, no failed > paid or inventory fallback" );
+	blzmcp_it_assert( str_contains( $t, 'NOT AVAILABLE FOR YOUR ROLE' ) && str_contains( $t, $card ), "card denied {$wf}: listed under not available for your role" );
+	blzmcp_it_assert( str_contains( $t, 'Run the first step alone: it is the payment health check. Whatever it returns, carry on. Then run the order totals step alone.' ) && ! str_contains( $t, 'it is the card-testing check' ), "card denied {$wf}: run order names no card step" );
+	blzmcp_it_assert( str_contains( $t, 'lead the answer with its findings' ) && ! str_contains( $t, 'If its verdict is likely_attack' ), "card denied {$wf}: payment findings lead, no guidance for a card step that will not run" );
+	blzmcp_it_equals( array(), $contradictions( $t ), "card denied {$wf}: no contradictory or failed > paid clause" );
+}
+$nd = is_array( $no_diag ) ? $no_diag['instructions'] : '';
+blzmcp_it_assert( 'wc-analytics/totals' === ( $no_diag['steps'][0]['ability'] ?? null ) && str_contains( $nd, 'Run the first step alone. If it succeeds' ), 'payment and card denied: totals first, the totals-first run order' );
+blzmcp_it_assert( str_contains( $nd, 'The card-testing check is not in this plan' ) && str_contains( $nd, 'The payment health check is not in this plan' ), 'payment and card denied: each explained once' );
+blzmcp_it_equals( array(), $contradictions( $nd ), 'payment and card denied: no contradictory or failed > paid clause' );
+
+// A card-testing failure after the plan was built: the plan already tells the assistant to say so
+// once and carry on, and the step's own error is the generic one (no store data).
+$plan       = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute( array( 'period' => 'last_7_days' ) );
+$card_step  = $plan['steps'][ (int) $index_of( $plan, $card ) ] ?? array();
+$tz_breaker = static function () {
+	throw new \RuntimeException( 'workflow card failure' );
+};
+add_filter( 'pre_option_timezone_string', $tz_breaker );
+$card_out = wp_get_ability( $card )->execute( json_decode( (string) wp_json_encode( $card_step['arguments'] ?? array() ), true ) );
+remove_filter( 'pre_option_timezone_string', $tz_breaker );
+blzmcp_it_assert( is_wp_error( $card_out ) && 'blzmcp_ability_failed' === $card_out->get_error_code(), 'card step failing after plan generation returns the generic error' );
+blzmcp_it_assert( str_contains( (string) ( $plan['instructions'] ?? '' ), 'If the step returns an error, mention once that the card-testing check could not run, and carry on with the rest of the review.' ), 'the plan handles a card-step error once and continues' );
+
+// Wave 2 (REVIEW-pass4 item 7b): with Analytics unavailable, the stop text names only the diagnostic
+// steps that survived. Refund triage (no payment or card step) and a plan whose card step was left out
+// carry no card-testing text; the full plan keeps the card-first order.
+$an_saved = get_option( 'woocommerce_analytics_enabled', 'yes' );
+update_option( 'woocommerce_analytics_enabled', 'no' );
+\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
+$an_refund = wp_get_ability( 'blaze-mcp-toolkit/refund-triage' )->execute();
+$an_full   = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute();
+add_filter( 'user_has_cap', $deny, 10, 2 );
+$deny_target = $card;
+$an_no_card  = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' )->execute();
+$deny_target = $payment;
+$an_no_pay   = wp_get_ability( 'blaze-mcp-toolkit/failed-order-triage' )->execute();
+$deny_target = '';
+remove_filter( 'user_has_cap', $deny, 10 );
+update_option( 'woocommerce_analytics_enabled', $an_saved );
+\Blaze\McpToolkit\Bundled\AnalyticsGuard::clear_cache();
+$an_text = static fn( $r ): string => is_array( $r ) ? (string) $r['instructions'] : '';
+$t_ref   = $an_text( $an_refund );
+blzmcp_it_assert( str_starts_with( $t_ref, '[ANALYTICS_UNAVAILABLE] ' ) && str_contains( $t_ref, 'STOP THE ANALYTICS WORK' ), 'analytics off, refund: the Analytics-only stop applies' );
+blzmcp_it_assert( ! str_contains( $t_ref, 'card-testing' ) && ! str_contains( $t_ref, 'card testing' ) && ! str_contains( $t_ref, 'payment health findings first' ), 'analytics off, refund: no card-testing or payment-health text for steps it does not have' );
+blzmcp_it_assert( str_contains( $t_ref, 'Still run the steps below, if any, and report what they return; stop the review only if no step remains.' ), 'analytics off, refund: the plain report sentence' );
+$t_nc = $an_text( $an_no_card );
+blzmcp_it_assert( null === $index_of( $an_no_card, $card ) && 0 === $index_of( $an_no_card, $payment ), 'analytics off, card omitted: payment health is the only diagnostic step' );
+blzmcp_it_assert( str_contains( $t_nc, 'report what they return, payment health findings first; stop the review only if no step remains.' ) && ! str_contains( $t_nc, 'the card-testing result and its protection advice included' ) && ! str_contains( $t_nc, 'card-testing findings first' ), 'analytics off, card omitted: the stop text names payment health only, no card findings or protection advice' );
+blzmcp_it_assert( str_contains( $t_nc, 'The card-testing check is not in this plan' ) && ! str_contains( $t_nc, 'If its verdict is likely_attack' ), 'analytics off, card omitted: explained once by the skipped-card paragraph, no guidance for a step that will not run' );
+$t_np = $an_text( $an_no_pay );
+blzmcp_it_assert( 0 === $index_of( $an_no_pay, $card ) && str_contains( $t_np, '(the card-testing result and its protection advice included), likely or possible card-testing findings first; stop the review only if no step remains.' ) && ! str_contains( $t_np, 'then payment health findings' ), 'analytics off, payment omitted: the stop text names the card step only' );
+$t_full = $an_text( $an_full );
+blzmcp_it_assert( str_contains( $t_full, '(the card-testing result and its protection advice included), likely or possible card-testing findings first, then payment health findings; stop the review only if no step remains.' ), 'analytics off, full plan: card findings first, then payment health findings' );
+foreach ( array( 'refund' => $t_ref, 'card omitted' => $t_nc, 'payment omitted' => $t_np, 'full' => $t_full ) as $an_label => $an_t ) {
+	blzmcp_it_equals( array(), $contradictions( $an_t ), "analytics off, {$an_label}: no contradictory or failed > paid clause" );
+}
+blzmcp_it_equals( array(), $direction_problems( $t_full ), 'analytics off, full plan: the card and inventory directions agree' );
 
 // Payment step permission follows the user at plan time (cold and warm): never cached.
 $deny_target = $payment;
@@ -781,6 +1031,7 @@ foreach ( array_keys( $workflows ) as $name ) {
 	blzmcp_it_assert( ! in_array( $health, $tools, true ) && ! in_array( $history, $tools, true ), "{$name} as shop_manager has no diagnostics steps" );
 	if ( in_array( $name, $payment_first, true ) ) {
 		blzmcp_it_assert( 'blaze-mcp-toolkit/payment-health' === ( $sm['steps'][0]['ability'] ?? null ), "{$name} as shop_manager keeps payment health first (manage_woocommerce)" );
+		blzmcp_it_equals( 1, $index_of( $sm, $card ), "{$name} as shop_manager keeps card testing second (manage_woocommerce)" );
 	}
 	blzmcp_it_assert( in_array( 'wc-analytics/totals', $tools, true ), "{$name} as shop_manager keeps analytics steps" );
 	if ( in_array( $name, array( 'blaze-mcp-toolkit/weekly-store-review', 'blaze-mcp-toolkit/revenue-drop-triage' ), true ) ) {
@@ -826,5 +1077,8 @@ if ( getenv( 'BLZMCP_SAMPLE' ) ) {
 		echo "-- description: " . wp_get_ability( $name )->get_description() . "\n";
 	}
 }
+
+// Paired missing-origin card / payment-inventory case under the recommended connector (wave 2).
+$paired_case( 'recommended' );
 
 blzmcp_it_finish();
