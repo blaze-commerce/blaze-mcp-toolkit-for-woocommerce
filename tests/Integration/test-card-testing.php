@@ -255,19 +255,53 @@ $bad_inputs = array(
 	),
 	array( 'since_hours' => array( 48 ) ),
 );
+// Whether core's WP_Ability::validate_input() applies wp_ability_validate_input here (added in
+// WordPress 7.1.0; absent on the 6.9 floor), probed in this environment with one real call rather
+// than assumed from a version. A probe that disagrees with the WordPress version fails the run.
+$core_filter = false;
+$core_probe  = static function ( $is_valid ) use ( &$core_filter ) {
+	$core_filter = true;
+	return $is_valid;
+};
+add_filter( 'wp_ability_validate_input', $core_probe, 1 );
+$ability->validate_input( array() );
+remove_filter( 'wp_ability_validate_input', $core_probe, 1 );
+echo 'NOTE  WordPress ' . get_bloginfo( 'version' ) . ': core validate_input() ' . ( $core_filter ? 'applies' : 'does not apply' ) . " wp_ability_validate_input\n";
+blzmcp_it_equals( version_compare( get_bloginfo( 'version' ), '7.1-alpha', '>=' ), $core_filter, 'the validate-input probe agrees with the WordPress version (the filter exists from 7.1)' );
 foreach ( $bad_inputs as $bad ) {
 	$r = $ability->execute( $bad );
 	blzmcp_it_assert( is_wp_error( $r ), 'rejects ' . wp_json_encode( $bad ) . ' through the Abilities API' );
 	$r = CardTesting::execute( $bad );
 	blzmcp_it_assert( is_wp_error( $r ) && 'blzmcp_invalid_input' === $r->get_error_code(), 'rejects ' . wp_json_encode( $bad ) . ' on a direct call' );
-	// WordPress 7.2 casts validated input to the schema types before the callbacks
-	// (WP_Ability::prepare_input()), so the raw value must already fail validate_input(), the step
-	// prepare_input() runs first on the raw input (7.1+: through wp_ability_validate_input).
 	$v = $ability->validate_input( $bad );
-	blzmcp_it_assert( is_wp_error( $v ), 'rejects ' . wp_json_encode( $bad ) . ' in validate_input(), before any sanitising cast' );
+	if ( $core_filter ) {
+		// WordPress 7.2 casts validated input to the schema types before the callbacks
+		// (WP_Ability::prepare_input()), so the raw value must already fail validate_input(), the step
+		// prepare_input() runs first on the raw input (7.1+: through wp_ability_validate_input).
+		blzmcp_it_assert( is_wp_error( $v ), 'rejects ' . wp_json_encode( $bad ) . ' in validate_input(), before any sanitising cast' );
+	} elseif ( true === $v ) {
+		// No filter and no cast (WordPress 6.9): core's schema validation accepts this raw value, so the
+		// plugin's own check in execute() rejects it, end to end through the Abilities API.
+		$e = $ability->execute( $bad );
+		blzmcp_it_assert( is_wp_error( $e ) && 'blzmcp_invalid_input' === $e->get_error_code(), 'rejects ' . wp_json_encode( $bad ) . ' end to end with blzmcp_invalid_input (core validate_input() applies no filter here)' );
+	} else {
+		blzmcp_it_assert( is_wp_error( $v ), 'rejects ' . wp_json_encode( $bad ) . ' in core\'s own schema validation (no filter here)' );
+	}
 }
 $raw_check = array( CardTesting::class, 'validate_raw_input' );
 blzmcp_it_equals( 10, has_filter( 'wp_ability_validate_input', $raw_check ), 'raw-input check registered on wp_ability_validate_input with the ability' );
+// The 6.9 path, shown on any core without 7.2's sanitising cast: with the raw-input check taken off
+// for two calls (as when core never applies the filter), execute() alone still rejects the values
+// core's schema validation accepts, with blzmcp_invalid_input. The check is put back at once.
+if ( ! method_exists( 'WP_Ability', 'sanitize_input' ) ) {
+	remove_filter( 'wp_ability_validate_input', $raw_check, 10 );
+	foreach ( array( array( 'since_hours' => '48' ), array( 'since_hours' => 48.0 ) ) as $bad ) {
+		$e = $ability->execute( $bad );
+		blzmcp_it_assert( is_wp_error( $e ) && 'blzmcp_invalid_input' === $e->get_error_code(), 'without the filter (as on 6.9), ' . wp_json_encode( $bad ) . ' is rejected end to end with blzmcp_invalid_input' );
+	}
+	add_filter( 'wp_ability_validate_input', $raw_check, 10, 3 );
+	blzmcp_it_equals( 10, has_filter( 'wp_ability_validate_input', $raw_check ), 'raw-input check put back after the 6.9 simulation' );
+}
 foreach ( array( array(), array( 'since_hours' => 1 ), array( 'since_hours' => 48 ), array( 'since_hours' => 168 ) ) as $good ) {
 	blzmcp_it_equals( true, $ability->validate_input( $good ), 'accepts ' . wp_json_encode( $good ) . ' in validate_input()' );
 }
