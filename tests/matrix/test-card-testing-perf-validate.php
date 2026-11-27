@@ -7,8 +7,13 @@
  *
  * Covers the card workload arithmetic (payment-volume-cycle.php), the trial and bound-case
  * validators (card-testing-perf-trial.php) and the receipt validator (card-testing-perf-validate.php,
- * through its CLI too): a good receipt passes, and each rejection fails with its own reason. Prints
- * "<n> passed, <m> failed" and exits 0 only when nothing failed.
+ * through its CLI too): a good receipt passes, and each rejection fails with its own reason. Also
+ * the combined workflow cost's shared step checker, step outcome and plan reader, and the
+ * Analytics readiness check (card-testing-perf-trial.php; 1.3 wave 3, REVIEW-pass4a R1): a failed,
+ * unplanned, missing, added, substituted (ability or subject) or reordered step, and a missing,
+ * unready or uncleared readiness record, each refused with its own text, directly and in a receipt,
+ * plus the cleanup's Analytics leftovers. Prints "<n> passed, <m> failed" and exits 0 only when
+ * nothing failed.
  *
  * @package Blaze\McpToolkit
  */
@@ -540,6 +545,167 @@ $bv( 'an incomplete order scan', 'methods', 1000, static function ( &$r ) { $r['
 $is( 'bound: an unknown case fails', false === blzmcp_card_perf_validate_bound( blzmcp_test_card_bound( 'methods', 1000 ), 'trials', 1000 )['ok'] );
 $is( 'bound: no response fails', false === blzmcp_card_perf_validate_bound( null, 'networks', 5000 )['ok'] );
 
+// ---------------------------------------------------------------- the workflow step checker (R1).
+// One pure check (card-testing-perf-trial.php) decides the measurement's ok and the receipt
+// validator's verdict. Each mutation asserts its own problem text, so removing that check fails it.
+
+/**
+ * A WP_Error stand-in (the checker only calls get_error_code()).
+ *
+ * @param string $code Error code.
+ */
+function blzmcp_test_card_error( string $code ): object {
+	return new class( $code ) {
+		/**
+		 * Code.
+		 *
+		 * @var string
+		 */
+		private $code;
+
+		/**
+		 * Constructor.
+		 *
+		 * @param string $code Code.
+		 */
+		public function __construct( string $code ) {
+			$this->code = $code;
+		}
+
+		/** The code. */
+		public function get_error_code(): string {
+			return $this->code;
+		}
+	};
+}
+
+/**
+ * The plan's first 3 steps as the measurement records them: planned, the plan's own arguments,
+ * timed and successful.
+ */
+function blzmcp_test_card_steps(): array {
+	$steps = array();
+	foreach (
+		array(
+			array( 'blaze-mcp-toolkit/payment-health', array( 'since_hours' => 168 ) ),
+			array( 'blaze-mcp-toolkit/card-testing', array( 'since_hours' => 168 ) ),
+			array(
+				'wc-analytics/totals',
+				array(
+					'subject' => 'orders',
+					'period'  => 'last_7_days',
+					'compare' => true,
+				),
+			),
+		) as $i => $s
+	) {
+		$steps[] = array(
+			'position'       => $i,
+			'ability'        => $s[0],
+			'planned'        => true,
+			'plan_arguments' => $s[1],
+			'arguments'      => $s[1],
+			'available'      => true,
+			'elapsed_ms'     => 100.5 + $i,
+			'queries'        => 30,
+			'success'        => true,
+			'error_code'     => null,
+		);
+	}
+	return $steps;
+}
+// $ws( label, mutate(steps), problem text that must appear ).
+$ws = static function ( string $label, callable $mutate, string $reason ) use ( $is ): void {
+	$s = blzmcp_test_card_steps();
+	$mutate( $s );
+	$p   = blzmcp_card_perf_workflow_step_problems( $s );
+	$hit = array_filter( $p, static fn( $x ) => false !== strpos( $x, $reason ) );
+	$is( "workflow steps: $label is refused ($reason)", array() !== $hit );
+	if ( array() === $hit ) {
+		echo '      got: ' . implode( ' | ', $p ) . "\n";
+	}
+};
+$is( 'workflow steps: the plan\'s 3 steps in order, planned and successful, have no problem', array() === blzmcp_card_perf_workflow_step_problems( blzmcp_test_card_steps() ) );
+$ws( 'a failed order totals step (blzmcp_analytics_unavailable)', static function ( &$s ) { $s[2]['success'] = false; $s[2]['error_code'] = 'blzmcp_analytics_unavailable'; }, 'step 3 (wc-analytics/totals orders) failed (success false, error blzmcp_analytics_unavailable)' );
+$ws( 'an unplanned order totals step', static function ( &$s ) { $s[2]['planned'] = false; }, 'step 3 (wc-analytics/totals orders) is not a planned step (planned false)' );
+$ws( 'a missing order totals step (2 steps)', static function ( &$s ) { array_pop( $s ); }, 'step 3 (wc-analytics/totals orders) missing' );
+$ws( 'a missing order totals step (2 steps) counted', static function ( &$s ) { array_pop( $s ); }, '2 step records, expected exactly the 3 planned steps' );
+$ws( 'an added fourth call', static function ( &$s ) { $x = $s[2]; $x['position'] = 3; $s[] = $x; }, '4 step records, expected exactly the 3 planned steps' );
+$ws( 'another ability in place of the order totals', static function ( &$s ) { $s[2]['ability'] = 'blaze-mcp-toolkit/store-profile'; }, 'step 3 is blaze-mcp-toolkit/store-profile, expected wc-analytics/totals (substituted or reordered)' );
+$ws( 'the order totals with another subject', static function ( &$s ) { $s[2]['arguments']['subject'] = 'revenue'; $s[2]['plan_arguments']['subject'] = 'revenue'; }, 'step 3 has subject revenue, expected orders (substituted)' );
+$ws( 'card testing and order totals swapped', static function ( &$s ) { list( $s[1], $s[2] ) = array( $s[2], $s[1] ); }, 'step 2 is wc-analytics/totals, expected blaze-mcp-toolkit/card-testing (substituted or reordered)' );
+$ws( 'payment health not first', static function ( &$s ) { list( $s[0], $s[1] ) = array( $s[1], $s[0] ); }, 'step 1 is blaze-mcp-toolkit/card-testing, expected blaze-mcp-toolkit/payment-health (substituted or reordered)' );
+$ws( 'a step recorded at another plan position', static function ( &$s ) { $s[1]['position'] = 2; }, 'step 2 is not plan position 1 (position 2)' );
+$ws( 'a step called with arguments the plan did not give', static function ( &$s ) { $s[0]['arguments']['since_hours'] = 48; }, "step 1 was not called with the plan's own arguments" );
+$ws( 'a step with an error code although it says success', static function ( &$s ) { $s[1]['error_code'] = 'rest_forbidden'; }, 'step 2 (blaze-mcp-toolkit/card-testing) failed (success true, error rest_forbidden)' );
+$ws( 'a step without an error_code key (missing is not null)', static function ( &$s ) { unset( $s[1]['error_code'] ); }, 'step 2 (blaze-mcp-toolkit/card-testing) failed (success true, error null)' );
+$ws( 'a step without a success flag', static function ( &$s ) { unset( $s[0]['success'] ); }, 'step 1 (blaze-mcp-toolkit/payment-health) failed (success null, error null)' );
+$ws( 'a step without its timing', static function ( &$s ) { unset( $s[0]['elapsed_ms'] ); }, 'step 1 (blaze-mcp-toolkit/payment-health) has no elapsed_ms' );
+$is( 'workflow steps: no list of records is refused', array( 'no list of step records' ) === blzmcp_card_perf_workflow_step_problems( null ) && array( 'no list of step records' ) === blzmcp_card_perf_workflow_step_problems( array( 'a' => 1 ) ) );
+
+// What the measurement makes of each executed step's result.
+$oc = static fn( $r ): array => blzmcp_card_perf_step_outcome( $r );
+$is( 'step outcome: a result array succeeds with no code', array( 'success' => true, 'error_code' => null ) === $oc( array( 'schema_version' => 1, 'findings' => array( array( 'code' => 'x' ) ) ) ) );
+$is( 'step outcome: a WP_Error fails with its code', array( 'success' => false, 'error_code' => 'blzmcp_analytics_unavailable' ) === $oc( blzmcp_test_card_error( 'blzmcp_analytics_unavailable' ) ) );
+$is( 'step outcome: success false fails (with its code when given)', array( 'success' => false, 'error_code' => 'success_false' ) === $oc( array( 'success' => false ) ) && 'blzmcp_analytics_unavailable' === $oc( array( 'success' => false, 'code' => 'blzmcp_analytics_unavailable' ) )['error_code'] );
+$is( 'step outcome: an error payload (top-level code and message) fails with its code', array( 'success' => false, 'error_code' => 'blzmcp_analytics_unavailable' ) === $oc( array( 'code' => 'blzmcp_analytics_unavailable', 'message' => '[ANALYTICS_UNAVAILABLE] x', 'data' => array( 'status' => 503 ) ) ) );
+$is( 'step outcome: an error key fails with its code', 'rest_forbidden' === $oc( array( 'error' => array( 'code' => 'rest_forbidden' ) ) )['error_code'] && false === $oc( array( 'error' => 'boom' ) )['success'] );
+$is( 'step outcome: a message carrying the Analytics guard\'s token fails', array( 'success' => false, 'error_code' => 'blzmcp_analytics_unavailable' ) === $oc( array( 'message' => '[ANALYTICS_UNAVAILABLE] Import them first.' ) ) );
+$is( 'step outcome: null, a string and an empty array fail', false === $oc( null )['success'] && false === $oc( 'ok' )['success'] && array( 'success' => false, 'error_code' => 'empty_result' ) === $oc( array() ) );
+
+// The plan as the measurement reads it: in order, arguments as arrays, nothing added.
+$plan  = array(
+	'workflow' => 'blaze-mcp-toolkit/weekly-store-review',
+	'period'   => 'last_7_days',
+	'steps'    => array(
+		array( 'tool' => 't1', 'ability' => 'blaze-mcp-toolkit/payment-health', 'arguments' => (object) array( 'since_hours' => 168 ), 'why' => 'x' ),
+		array( 'tool' => 't2', 'ability' => 'blaze-mcp-toolkit/card-testing', 'arguments' => (object) array( 'since_hours' => 168 ), 'why' => 'x' ),
+		array( 'tool' => 't3', 'ability' => 'blaze-mcp-toolkit/store-profile', 'arguments' => (object) array(), 'why' => 'x' ),
+	),
+);
+$steps = blzmcp_card_perf_plan_steps( $plan );
+$is( 'plan steps: read in plan order with array arguments, nothing added for the order totals the plan left out', array( array( 'ability' => 'blaze-mcp-toolkit/payment-health', 'arguments' => array( 'since_hours' => 168 ) ), array( 'ability' => 'blaze-mcp-toolkit/card-testing', 'arguments' => array( 'since_hours' => 168 ) ), array( 'ability' => 'blaze-mcp-toolkit/store-profile', 'arguments' => array() ) ) === $steps );
+$is( 'plan steps: a WP_Error, a plan without steps and a non-list are no plan', null === blzmcp_card_perf_plan_steps( blzmcp_test_card_error( 'x' ) ) && null === blzmcp_card_perf_plan_steps( array( 'workflow' => 'x' ) ) && null === blzmcp_card_perf_plan_steps( array( 'steps' => array( 'a' => array() ) ) ) && null === blzmcp_card_perf_plan_steps( null ) );
+
+// ---------------------------------------------------------------- the Analytics readiness check (R1).
+
+$ready = static fn(): array => array(
+	'storage'        => 'hpos',
+	'period'         => 'last_7_days',
+	'compare'        => true,
+	'reason'         => null,
+	'cache_cleared'  => true,
+	'eligible'       => 34720,
+	'imported'       => 34720,
+	'stats_rows'     => 34720,
+	'missing'        => 0,
+	'failed_imports' => 0,
+	'ok'             => true,
+);
+$ar    = static function ( string $label, callable $mutate, string $reason ) use ( $is, $ready ): void {
+	$a = $ready();
+	$mutate( $a );
+	$p   = blzmcp_card_perf_analytics_problems( $a, 'last_7_days' );
+	$hit = array_filter( $p, static fn( $x ) => false !== strpos( $x, $reason ) );
+	$is( "analytics readiness: $label is refused ($reason)", array() !== $hit );
+	if ( array() === $hit ) {
+		echo '      got: ' . implode( ' | ', $p ) . "\n";
+	}
+};
+$is( 'analytics readiness: imported, cache cleared and no gap has no problem', array() === blzmcp_card_perf_analytics_problems( $ready(), 'last_7_days' ) );
+$is( 'analytics readiness: no record is refused', array( 'no readiness record' ) === blzmcp_card_perf_analytics_problems( null, 'last_7_days' ) );
+$ar( 'a guard reason', static function ( &$a ) { $a['reason'] = 'orders_not_imported'; }, 'the guard reports orders_not_imported' );
+$ar( 'no reason key (missing is not null)', static function ( &$a ) { unset( $a['reason'] ); }, 'no guard reason recorded' );
+$ar( 'no cache_cleared', static function ( &$a ) { unset( $a['cache_cleared'] ); }, "the guard's gap cache was not cleared before the probe" );
+$ar( 'cache_cleared false', static function ( &$a ) { $a['cache_cleared'] = false; }, "the guard's gap cache was not cleared before the probe" );
+$ar( 'another period', static function ( &$a ) { $a['period'] = 'last_30_days'; }, "probed last_30_days with compare true, not the measured workflow's last_7_days with compare" );
+$ar( 'no comparison', static function ( &$a ) { $a['compare'] = false; }, "probed last_7_days with compare false, not the measured workflow's last_7_days with compare" );
+$ar( 'an import one short', static function ( &$a ) { $a['imported'] = 34719; }, 'imported 34719 of 34720 eligible orders' );
+$ar( 'nothing to import', static function ( &$a ) { $a['eligible'] = 0; $a['imported'] = 0; }, 'no eligible orders to import (eligible 0)' );
+$ar( 'eligible orders without an Analytics row', static function ( &$a ) { $a['missing'] = 3; }, '3 eligible orders without an Analytics row' );
+$ar( 'failed imports', static function ( &$a ) { $a['failed_imports'] = 2; }, '2 failed Analytics imports' );
+$ar( 'a record not ok', static function ( &$a ) { $a['ok'] = false; }, 'readiness not ok' );
+
 // ---------------------------------------------------------------- the receipt validator.
 
 $cand = str_repeat( 'ab', 32 );
@@ -623,6 +789,56 @@ $rv( 'a smaller older tail', static function ( &$r ) { $r['seed']['old_orders'] 
 $rv( 'other methods', static function ( &$r ) { $r['seed']['methods'] = array( 'stripe', 'cod', 'cheque' ); }, 'workload methods are not the 3 instant methods' );
 $rv( 'no drafts', static function ( &$r ) { $r['seed']['drafts'] = 0; }, 'workload has no checkout drafts or no missing-origin orders' );
 $rv( 'an unverified storage', static function ( &$r ) { $r['seed']['storages'][1]['verify']['ok'] = false; }, 'workload not seeded and verified in the authoritative store (hpos)' );
+
+// The combined workflow cost and its Analytics readiness (1.3 wave 3, REVIEW-pass4a R1), decided on
+// the raw step and readiness records. workflow_cost[0] and analytics_ready[0] are legacy, [1] hpos.
+$wf = static function ( array &$r, string $s ): int {
+	foreach ( $r['workflow_cost'] as $i => $x ) {
+		if ( $s === $x['storage'] ) {
+			return $i;
+		}
+	}
+	return -1;
+};
+$cl = static function ( array &$r, string $s, string $ph ): int {
+	foreach ( $r['cleanup'] as $i => $c ) {
+		if ( $ph === $c['phase'] && $s === $c['storage'] ) {
+			return $i;
+		}
+	}
+	return -1;
+};
+$rv( 'a failed order totals step while the workflow cost says ok', static function ( &$r ) use ( $wf ) { $i = $wf( $r, 'legacy' ); $r['workflow_cost'][ $i ]['steps'][2]['success'] = false; $r['workflow_cost'][ $i ]['steps'][2]['error_code'] = 'blzmcp_analytics_unavailable'; }, 'combined workflow cost (legacy): step 3 (wc-analytics/totals orders) failed (success false, error blzmcp_analytics_unavailable)' );
+$bad = $good;
+$bad['workflow_cost'][0]['steps'][2]['success']    = false;
+$bad['workflow_cost'][0]['steps'][2]['error_code'] = 'blzmcp_analytics_unavailable';
+$p   = blzmcp_card_receipt_problems( $bad, $bind );
+$is( 'receipt: that refusal comes from the raw step, not the ok flag (it still says ok, and no ok-based refusal appears)', true === $bad['workflow_cost'][0]['ok'] && ! in_array( 'combined workflow cost missing or failed (legacy)', $p, true ) && 1 === count( array_filter( $p, static fn( $x ) => str_starts_with( $x, 'combined workflow cost (legacy):' ) ) ) );
+$rv( 'an unplanned order totals step', static function ( &$r ) use ( $wf ) { $r['workflow_cost'][ $wf( $r, 'hpos' ) ]['steps'][2]['planned'] = false; }, 'combined workflow cost (hpos): step 3 (wc-analytics/totals orders) is not a planned step (planned false)' );
+$rv( 'a missing order totals step (2 steps)', static function ( &$r ) use ( $wf ) { $i = $wf( $r, 'hpos' ); array_pop( $r['workflow_cost'][ $i ]['steps'] ); $r['workflow_cost'][ $i ]['total_ms'] = 1700; }, 'combined workflow cost (hpos): step 3 (wc-analytics/totals orders) missing' );
+$rv( 'another ability in place of the order totals', static function ( &$r ) use ( $wf ) { $r['workflow_cost'][ $wf( $r, 'legacy' ) ]['steps'][2]['ability'] = 'blaze-mcp-toolkit/store-profile'; }, 'combined workflow cost (legacy): step 3 is blaze-mcp-toolkit/store-profile, expected wc-analytics/totals (substituted or reordered)' );
+$rv( 'the order totals with another subject', static function ( &$r ) use ( $wf ) { $i = $wf( $r, 'legacy' ); $r['workflow_cost'][ $i ]['steps'][2]['arguments']['subject'] = 'revenue'; $r['workflow_cost'][ $i ]['steps'][2]['plan_arguments']['subject'] = 'revenue'; }, 'combined workflow cost (legacy): step 3 has subject revenue, expected orders (substituted)' );
+$rv( 'card testing and order totals swapped', static function ( &$r ) use ( $wf ) { $i = $wf( $r, 'hpos' ); $st = &$r['workflow_cost'][ $i ]['steps']; list( $st[1], $st[2] ) = array( $st[2], $st[1] ); unset( $st ); }, 'combined workflow cost (hpos): step 2 is wc-analytics/totals, expected blaze-mcp-toolkit/card-testing (substituted or reordered)' );
+$rv( 'payment health not first', static function ( &$r ) use ( $wf ) { $i = $wf( $r, 'hpos' ); $st = &$r['workflow_cost'][ $i ]['steps']; list( $st[0], $st[1] ) = array( $st[1], $st[0] ); unset( $st ); }, 'combined workflow cost (hpos): step 1 is blaze-mcp-toolkit/card-testing, expected blaze-mcp-toolkit/payment-health (substituted or reordered)' );
+$rv( 'an added fourth call', static function ( &$r ) use ( $wf ) { $i = $wf( $r, 'legacy' ); $x = $r['workflow_cost'][ $i ]['steps'][2]; $x['position'] = 3; $r['workflow_cost'][ $i ]['steps'][] = $x; }, 'combined workflow cost (legacy): 4 step records, expected exactly the 3 planned steps' );
+$rv( 'a workflow cost of another period', static function ( &$r ) use ( $wf ) { $r['workflow_cost'][ $wf( $r, 'legacy' ) ]['plan_period'] = 'last_30_days'; }, "combined workflow cost (legacy): not the weekly review's own last_7_days plan" );
+$rv( 'a plan whose Analytics probe was not fresh', static function ( &$r ) use ( $wf ) { $r['workflow_cost'][ $wf( $r, 'hpos' ) ]['gap_cache_cleared'] = false; }, "combined workflow cost (hpos): the plan's Analytics probe did not run fresh (gap cache not cleared)" );
+$rv( 'a total that is not the sum of its steps', static function ( &$r ) use ( $wf ) { $r['workflow_cost'][ $wf( $r, 'hpos' ) ]['total_ms'] = 900; }, 'combined workflow cost (hpos): total_ms 900 is not the sum of its steps (2100.5)' );
+$rv( 'a workflow cost with no step records', static function ( &$r ) use ( $wf ) { unset( $r['workflow_cost'][ $wf( $r, 'legacy' ) ]['steps'] ); }, 'combined workflow cost (legacy): no list of step records' );
+$rv( 'no Analytics readiness record', static function ( &$r ) { array_shift( $r['analytics_ready'] ); }, 'analytics readiness missing or not one record (legacy)' );
+$rv( 'two Analytics readiness records for one storage', static function ( &$r ) { $r['analytics_ready'][] = $r['analytics_ready'][1]; }, 'analytics readiness missing or not one record (hpos)' );
+$rv( 'Analytics readiness with a guard reason', static function ( &$r ) { $r['analytics_ready'][1]['reason'] = 'orders_not_imported'; }, 'analytics readiness (hpos): the guard reports orders_not_imported' );
+$rv( 'Analytics readiness without cache_cleared', static function ( &$r ) { unset( $r['analytics_ready'][0]['cache_cleared'] ); }, "analytics readiness (legacy): the guard's gap cache was not cleared before the probe" );
+$rv( 'Analytics readiness without a reason key', static function ( &$r ) { unset( $r['analytics_ready'][0]['reason'] ); }, 'analytics readiness (legacy): no guard reason recorded' );
+$rv( 'Analytics readiness for another period', static function ( &$r ) { $r['analytics_ready'][1]['period'] = 'last_30_days'; }, "analytics readiness (hpos): probed last_30_days with compare true, not the measured workflow's last_7_days with compare" );
+$rv( 'Analytics readiness with an import one short', static function ( &$r ) { $r['analytics_ready'][0]['imported'] = 34719; }, 'analytics readiness (legacy): imported 34719 of 34720 eligible orders' );
+$rv( 'a cleanup leaving Analytics rows while it says ok', static function ( &$r ) use ( $cl ) { $r['cleanup'][ $cl( $r, 'hpos', 'after' ) ]['analytics_rows_remaining'] = 2; }, 'cleanup after (hpos) missing or unclean' );
+$rv( 'a cleanup leaving fixture customers while it says ok', static function ( &$r ) use ( $cl ) { $r['cleanup'][ $cl( $r, 'legacy', 'before' ) ]['analytics_customers_remaining'] = 1; }, 'cleanup before (legacy) missing or unclean' );
+$rv( 'a cleanup leaving import jobs while it says ok', static function ( &$r ) use ( $cl ) { $r['cleanup'][ $cl( $r, 'hpos', 'bound-networks' ) ]['import_jobs_remaining'] = 4; }, 'cleanup bound-networks (hpos) missing or unclean' );
+$rv( 'a cleanup leaving failed-import entries while it says ok', static function ( &$r ) use ( $cl ) { $r['cleanup'][ $cl( $r, 'legacy', 'bound-methods' ) ]['failed_imports_remaining'] = 1; }, 'cleanup bound-methods (legacy) missing or unclean' );
+$rv( 'an orders cleanup without its Analytics fields', static function ( &$r ) { unset( $r['cleanup'][ count( $r['cleanup'] ) - 1 ]['import_jobs_remaining'] ); }, 'final cleanup missing or unclean' );
+$rv( 'the cleanup after the trials without the imported Analytics rows removed', static function ( &$r ) use ( $cl ) { $r['cleanup'][ $cl( $r, 'legacy', 'after' ) ]['analytics_stats_removed'] = 0; }, 'cleanup after (legacy) does not show the imported Analytics rows removed' );
+$rv( 'the cleanup after the trials without the guard cache cleared', static function ( &$r ) use ( $cl ) { $r['cleanup'][ $cl( $r, 'hpos', 'after' ) ]['analytics_cache_cleared'] = null; }, 'cleanup after (hpos) does not show the imported Analytics rows removed' );
 $p = blzmcp_card_receipt_problems( $good, array( 'candidate' => $cand, 'source' => $src, 'attempt' => 'other' ) );
 $is( 'receipt: the caller\'s attempt decides, not the receipt\'s', array() !== array_filter( $p, static fn( $x ) => false !== strpos( $x, 'is not this attempt other' ) ) );
 
@@ -691,6 +907,19 @@ list( $code, $last ) = $cli( (string) json_encode( $liar ) );
 $is( 'sample: a 1700 ms trial is refused although all_pass and every partition pass say true', 1 === $code && false !== strpos( $last, 'partition hpos/48h/file trial 1 took 1700 ms' ) );
 list( $code, $last ) = $cli( substr( $sample_json, 0, 400 ) );
 $is( 'sample: its first 400 bytes are refused (exit 2)', 2 === $code );
+$hole = $sample_r;
+foreach ( $hole['workflow_cost'] as &$w ) {
+	$w['steps'][2]['planned']    = false;
+	$w['steps'][2]['success']    = false;
+	$w['steps'][2]['error_code'] = 'blzmcp_analytics_unavailable';
+}
+unset( $w );
+list( $code, $last ) = $cli( (string) json_encode( $hole ) );
+$is( 'sample: an unplanned, failed order totals step under ok workflow costs (the saved smoke\'s hole) is refused', 1 === $code && false !== strpos( $last, 'combined workflow cost (hpos): step 3 (wc-analytics/totals orders) is not a planned step (planned false)' ) && false !== strpos( $last, 'step 3 (wc-analytics/totals orders) failed (success false, error blzmcp_analytics_unavailable)' ) );
+$unready = $sample_r;
+unset( $unready['analytics_ready'] );
+list( $code, $last ) = $cli( (string) json_encode( $unready ) );
+$is( 'sample: a receipt without Analytics readiness is refused', 1 === $code && false !== strpos( $last, 'analytics readiness missing or not one record (hpos)' ) );
 list( $code, $last ) = $cli( $sample_json, array( '--candidate-sha256=' . str_repeat( 'ef', 32 ), '--source-sha=' . $src, '--attempt=' . $att ) );
 $is( 'sample: another candidate is refused', 1 === $code );
 list( $code, $last ) = $cli( $sample_json, array( '--candidate-sha256=' . $cand, '--source-sha=0000000000000000000000000000000000000000', '--attempt=' . $att ) );

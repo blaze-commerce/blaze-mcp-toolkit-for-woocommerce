@@ -5,7 +5,7 @@
  *
  *   wp eval-file .../measure-card-testing.php trial <since_hours> <seed_now> <orders> <old> <file|db> [orders|logs]
  *   wp eval-file .../measure-card-testing.php bound <methods|networks> <k>
- *   wp eval-file .../measure-card-testing.php workflow
+ *   wp eval-file .../measure-card-testing.php workflow [period]
  *
  * trial: deletes only the toolkit's own result cache entries (blzmcp_c_ transients, one by one; no
  * whole-cache flush), then times one end-to-end ability execute() of blaze-mcp-toolkit/card-testing
@@ -27,8 +27,17 @@
  * card-cap-networks), checked by blzmcp_card_perf_validate_bound(). Its timing is recorded, never
  * counted as a performance trial.
  *
- * workflow: the combined cold cost of one weekly review's first steps in workflow order (payment
- * health, card testing, then the order totals step), each as the workflow plans it, reported on
+ * workflow: the combined cold cost of one weekly review (period last_7_days unless given) as its
+ * generated plan orders it. The Analytics guard's gap cache is cleared first, so the plan's own
+ * Analytics probe runs fresh. Then the plan's first 3 steps are called in plan order, each with the
+ * plan's own arguments, and timed one by one. The plan's steps are never changed, and no call is
+ * added. The workflow is ok only when those steps are exactly payment health, card testing and
+ * the order totals with subject orders, each planned and successful. A missing, reordered,
+ * substituted or failed step fails it, so does a WP_Error, success false or an error payload such
+ * as blzmcp_analytics_unavailable (blzmcp_card_perf_workflow_step_problems() in
+ * card-testing-perf-trial.php, the same check the receipt validator applies to the raw step
+ * records). Analytics readiness is established and recorded before this, untimed, by
+ * seed-payment-volume.php card-analytics-import and card-analytics-ready. The cost is reported on
  * its own and never pooled into a budget.
  *
  * Prints one line: MEASURE=<json>, BOUND=<json> or WORKFLOW=<json>. Query text is reported as its
@@ -126,89 +135,86 @@ if ( 'bound' === $blzmcp_mode ) {
 }
 
 if ( 'workflow' === $blzmcp_mode ) {
-	$plan_ability = wp_get_ability( 'blaze-mcp-toolkit/weekly-store-review' );
+	$period       = (string) ( $blzmcp_args[1] ?? BLZMCP_CARD_PERF_WORKFLOW_PERIOD );
+	$plan_ability = wp_get_ability( BLZMCP_CARD_PERF_WORKFLOW );
+	$guard        = '\Blaze\McpToolkit\Bundled\AnalyticsGuard';
 	$blzmcp_clear();
-	$t0    = hrtime( true );
-	$plan  = $plan_ability instanceof WP_Ability ? $plan_ability->execute( array( 'period' => 'last_7_days' ) ) : null;
-	$p_ms  = ( hrtime( true ) - $t0 ) / 1e6;
-	$want    = array( 'blaze-mcp-toolkit/payment-health', 'blaze-mcp-toolkit/card-testing', 'wc-analytics/totals' );
-	$picks   = array();
-	$planned = array();
-	foreach ( is_array( $plan ) ? (array) ( $plan['steps'] ?? array() ) : array() as $step ) {
-		$step = is_object( $step ) ? json_decode( (string) wp_json_encode( $step ), true ) : $step;
-		$name = is_array( $step ) ? (string) ( $step['ability'] ?? '' ) : '';
-		// The executed plan's arguments arrive as objects (output schema type object).
-		$argv = $step['arguments'] ?? null;
-		$argv = is_object( $argv ) ? json_decode( (string) wp_json_encode( $argv ), true ) : $argv;
-		$argv = is_array( $argv ) ? $argv : array();
-		if ( in_array( $name, $want, true ) && ! isset( $picks[ $name ] ) && ( 'wc-analytics/totals' !== $name || 'orders' === ( $argv['subject'] ?? null ) ) ) {
-			$picks[ $name ]   = $argv;
-			$planned[ $name ] = true;
-		}
+	// The plan's own Analytics probe runs fresh: no earlier clean probe (the readiness check's
+	// included) is reused to put the order totals step into the plan.
+	$gap_cleared = false;
+	if ( class_exists( $guard ) ) {
+		$guard::clear_cache();
+		$gap_cleared = false === get_transient( $guard::GAP_TRANSIENT );
 	}
-	// The plan leaves the order totals step out where WooCommerce Analytics is not available (C9).
-	// Its cost is still reported, with the arguments the weekly review gives it, marked unplanned.
-	if ( ! isset( $picks['wc-analytics/totals'] ) ) {
-		$picks['wc-analytics/totals'] = array(
-			'subject' => 'orders',
-			'period'  => 'last_7_days',
-			'compare' => true,
-		);
-	}
+	$t0         = hrtime( true );
+	$plan       = $plan_ability instanceof WP_Ability ? $plan_ability->execute( array( 'period' => $period ) ) : null;
+	$p_ms       = ( hrtime( true ) - $t0 ) / 1e6;
+	$plan_steps = blzmcp_card_perf_plan_steps( $plan );
+	// Exactly the plan's first steps, in plan order, each with the plan's own arguments. A step the
+	// plan left out is never added: the step check below reports it missing.
 	$steps = array();
 	$total = 0.0;
-	foreach ( $want as $name ) {
-		if ( ! isset( $picks[ $name ] ) ) {
-			$steps[] = array(
-				'ability' => $name,
-				'planned' => false,
-				'ok'      => false,
-			);
-			continue;
-		}
-		$ability = wp_get_ability( $name );
-		$argv    = array_intersect_key( $picks[ $name ], array_flip( array( 'since_hours', 'subject', 'period', 'compare' ) ) );
+	foreach ( array_slice( (array) $plan_steps, 0, count( BLZMCP_CARD_PERF_WORKFLOW_STEPS ) ) as $i => $step ) {
+		$name    = $step['ability'];
+		$argv    = $step['arguments'];
+		$rec     = array(
+			'position'       => $i,
+			'ability'        => $name,
+			'planned'        => true,
+			'plan_arguments' => $argv,
+			'arguments'      => $argv,
+		);
+		$ability = '' === $name ? null : wp_get_ability( $name );
 		if ( ! $ability instanceof WP_Ability ) {
-			$steps[] = array(
-				'ability'   => $name,
-				'planned'   => isset( $planned[ $name ] ),
-				'available' => false,
-				'arguments' => $argv,
-				'ok'        => false,
+			$steps[] = $rec + array(
+				'available'  => false,
+				'success'    => false,
+				'error_code' => 'ability_not_registered',
 			);
 			continue;
 		}
 		$blzmcp_clear();
-		$q0     = $wpdb->num_queries;
-		$t0     = hrtime( true );
-		$r      = $ability->execute( $picks[ $name ] );
-		$ms     = ( hrtime( true ) - $t0 ) / 1e6;
-		$total += $ms;
-		$steps[] = array(
-			'ability'    => $name,
-			'planned'    => isset( $planned[ $name ] ),
+		$q0      = $wpdb->num_queries;
+		$t0      = hrtime( true );
+		$r       = $ability->execute( $argv );
+		$ms      = ( hrtime( true ) - $t0 ) / 1e6;
+		$total  += $ms;
+		$outcome = blzmcp_card_perf_step_outcome( $r );
+		unset( $r );
+		$steps[] = $rec + array(
 			'available'  => true,
-			'arguments'  => $argv,
 			'elapsed_ms' => round( $ms, 1 ),
 			'queries'    => $wpdb->num_queries - $q0,
-			'ok'         => ! is_wp_error( $r ) && is_array( $r ),
-			'error'      => is_wp_error( $r ) ? $r->get_error_code() : null,
+			'success'    => $outcome['success'],
+			'error_code' => $outcome['error_code'],
 		);
 	}
-	$timed = array_filter( $steps, static fn( $s ) => isset( $s['elapsed_ms'] ) );
+	$failures = blzmcp_card_perf_workflow_step_problems( $steps );
+	$plan_per = is_array( $plan ) && is_string( $plan['period'] ?? null ) ? $plan['period'] : null;
+	if ( null === $plan_steps ) {
+		array_unshift( $failures, 'no workflow plan (' . ( is_wp_error( $plan ) ? $plan->get_error_code() : gettype( $plan ) ) . ')' );
+	}
+	if ( $plan_per !== $period ) {
+		$failures[] = 'the plan is for ' . blzmcp_card_perf_show( $plan_per ) . ', not ' . $period;
+	}
 	$blzmcp_out(
 		'WORKFLOW',
 		array(
-			'workflow'      => 'blaze-mcp-toolkit/weekly-store-review',
-			'period'        => 'last_7_days',
-			'plan_ok'       => is_array( $plan ),
-			'plan_ms'       => round( $p_ms, 1 ),
-			'steps'         => $steps,
-			'total_ms'      => round( $total, 1 ),
-			'ok'            => is_array( $plan ) && 3 === count( $timed ) && true === $steps[0]['ok'] && true === $steps[1]['ok'],
-			'meaning'       => 'cold sum of the three planned steps in workflow order, each after clearing the toolkit result cache; reported on its own, never pooled into a per-ability budget',
-			'pooled_budget' => false,
-			'versions'      => $blzmcp_versions(),
+			'workflow'          => BLZMCP_CARD_PERF_WORKFLOW,
+			'period'            => $period,
+			'plan_period'       => $plan_per,
+			'plan_ok'           => null !== $plan_steps,
+			'plan_ms'           => round( $p_ms, 1 ),
+			'plan_steps_total'  => null === $plan_steps ? null : count( $plan_steps ),
+			'plan_abilities'    => null === $plan_steps ? array() : array_column( array_slice( $plan_steps, 0, 6 ), 'ability' ),
+			'gap_cache_cleared' => $gap_cleared,
+			'steps'             => $steps,
+			'total_ms'          => round( $total, 1 ),
+			'failures'          => $failures,
+			'ok'                => array() === $failures,
+			'meaning'           => 'cold sum of the plan\'s own first three steps in plan order (payment health, card testing, order totals), each called with the plan\'s arguments after clearing the toolkit result cache; the plan\'s Analytics probe runs fresh and is in plan_ms; reported on its own, never pooled into a per-ability budget',
+			'pooled_budget'     => false,
+			'versions'          => $blzmcp_versions(),
 		)
 	);
 	return;

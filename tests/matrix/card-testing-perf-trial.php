@@ -29,6 +29,17 @@
  * identity map at 1,000 and 1,001 distinct IDs, and the network map at 5,000 and 5,001 recorded
  * networks among in-window failed orders. Bound cases are never timing trials.
  *
+ * The combined workflow cost (C9) is checked here too, once, for both the measurement
+ * (measure-card-testing.php workflow) and the receipt validator (card-testing-perf-validate.php):
+ * blzmcp_card_perf_workflow_step_problems() accepts only the weekly review's own first 3 planned
+ * steps, in plan order (payment health, card testing, then the order totals with subject orders),
+ * each called with the plan's own arguments, timed and successful. A missing, reordered,
+ * substituted, unplanned or failed step (a WP_Error, success false or an error payload such as the
+ * Analytics guard's blzmcp_analytics_unavailable, see blzmcp_card_perf_step_outcome()) is a
+ * problem; no call is ever added to the plan. blzmcp_card_perf_analytics_problems() checks the
+ * untimed Analytics precondition of that workflow: every eligible order imported, then the guard's
+ * gap cache cleared and its probe for exactly the measured period with compare finding no gap.
+ *
  * @package Blaze\McpToolkit
  */
 
@@ -540,5 +551,220 @@ if ( ! function_exists( 'blzmcp_card_perf_validate_trial' ) ) {
 			'failures' => $failures,
 			'observed' => $observed,
 		);
+	}
+
+	/** The measured workflow and its period (the weekly review's default, 7 days with comparison). */
+	define( 'BLZMCP_CARD_PERF_WORKFLOW', 'blaze-mcp-toolkit/weekly-store-review' );
+	define( 'BLZMCP_CARD_PERF_WORKFLOW_PERIOD', 'last_7_days' );
+
+	/** The workflow's first 3 planned steps, in plan order (C9): ability and, for totals, subject. */
+	define(
+		'BLZMCP_CARD_PERF_WORKFLOW_STEPS',
+		array(
+			array(
+				'ability' => 'blaze-mcp-toolkit/payment-health',
+				'subject' => null,
+			),
+			array(
+				'ability' => 'blaze-mcp-toolkit/card-testing',
+				'subject' => null,
+			),
+			array(
+				'ability' => 'wc-analytics/totals',
+				'subject' => 'orders',
+			),
+		)
+	);
+
+	/** The Analytics guard's error code and message token (AnalyticsGuard::ERROR_CODE, MESSAGE_TOKEN). */
+	define( 'BLZMCP_CARD_PERF_ANALYTICS_ERROR', 'blzmcp_analytics_unavailable' );
+	define( 'BLZMCP_CARD_PERF_ANALYTICS_TOKEN', '[ANALYTICS_UNAVAILABLE]' );
+
+	/**
+	 * Is this a finite number (int or float, not bool)?
+	 *
+	 * @param mixed $v Value.
+	 */
+	function blzmcp_card_perf_num( $v ): bool {
+		return ( is_int( $v ) || is_float( $v ) ) && is_finite( (float) $v );
+	}
+
+	/**
+	 * The ordered steps of a generated workflow plan, each {ability, arguments} with the arguments
+	 * as an array (the plan's output schema types them as objects). Null when the value is not a
+	 * plan with a list of steps. The plan is read as it is: nothing is added, dropped or reordered.
+	 *
+	 * @param mixed $plan The workflow ability's result.
+	 * @return array<int,array{ability:string,arguments:array<string,mixed>}>|null
+	 */
+	function blzmcp_card_perf_plan_steps( $plan ): ?array {
+		if ( is_object( $plan ) && method_exists( $plan, 'get_error_code' ) ) {
+			return null;
+		}
+		if ( is_object( $plan ) || is_array( $plan ) ) {
+			$json = json_encode( $plan ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- plain PHP, no WordPress here.
+			$plan = false === $json ? null : json_decode( $json, true );
+		}
+		if ( ! is_array( $plan ) || ! is_array( $plan['steps'] ?? null ) || ! array_is_list( $plan['steps'] ) ) {
+			return null;
+		}
+		$out = array();
+		foreach ( $plan['steps'] as $step ) {
+			$out[] = array(
+				'ability'   => is_array( $step ) && is_string( $step['ability'] ?? null ) ? $step['ability'] : '',
+				'arguments' => is_array( $step ) && is_array( $step['arguments'] ?? null ) ? $step['arguments'] : array(),
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Did one executed workflow step succeed? A WP_Error, anything but a non-empty array, success
+	 * false, or an error payload (a top-level code, error_code or error, or a message carrying the
+	 * Analytics guard's token) is a failure with its code; otherwise success with no code.
+	 *
+	 * @param mixed $result The ability's result.
+	 * @return array{success:bool,error_code:?string}
+	 */
+	function blzmcp_card_perf_step_outcome( $result ): array {
+		$failed = static fn( string $code ): array => array(
+			'success'    => false,
+			'error_code' => '' === $code ? 'error' : $code,
+		);
+		if ( is_object( $result ) && method_exists( $result, 'get_error_code' ) ) {
+			return $failed( (string) $result->get_error_code() );
+		}
+		if ( ! is_array( $result ) || array() === $result ) {
+			return $failed( is_array( $result ) ? 'empty_result' : 'not_a_result_' . gettype( $result ) );
+		}
+		$code = null;
+		foreach ( array( 'code', 'error_code' ) as $k ) {
+			if ( null === $code && is_string( $result[ $k ] ?? null ) && '' !== $result[ $k ] ) {
+				$code = $result[ $k ];
+			}
+		}
+		if ( array_key_exists( 'success', $result ) && true !== $result['success'] ) {
+			return $failed( $code ?? 'success_false' );
+		}
+		if ( null !== $code ) {
+			return $failed( $code );
+		}
+		if ( array_key_exists( 'error', $result ) && null !== $result['error'] && false !== $result['error'] ) {
+			$e = $result['error'];
+			return $failed( is_array( $e ) && is_string( $e['code'] ?? null ) ? $e['code'] : ( is_string( $e ) ? $e : 'error' ) );
+		}
+		if ( is_string( $result['message'] ?? null ) && str_starts_with( $result['message'], BLZMCP_CARD_PERF_ANALYTICS_TOKEN ) ) {
+			return $failed( BLZMCP_CARD_PERF_ANALYTICS_ERROR );
+		}
+		return array(
+			'success'    => true,
+			'error_code' => null,
+		);
+	}
+
+	/**
+	 * Every reason the measured workflow step records are not exactly the plan's first 3 steps
+	 * (BLZMCP_CARD_PERF_WORKFLOW_STEPS), in plan order, each planned, called with the plan's own
+	 * arguments, timed and successful. Empty when they are. Decided on the raw records only, never
+	 * on a summary ok flag; shared by the measurement and the receipt validator.
+	 *
+	 * @param mixed $steps Step records {position, ability, planned, plan_arguments, arguments,
+	 *                     elapsed_ms, success, error_code}.
+	 * @return string[]
+	 */
+	function blzmcp_card_perf_workflow_step_problems( $steps ): array {
+		$want = BLZMCP_CARD_PERF_WORKFLOW_STEPS;
+		$show = 'blzmcp_card_perf_show';
+		if ( ! is_array( $steps ) || ! array_is_list( $steps ) ) {
+			return array( 'no list of step records' );
+		}
+		$p = array();
+		if ( count( $steps ) !== count( $want ) ) {
+			$p[] = count( $steps ) . ' step records, expected exactly the ' . count( $want ) . ' planned steps';
+		}
+		foreach ( $want as $i => $w ) {
+			$n     = $i + 1;
+			$label = $w['ability'] . ( null === $w['subject'] ? '' : ' ' . $w['subject'] );
+			$s     = $steps[ $i ] ?? null;
+			if ( null === $s ) {
+				$p[] = "step $n ($label) missing";
+				continue;
+			}
+			if ( ! is_array( $s ) ) {
+				$p[] = "step $n is not a record";
+				continue;
+			}
+			if ( ( $s['position'] ?? null ) !== $i ) {
+				$p[] = "step $n is not plan position $i (position " . $show( $s['position'] ?? null ) . ')';
+			}
+			if ( true !== ( $s['planned'] ?? null ) ) {
+				$p[] = "step $n ($label) is not a planned step (planned " . $show( $s['planned'] ?? null ) . ')';
+			}
+			if ( ( $s['ability'] ?? null ) !== $w['ability'] ) {
+				$p[] = "step $n is " . $show( $s['ability'] ?? null ) . ", expected {$w['ability']} (substituted or reordered)";
+			}
+			$args = $s['arguments'] ?? null;
+			if ( ! is_array( $args ) || ! is_array( $s['plan_arguments'] ?? null ) || $args !== $s['plan_arguments'] ) {
+				$p[] = "step $n was not called with the plan's own arguments";
+			}
+			if ( null !== $w['subject'] && ( is_array( $args ) ? ( $args['subject'] ?? null ) : null ) !== $w['subject'] ) {
+				$p[] = "step $n has subject " . $show( is_array( $args ) ? ( $args['subject'] ?? null ) : null ) . ", expected {$w['subject']} (substituted)";
+			}
+			if ( true !== ( $s['success'] ?? null ) || ! blzmcp_card_perf_is_null( $s, 'error_code' ) ) {
+				$p[] = "step $n ($label) failed (success " . $show( $s['success'] ?? null ) . ', error ' . $show( $s['error_code'] ?? null ) . ')';
+			}
+			if ( ! blzmcp_card_perf_num( $s['elapsed_ms'] ?? null ) || $s['elapsed_ms'] < 0 ) {
+				$p[] = "step $n ($label) has no elapsed_ms";
+			}
+		}
+		return $p;
+	}
+
+	/**
+	 * Every reason one storage's Analytics readiness record does not establish the measured
+	 * workflow's precondition (empty when it does): every eligible order imported (eligible > 0,
+	 * imported = eligible, none without its Analytics row, no failed import), then the guard's gap
+	 * cache cleared and its probe for exactly the measured period with compare finding no gap.
+	 *
+	 * @param mixed  $a      Readiness record {period, compare, reason, cache_cleared, eligible,
+	 *                       imported, missing, failed_imports, ok}.
+	 * @param string $period The measured workflow's period.
+	 * @return string[]
+	 */
+	function blzmcp_card_perf_analytics_problems( $a, string $period ): array {
+		$show = 'blzmcp_card_perf_show';
+		if ( ! is_array( $a ) ) {
+			return array( 'no readiness record' );
+		}
+		$p = array();
+		if ( ( $a['period'] ?? null ) !== $period || true !== ( $a['compare'] ?? null ) ) {
+			$p[] = 'probed ' . $show( $a['period'] ?? null ) . ' with compare ' . $show( $a['compare'] ?? null ) . ", not the measured workflow's $period with compare";
+		}
+		if ( ! array_key_exists( 'reason', $a ) ) {
+			$p[] = 'no guard reason recorded';
+		} elseif ( null !== $a['reason'] ) {
+			$p[] = 'the guard reports ' . $show( $a['reason'] );
+		}
+		if ( true !== ( $a['cache_cleared'] ?? null ) ) {
+			$p[] = "the guard's gap cache was not cleared before the probe";
+		}
+		$eligible = $a['eligible'] ?? null;
+		$imported = $a['imported'] ?? null;
+		if ( ! is_int( $eligible ) || $eligible < 1 ) {
+			$p[] = 'no eligible orders to import (eligible ' . $show( $eligible ) . ')';
+		}
+		if ( ! is_int( $imported ) || $imported !== $eligible ) {
+			$p[] = 'imported ' . $show( $imported ) . ' of ' . $show( $eligible ) . ' eligible orders';
+		}
+		if ( 0 !== ( $a['missing'] ?? null ) ) {
+			$p[] = $show( $a['missing'] ?? null ) . ' eligible orders without an Analytics row';
+		}
+		if ( 0 !== ( $a['failed_imports'] ?? null ) ) {
+			$p[] = $show( $a['failed_imports'] ?? null ) . ' failed Analytics imports';
+		}
+		if ( true !== ( $a['ok'] ?? null ) ) {
+			$p[] = 'readiness not ok';
+		}
+		return $p;
 	}
 }

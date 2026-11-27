@@ -21,10 +21,24 @@
  * bound case passed and none counted as a trial, every forced reader failure detected, every
  * cleanup clean and the original order storage restored.
  *
+ * The combined workflow cost (1.3 wave 3, REVIEW-pass4a R1) is decided on its raw step records,
+ * never on its ok flag: exactly the weekly review's own first 3 planned steps in plan order
+ * (payment health, card testing, then the order totals with subject orders), each planned, called
+ * with the plan's own arguments, timed and successful (no WP_Error, success false or error code
+ * such as blzmcp_analytics_unavailable), with the plan's Analytics probe run fresh and the total
+ * equal to its steps (blzmcp_card_perf_workflow_step_problems() in card-testing-perf-trial.php).
+ * Each storage also needs its Analytics readiness record (analytics_ready): every eligible order
+ * imported, then the guard's probe with its gap cache cleared, for exactly the workflow's period
+ * with compare, finding no gap (reason null). Every orders cleanup must show no Analytics rows,
+ * import jobs, failed imports or fixture customers left, and the cleanup after the trials must
+ * show the imported Analytics rows removed.
+ *
  * @package Blaze\McpToolkit
  */
 
 // phpcs:disable WordPress.Security.EscapeOutput, WordPress.NamingConventions.PrefixAllGlobals, WordPress.WP.AlternativeFunctions
+
+require_once __DIR__ . '/card-testing-perf-trial.php';
 
 if ( ! function_exists( 'blzmcp_card_receipt_problems' ) ) {
 	define( 'BLZMCP_CARD_RECEIPT_SCHEMA', 'blzmcp-card-performance/1' );
@@ -288,13 +302,41 @@ if ( ! function_exists( 'blzmcp_card_receipt_problems' ) ) {
 			}
 		}
 
-		// Combined workflow cost, per storage, never pooled into a budget.
+		// Combined workflow cost, per storage, never pooled into a budget: decided on the raw step
+		// records (the plan's own first 3 steps, in plan order, each planned and successful), with
+		// the storage's Analytics readiness established first.
+		$period = BLZMCP_CARD_PERF_WORKFLOW_PERIOD;
 		foreach ( BLZMCP_CARD_RECEIPT_STORAGES as $s ) {
 			$e = array_values( array_filter( (array) ( $r['workflow_cost'] ?? array() ), static fn( $x ) => blzmcp_card_receipt_match( $x, array( 'storage' => $s ) ) ) );
 			$x = 1 === count( $e ) ? $e[0] : array();
-			$timed = array_filter( (array) ( $x['steps'] ?? array() ), static fn( $st ) => is_array( $st ) && blzmcp_card_receipt_num( $st['elapsed_ms'] ?? null ) );
-			if ( 1 !== count( $e ) || true !== ( $x['ok'] ?? null ) || ! $num( $x['total_ms'] ?? null ) || 3 !== count( $timed ) || false !== ( $x['pooled_budget'] ?? null ) ) {
+			if ( 1 !== count( $e ) || true !== ( $x['ok'] ?? null ) || ! $num( $x['total_ms'] ?? null ) || false !== ( $x['pooled_budget'] ?? null ) ) {
 				$p[] = "combined workflow cost missing or failed ($s)";
+			}
+			if ( 1 === count( $e ) ) {
+				foreach ( blzmcp_card_perf_workflow_step_problems( $x['steps'] ?? null ) as $why ) {
+					$p[] = "combined workflow cost ($s): $why";
+				}
+				if ( BLZMCP_CARD_PERF_WORKFLOW !== ( $x['workflow'] ?? null ) || BLZMCP_CARD_PERF_WORKFLOW_PERIOD !== ( $x['period'] ?? null ) || BLZMCP_CARD_PERF_WORKFLOW_PERIOD !== ( $x['plan_period'] ?? null ) ) {
+					$p[] = "combined workflow cost ($s): not the weekly review's own $period plan";
+				}
+				if ( true !== ( $x['gap_cache_cleared'] ?? null ) ) {
+					$p[] = "combined workflow cost ($s): the plan's Analytics probe did not run fresh (gap cache not cleared)";
+				}
+				$sum = 0.0;
+				foreach ( is_array( $x['steps'] ?? null ) ? $x['steps'] : array() as $st ) {
+					$sum += is_array( $st ) && $num( $st['elapsed_ms'] ?? null ) ? (float) $st['elapsed_ms'] : 0.0;
+				}
+				if ( $num( $x['total_ms'] ?? null ) && abs( (float) $x['total_ms'] - $sum ) > 0.5 ) {
+					$p[] = "combined workflow cost ($s): total_ms {$x['total_ms']} is not the sum of its steps ($sum)";
+				}
+			}
+			$a = array_values( array_filter( (array) ( $r['analytics_ready'] ?? array() ), static fn( $x ) => blzmcp_card_receipt_match( $x, array( 'storage' => $s ) ) ) );
+			if ( 1 !== count( $a ) ) {
+				$p[] = "analytics readiness missing or not one record ($s)";
+				continue;
+			}
+			foreach ( blzmcp_card_perf_analytics_problems( $a[0], $period ) as $why ) {
+				$p[] = "analytics readiness ($s): $why";
 			}
 		}
 
@@ -336,8 +378,9 @@ if ( ! function_exists( 'blzmcp_card_receipt_problems' ) ) {
 
 		// Cleanup records and the storage restore.
 		$cleanup = (array) ( $r['cleanup'] ?? array() );
+		$left    = array( 'tagged_remaining', 'analytics_rows_remaining', 'analytics_customers_remaining', 'import_jobs_remaining', 'failed_imports_remaining' );
 		$good    = static fn( $c ) => is_array( $c ) && true === ( $c['passed'] ?? null ) && true === ( $c['ok'] ?? null ) && true === ( $c['settings_restored'] ?? null )
-			&& ( 'orders' !== ( $c['mode'] ?? null ) || 0 === ( $c['tagged_remaining'] ?? null ) )
+			&& ( 'orders' !== ( $c['mode'] ?? null ) || array() === array_filter( $left, static fn( $k ) => 0 !== ( $c[ $k ] ?? null ) ) )
 			&& ( ! array_key_exists( 'expected_removed', $c ) || ( $c['orders_removed'] ?? null ) === $c['expected_removed'] );
 		foreach ( BLZMCP_CARD_RECEIPT_STORAGES as $s ) {
 			foreach ( BLZMCP_CARD_RECEIPT_PHASES as $ph ) {
@@ -352,6 +395,23 @@ if ( ! function_exists( 'blzmcp_card_receipt_problems' ) ) {
 				if ( array() === $e || count( array_filter( $e, $good ) ) !== count( $e ) || ! $removing_ok ) {
 					$p[] = "cleanup $ph ($s) missing or unclean";
 				}
+			}
+			// The cleanup after the trials removed the Analytics rows the readiness import wrote.
+			$ready    = array_values( array_filter( (array) ( $r['analytics_ready'] ?? array() ), static fn( $x ) => blzmcp_card_receipt_match( $x, array( 'storage' => $s ) ) ) );
+			$imported = 1 === count( $ready ) ? ( $ready[0]['imported'] ?? null ) : null;
+			$after    = array_filter(
+				$cleanup,
+				static fn( $c ) => blzmcp_card_receipt_match(
+					$c,
+					array(
+						'storage' => $s,
+						'phase'   => 'after',
+					)
+				)
+			);
+			$shown    = array_filter( $after, static fn( $c ) => is_int( $imported ) && $imported > 0 && is_int( $c['analytics_stats_removed'] ?? null ) && $c['analytics_stats_removed'] >= $imported && true === ( $c['analytics_cache_cleared'] ?? null ) );
+			if ( array() === $after || count( $shown ) !== count( $after ) ) {
+				$p[] = "cleanup after ($s) does not show the imported Analytics rows removed";
 			}
 		}
 		$final = array_filter( $cleanup, static fn( $c ) => is_array( $c ) && 'final' === ( $c['phase'] ?? null ) );

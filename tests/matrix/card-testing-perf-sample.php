@@ -9,8 +9,10 @@
  *
  * Prints the receipt as one JSON document on stdout: all 8 partitions (hpos and legacy, 48 and 168
  * hours, file and DB logger) with 5 valid trials each, well below 1500 ms, every trial metric, the
- * partitions summary, HTTP cold and warm per storage and window, the workflow cost per storage, the
- * 4 bound cases per storage, the forced failures, every cleanup phase and the storage restore.
+ * partitions summary, HTTP cold and warm per storage and window, the Analytics readiness and the
+ * workflow cost per storage (the plan's own 3 steps in plan order, each planned and successful),
+ * the 4 bound cases per storage, the forced failures, every cleanup phase (with its Analytics
+ * leftovers) and the storage restore.
  *
  * @package Blaze\McpToolkit
  */
@@ -78,6 +80,8 @@ if ( ! function_exists( 'blzmcp_card_perf_sample_receipt' ) ) {
 			'trials'           => array(),
 			'partitions'       => array(),
 			'http'             => array(),
+			'workflow_period'  => 'last_7_days',
+			'analytics_ready'  => array(),
 			'workflow_cost'    => array(),
 			'bound_cases'      => array(),
 			'forced_failures'  => array(),
@@ -175,28 +179,68 @@ if ( ! function_exists( 'blzmcp_card_perf_sample_receipt' ) ) {
 					);
 				}
 			}
+			$r['analytics_ready'][] = array(
+				'storage'                 => $s,
+				'period'                  => 'last_7_days',
+				'compare'                 => true,
+				'reason'                  => null,
+				'cache_cleared'           => true,
+				'eligible'                => 34720,
+				'imported'                => 34720,
+				'stats_rows'              => 34720,
+				'missing'                 => 0,
+				'failed_imports'          => 0,
+				'pending_import_jobs'     => 0,
+				'counted_statuses'        => array( 'wc-processing', 'wc-completed', 'wc-on-hold', 'wc-refunded' ),
+				'date_basis'              => 'date_paid',
+				'windows'                 => array( '2026-11-22..2026-11-28', '2026-11-15..2026-11-21' ),
+				'import_seconds_excluded' => 180,
+				'ok'                      => true,
+			);
+			$steps = array();
+			foreach (
+				array(
+					array( 'blaze-mcp-toolkit/payment-health', array( 'since_hours' => 168 ), 700 ),
+					array( 'blaze-mcp-toolkit/card-testing', array( 'since_hours' => 168 ), 1000 ),
+					array(
+						'wc-analytics/totals',
+						array(
+							'subject' => 'orders',
+							'period'  => 'last_7_days',
+							'compare' => true,
+						),
+						400.5,
+					),
+				) as $i => $step
+			) {
+				$steps[] = array(
+					'position'       => $i,
+					'ability'        => $step[0],
+					'planned'        => true,
+					'plan_arguments' => $step[1],
+					'arguments'      => $step[1],
+					'available'      => true,
+					'elapsed_ms'     => $step[2],
+					'queries'        => 40,
+					'success'        => true,
+					'error_code'     => null,
+				);
+			}
 			$r['workflow_cost'][] = array(
-				'storage'       => $s,
-				'ok'            => true,
-				'total_ms'      => 2100.5,
-				'pooled_budget' => false,
-				'steps'         => array(
-					array(
-						'ability'    => 'blaze-mcp-toolkit/payment-health',
-						'elapsed_ms' => 700,
-						'ok'         => true,
-					),
-					array(
-						'ability'    => 'blaze-mcp-toolkit/card-testing',
-						'elapsed_ms' => 1000,
-						'ok'         => true,
-					),
-					array(
-						'ability'    => 'wc-analytics/totals',
-						'elapsed_ms' => 400.5,
-						'ok'         => true,
-					),
-				),
+				'storage'           => $s,
+				'workflow'          => 'blaze-mcp-toolkit/weekly-store-review',
+				'period'            => 'last_7_days',
+				'plan_period'       => 'last_7_days',
+				'plan_ok'           => true,
+				'plan_ms'           => 160.2,
+				'plan_steps_total'  => 10,
+				'plan_abilities'    => array( 'blaze-mcp-toolkit/payment-health', 'blaze-mcp-toolkit/card-testing', 'wc-analytics/totals', 'blaze-mcp-toolkit/store-profile', 'wc-analytics/totals', 'wc-analytics/totals' ),
+				'gap_cache_cleared' => true,
+				'steps'             => $steps,
+				'total_ms'          => 2100.5,
+				'failures'          => array(),
+				'ok'                => true,
+				'pooled_budget'     => false,
 			);
 			foreach ( array( array( 'methods', 1000 ), array( 'methods', 1001 ), array( 'networks', 5000 ), array( 'networks', 5001 ) ) as $b ) {
 				$r['bound_cases'][] = array(
@@ -210,15 +254,17 @@ if ( ! function_exists( 'blzmcp_card_perf_sample_receipt' ) ) {
 				);
 			}
 			foreach ( array( 'before', 'diag-file', 'diag-db', 'after', 'bound-methods', 'bound-networks' ) as $ph ) {
-				$c = array(
+				$diag = 0 === strpos( $ph, 'diag' );
+				$c    = array(
 					'phase'             => $ph,
 					'storage'           => $s,
-					'mode'              => 0 === strpos( $ph, 'diag' ) ? 'diagnostics' : 'orders',
-					'orders_removed'    => 0 === strpos( $ph, 'diag' ) ? null : 0,
+					'mode'              => $diag ? 'diagnostics' : 'orders',
+					'orders_removed'    => $diag ? null : 0,
 					'tagged_remaining'  => 0,
 					'settings_restored' => true,
-					'ok'                => true,
-					'passed'            => true,
+				) + blzmcp_card_perf_sample_analytics_cleanup( $diag, 'after' === $ph ) + array(
+					'ok'     => true,
+					'passed' => true,
 				);
 				$removed = array(
 					'after'          => 70000,
@@ -239,10 +285,28 @@ if ( ! function_exists( 'blzmcp_card_perf_sample_receipt' ) ) {
 			'orders_removed'    => 0,
 			'tagged_remaining'  => 0,
 			'settings_restored' => true,
-			'ok'                => true,
-			'passed'            => true,
+		) + blzmcp_card_perf_sample_analytics_cleanup( false, false ) + array(
+			'ok'     => true,
+			'passed' => true,
 		);
 		return $r;
+	}
+
+	/**
+	 * The Analytics part of one sample cleanup record (seed-payment-volume.php's CLEANUP fields): null
+	 * for a diagnostics cleanup; for an orders cleanup nothing left, and after the trials the 34,720
+	 * imported Analytics rows and the 50 fixture customers removed.
+	 *
+	 * @param bool $diag  Diagnostics cleanup.
+	 * @param bool $after The cleanup after the trials.
+	 * @return array<string,mixed>
+	 */
+	function blzmcp_card_perf_sample_analytics_cleanup( bool $diag, bool $after ): array {
+		$keys = array( 'analytics_stats_removed', 'analytics_lookup_rows_removed', 'analytics_customers_removed', 'import_jobs_removed', 'failed_imports_cleared', 'analytics_cache_cleared', 'analytics_rows_remaining', 'analytics_customers_remaining', 'import_jobs_remaining', 'failed_imports_remaining' );
+		if ( $diag ) {
+			return array_fill_keys( $keys, null );
+		}
+		return array_combine( $keys, array( $after ? 34720 : 0, 0, $after ? 50 : 0, 0, 0, true, 0, 0, 0, 0 ) );
 	}
 }
 

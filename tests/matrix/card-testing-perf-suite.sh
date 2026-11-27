@@ -24,9 +24,17 @@
 # reader failure and a forced logs reader failure run once each and must come back failed and
 # detected. Then HTTP latency cold and warm per window through the abilities REST route (when
 # BLZMCP_PERF_PORT, BLZMCP_PERF_LOGIN and BLZMCP_PERF_APP_PASSWORD are set; the secret stays in
-# memory and reaches curl as a config on stdin), the combined workflow cost (payment health, card
-# testing, then the order totals step, cold, reported on its own), the fixture cleanup, then the
-# bound cases on their own fixtures: 1,000 and 1,001 distinct method IDs (MAX_METHODS) and 5,000 and
+# memory and reaches curl as a config on stdin), the Analytics readiness of the workflow (untimed,
+# after every trial: the card orders the plugin's Analytics guard counts, created in the 28-day
+# history, imported into WooCommerce Analytics synchronously in chunks, seed-payment-volume.php
+# card-analytics-import; then the guard asked, with its gap cache cleared, about exactly the
+# workflow's period with compare, card-analytics-ready; one analytics_ready record per storage),
+# the combined workflow cost (the weekly review's own plan: its first 3 steps in plan order, payment
+# health, card testing, then the order totals with subject orders, each called with the plan's
+# arguments, cold, reported on its own; a missing, reordered, substituted, unplanned or failed
+# step fails it, and it is never measured on a storage whose Analytics is not ready), the fixture
+# cleanup (its Analytics rows, import jobs and customers included), then the bound cases on their
+# own fixtures: 1,000 and 1,001 distinct method IDs (MAX_METHODS) and 5,000 and
 # 5,001 recorded networks among in-window failed orders (MAX_NETWORKS), each with its own
 # assertions and never a timing trial.
 #
@@ -36,9 +44,9 @@
 #
 # Writes BLZMCP_CARD_PERF_OUT (JSON, schema blzmcp-card-performance/1): candidate, source and
 # attempt, environment identity, the seed and its per-storage verification, every trial, the
-# partitions, HTTP, the workflow cost, the bound cases, the forced failures, every cleanup and the
-# storage restore. It then runs card-testing-perf-validate.php on the receipt and decides its exit
-# on that verdict too. Prints one "partition <storage>/<window>h/<logger> trials_ms=<a,b,c,d,e>
+# partitions, HTTP, the Analytics readiness, the workflow cost, the bound cases, the forced
+# failures, every cleanup and the storage restore. It then runs card-testing-perf-validate.php on
+# the receipt and decides its exit on that verdict too. Prints one "partition <storage>/<window>h/<logger> trials_ms=<a,b,c,d,e>
 # max=<n> pass=<true|false>" line per partition and ends with "CARD PERF PASSED" (exit 0) or
 # "CARD PERF FAILED" (exit 1). The original order storage is restored and every fixture row removed
 # on every exit path, an interrupted run included.
@@ -71,6 +79,10 @@ EXACT_JOBS=${BLZMCP_PERF_REQUIRE_DBSTORE:-0}
 [ "$EXACT_JOBS" == 1 ] || EXACT_JOBS=0
 BUDGET=1500
 RULE='5of5<1500'
+# The measured workflow's period (the weekly review's default; card-testing-perf-trial.php's
+# BLZMCP_CARD_PERF_WORKFLOW_PERIOD, which the validator requires) and its first 3 planned steps.
+WORKFLOW_PERIOD=last_7_days
+WORKFLOW_STEPS='["blaze-mcp-toolkit/payment-health","blaze-mcp-toolkit/card-testing","wc-analytics/totals"]'
 SEED="$T/matrix/seed-payment-volume.php"
 MEASURE="$T/matrix/measure-card-testing.php"
 SWITCH="$T/Integration/test-payment-orders.php"
@@ -129,8 +141,8 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT TERM
 
-seed_range() { # cmd total now
-	local cmd=$1 total=$2 now=$3 off=0 running=0 pids='' n
+seed_range() { # cmd total now [result key, SEEDED]: the sum of the chunks' <key>= lines
+	local cmd=$1 total=$2 now=$3 key=${4:-SEEDED} off=0 running=0 pids='' n
 	while [ "$off" -lt "$total" ]; do
 		n=$CHUNK
 		[ $((off + n)) -gt "$total" ] && n=$((total - off))
@@ -149,7 +161,7 @@ seed_range() { # cmd total now
 		fi
 	done
 	wait
-	cat "$WORK"/seed-"$cmd"-*.log 2>/dev/null | sed -n 's/^SEEDED=//p' | awk '{s += $1} END {print s + 0}'
+	cat "$WORK"/seed-"$cmd"-*.log 2>/dev/null | sed -n "s/^$key=//p" | awk '{s += $1} END {print s + 0}'
 	rm -f "$WORK"/seed-"$cmd"-*.log
 }
 sha256_of() {
@@ -159,7 +171,7 @@ json_or() { # <json candidate> <fallback json>: the candidate when it is one JSO
 	if [ -n "$1" ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$1"; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi
 }
 
-for f in trials storage forced cleanup bound http workflow; do : >"$WORK/$f.jsonl"; done
+for f in trials storage forced cleanup bound http analytics workflow; do : >"$WORK/$f.jsonl"; done
 fail=0
 # cleanup_step <phase> <storage> <cleanup|diag-cleanup> [expected orders removed]: runs one fixture
 # cleanup, keeps its CLEANUP result for the receipt and fails the suite (fail closed) when it is
@@ -173,7 +185,8 @@ cleanup_step() {
 		| .passed = (.ok == true and .settings_restored == true and (if has("expected_removed") then .orders_removed == .expected_removed else true end))' <<<"$c")
 	printf '%s\n' "$c" >>"$WORK/cleanup.jsonl"
 	if [ "$(jq -r '.passed' <<<"$c")" == true ]; then
-		echo "  cleanup $1 ($2): $(jq -r '"orders removed \(.orders_removed // "n/a"), tagged fixture orders remaining \(.tagged_remaining), diagnostics remaining \((.diag_log_rows_remaining // 0) + (.diag_log_files_remaining // 0) + (.diag_jobs_remaining // 0)), settings restored \(.settings_restored)"' <<<"$c")"
+		echo "  cleanup $1 ($2): $(jq -r '"orders removed \(.orders_removed // "n/a"), tagged fixture orders remaining \(.tagged_remaining), diagnostics remaining \((.diag_log_rows_remaining // 0) + (.diag_log_files_remaining // 0) + (.diag_jobs_remaining // 0)), settings restored \(.settings_restored)"
+			+ (if .mode == "orders" then ", Analytics rows removed \(.analytics_stats_removed)+\(.analytics_lookup_rows_removed) and customers \(.analytics_customers_removed), import jobs removed \(.import_jobs_removed); left: rows \(.analytics_rows_remaining), customers \(.analytics_customers_remaining), import jobs \(.import_jobs_remaining), failed imports \(.failed_imports_remaining)" else "" end)' <<<"$c")"
 	else
 		echo "FAIL  cleanup $1 ($2) incomplete: $(jq -c 'del(.phase, .storage, .passed)' <<<"$c")"
 		fail=1
@@ -208,6 +221,33 @@ bound_case() {
 		fi
 	done
 	cleanup_step "bound-$2" "$1" cleanup "$((got + extra))"
+}
+# analytics_ready <storage> <seed now>: the workflow's Analytics precondition, untimed. Imports every
+# eligible card order into WooCommerce Analytics (chunked, in parallel), then has the guard probe
+# exactly the workflow's period with compare after clearing its gap cache. Records one
+# analytics.jsonl line (ok only when the guard is ready and every eligible order was imported) and
+# sets ready_ok=1 only then; otherwise a FAIL line, and the workflow is not measured.
+ready_ok=0
+analytics_ready() {
+	local eligible imported t0 secs r
+	ready_ok=0
+	eligible=$(wpc eval-file "$SEED" card-analytics-eligible "$2" | sed -n 's/^CARD_ANALYTICS_ELIGIBLE=//p' | tail -1)
+	case "$eligible" in '' | *[!0-9]*) eligible=0 ;; esac
+	t0=$(date +%s)
+	imported=0
+	[ "$eligible" -gt 0 ] && imported=$(seed_range card-analytics-import "$eligible" "$2" IMPORTED)
+	secs=$(($(date +%s) - t0))
+	r=$(json_or "$(wpc eval-file "$SEED" card-analytics-ready "$2" "$WORKFLOW_PERIOD" | sed -n 's/^CARD_ANALYTICS_READY=//p' | tail -1)" '{"ok":false,"reason":"no readiness result"}')
+	r=$(jq -c --arg s "$1" --argjson i "${imported:-0}" --argjson e "$eligible" --argjson secs "$secs" '{storage:$s} + . + {imported:$i, eligible_listed:$e, import_seconds_excluded:$secs}
+		| .ok = (.ok == true and has("reason") and .reason == null and .cache_cleared == true and (.eligible | type) == "number" and .eligible > 0 and .imported == .eligible and .missing == 0 and .failed_imports == 0)' <<<"$r")
+	printf '%s\n' "$r" >>"$WORK/analytics.jsonl"
+	if [ "$(jq -r '.ok' <<<"$r")" == true ]; then
+		ready_ok=1
+		echo "  analytics ($1): $(jq -r '"\(.imported) of \(.eligible) eligible orders imported in \(.import_seconds_excluded)s (excluded); guard ready for \(.period) with compare after clearing its gap cache"' <<<"$r")"
+	else
+		echo "FAIL  analytics not ready ($1): $(jq -c '{reason, period, cache_cleared, eligible, imported, missing, failed_imports}' <<<"$r")"
+		fail=1
+	fi
 }
 
 seed_now0=''
@@ -282,20 +322,30 @@ for storage in $STORAGES; do
 		cleanup_step "diag-$logger" "$storage" diag-cleanup
 	done
 	if [ -n "${BLZMCP_PERF_PORT:-}" ] && [ -n "${BLZMCP_PERF_LOGIN:-}" ] && [ -n "${BLZMCP_PERF_APP_PASSWORD:-}" ]; then
-		url="http://localhost:$BLZMCP_PERF_PORT/wp-json/wp-abilities/v1/abilities/blaze-mcp-toolkit/card-testing/run"
+		# Through the MCP Adapter route (the recommended state's transport) with an integer
+		# since_hours. The WordPress abilities REST route cannot carry it: read-only abilities run only
+		# over GET there, a query value is a string, and card testing rejects a string look-back by
+		# contract (C1), so only the default 48 could be asked that way (wave 3 pre-review smoke).
+		url="http://localhost:$BLZMCP_PERF_PORT/wp-json/mcp/mcp-adapter-default-server"
+		mcp_post() { # session-id body -> "<http code> <seconds>"; reply in $WORK/http.raw, headers in $WORK/http.headers
+			printf 'user = "%s:%s"\n' "$BLZMCP_PERF_LOGIN" "$BLZMCP_PERF_APP_PASSWORD" | curl -s -K - -o "$WORK/http.raw" -D "$WORK/http.headers" -w '%{http_code} %{time_total}' \
+				-X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-06-18' \
+				${1:+-H "Mcp-Session-Id: $1"} --data-binary "$2" "$url"
+		}
 		for window in $WINDOWS; do
 			wpc eval-file "$T/matrix/payment-fixture.php" clear-cache >/dev/null
 			for kind in cold warm; do
-				# Read-only abilities run over GET; fall back to POST if this WordPress wants POST.
-				ms=$(printf 'user = "%s:%s"\n' "$BLZMCP_PERF_LOGIN" "$BLZMCP_PERF_APP_PASSWORD" | curl -s -K - -o "$WORK/http.json" -w '%{http_code} %{time_total}' -G \
-					"$url" --data-urlencode "input[since_hours]=$window")
-				method=GET
-				if [ "${ms%% *}" == 405 ]; then
-					ms=$(printf 'user = "%s:%s"\n' "$BLZMCP_PERF_LOGIN" "$BLZMCP_PERF_APP_PASSWORD" | curl -s -K - -o "$WORK/http.json" -w '%{http_code} %{time_total}' \
-						-X POST -H 'Content-Type: application/json' --data-binary "{\"input\":{\"since_hours\":$window}}" "$url")
-					method=POST
-				fi
-				valid=$(jq -r '(type == "object" and .schema_version == 1 and (.verdict | type) == "string" and (.totals | type) == "object" and ((.protection // []) | length) == 5)' "$WORK/http.json" 2>/dev/null || echo false)
+				# One session per figure (initialize is not timed), then the timed tools/call.
+				: >"$WORK/http.headers"
+				mcp_post '' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"blzmcp-card-perf","version":"1.3"}}}' >/dev/null
+				sid=$(grep -i '^mcp-session-id:' "$WORK/http.headers" 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r')
+				[ -n "$sid" ] && mcp_post "$sid" '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+				ms=$(mcp_post "$sid" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"mcp-adapter-execute-ability\",\"arguments\":{\"ability_name\":\"blaze-mcp-toolkit/card-testing\",\"parameters\":{\"since_hours\":$window}}}}")
+				method=MCP
+				# A text/event-stream reply carries the JSON-RPC message on its data: lines.
+				if head -c 6 "$WORK/http.raw" 2>/dev/null | grep -q '^event:\|^data:'; then sed -n 's/^data: \{0,1\}//p' "$WORK/http.raw" >"$WORK/http.rpc"; else cp "$WORK/http.raw" "$WORK/http.rpc" 2>/dev/null; fi
+				jq -c 'if (type == "object" and .jsonrpc == "2.0" and .id == 2 and (.result | type) == "object" and (.result.isError // false) == false) then (.result.structuredContent // ((.result.content // [])[0].text // "null" | fromjson? // null)) | if (type == "object" and has("success")) then (if .success == true then .data else null end) else . end else null end' "$WORK/http.rpc" >"$WORK/http.json" 2>/dev/null || echo null >"$WORK/http.json"
+				valid=$(jq -r --argjson w "$window" '(type == "object" and .schema_version == 1 and .since_hours == $w and (.verdict | type) == "string" and (.totals | type) == "object" and ((.protection // []) | length) == 5)' "$WORK/http.json" 2>/dev/null || echo false)
 				jq -cn --arg s "$storage" --argjson w "$window" --arg k "$kind" --arg r "${ms:-000 0}" --arg m "$method" --arg v "$valid" \
 					'{storage:$s, window:$w, kind:$k, method:$m, http_code:($r | split(" ")[0]), valid_body:($v == "true"), total_ms:((($r | split(" ")[1]) // "0" | tonumber) * 1000 | round)}' >>"$WORK/http.jsonl"
 				if [ "${ms%% *}" != 200 ] || [ "$valid" != true ]; then
@@ -309,12 +359,22 @@ for storage in $STORAGES; do
 	else
 		echo "  HTTP not measured: BLZMCP_PERF_PORT, BLZMCP_PERF_LOGIN and BLZMCP_PERF_APP_PASSWORD are not all set (the gate requires it)"
 	fi
-	w=$(json_or "$(wpc eval-file "$MEASURE" workflow | sed -n 's/^WORKFLOW=//p' | tail -1)" '{"ok":false,"error":"no output"}')
+	# The workflow's Analytics precondition (after every trial and the HTTP figures, untimed), then
+	# the combined workflow cost, which is never measured on a store whose Analytics is not ready.
+	analytics_ready "$storage" "$now"
+	if [ "$ready_ok" == 1 ]; then
+		w=$(json_or "$(wpc eval-file "$MEASURE" workflow "$WORKFLOW_PERIOD" | sed -n 's/^WORKFLOW=//p' | tail -1)" '{"ok":false,"error":"no output"}')
+	else
+		w='{"ok":false,"error":"analytics_not_ready","steps":[],"pooled_budget":false}'
+	fi
 	jq -c --arg s "$storage" '{storage:$s} + .' <<<"$w" >>"$WORK/workflow.jsonl"
-	if [ "$(jq -r '.ok == true' <<<"$w")" == true ]; then
+	# The measurement's own ok, and the suite's check of the step records: the plan's first 3
+	# steps, in plan order, each planned, called with the plan's arguments and successful.
+	if [ "$(jq -r --argjson want "$WORKFLOW_STEPS" '.ok == true and ((.steps // []) | length) == 3 and ([.steps[].ability] == $want)
+		and (.steps[2].arguments.subject == "orders") and (.steps | all(.planned == true and .success == true and .error_code == null and .arguments == .plan_arguments and (.elapsed_ms | type) == "number"))' <<<"$w")" == true ]; then
 		echo "  workflow cost ($storage, cold, reported on its own): $(jq -r '"\([.steps[] | "\(.ability) \(.elapsed_ms) ms"] | join(", ")); total \(.total_ms) ms"' <<<"$w")"
 	else
-		echo "FAIL  workflow cost ($storage): $(jq -c '{error, steps}' <<<"$w")"
+		echo "FAIL  workflow cost ($storage): $(jq -c '{error, failures, steps: [(.steps // [])[] | {ability, planned, success, error_code}]}' <<<"$w")"
 		fail=1
 	fi
 	cleanup_step after "$storage" cleanup "$((got_orders + got_old))"
@@ -346,7 +406,8 @@ cand_sha=null
 [ -n "${BLZMCP_PERF_CANDIDATE:-}" ] && [ -f "$BLZMCP_PERF_CANDIDATE" ] && cand_sha="\"$(sha256_of "$BLZMCP_PERF_CANDIDATE")\""
 jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage.jsonl" --slurpfile http "$WORK/http.jsonl" \
 	--slurpfile forced "$WORK/forced.jsonl" --slurpfile bound "$WORK/bound.jsonl" --slurpfile cleanup "$WORK/cleanup.jsonl" \
-	--slurpfile workflow "$WORK/workflow.jsonl" --argjson restore "$restore_json" --argjson limits "$limits" --argjson host "$host_json" \
+	--slurpfile workflow "$WORK/workflow.jsonl" --slurpfile analytics "$WORK/analytics.jsonl" --arg wperiod "$WORKFLOW_PERIOD" \
+	--argjson restore "$restore_json" --argjson limits "$limits" --argjson host "$host_json" \
 	--argjson dist "$dist" --argjson cand "$cand_sha" --arg source "$SOURCE_SHA" --arg attempt "$ATTEMPT" \
 	--argjson budget "$BUDGET" --arg rule "$RULE" --argjson trials_n "$TRIALS" --argjson orders "$ORDERS" --argjson old "$OLD" \
 	--arg storages "$STORAGES" --arg windows "$WINDOWS" --arg loggers "$LOGGERS" --argjson smoke "$smoke" --arg smoke_reasons "$smoke_reasons" \
@@ -405,6 +466,8 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 		card_testing_cold_ms: ($parts | map({key: "\(.storage)/\(.window)h/\(.logger)", value: .max_ms}) | from_entries),
 		http: $http,
 		http_latency_ms: ($http | map({key: "\(.storage)/\(.window)h/\(.kind)", value: .total_ms}) | from_entries),
+		workflow_period: $wperiod,
+		analytics_ready: $analytics,
 		workflow_cost: $workflow,
 		bound_cases: $bound,
 		bound_checks: $bound_check,
@@ -415,11 +478,14 @@ jq -n --slurpfile trials "$WORK/trials.jsonl" --slurpfile storage "$WORK/storage
 		cleanup_checks: $cleanup_check,
 		cleanup_ok: $cleanup_ok,
 		storage_restored: $restore,
-		all_pass: ((($parts | length) == ($want | length)) and ($parts | all(.pass)) and ($forced_check | all(.detected)) and ($bound_check | all(.ok)) and $cleanup_ok and ($smoke | not))
+		all_pass: ((($parts | length) == ($want | length)) and ($parts | all(.pass)) and ($forced_check | all(.detected)) and ($bound_check | all(.ok)) and $cleanup_ok and ($smoke | not)
+			and ($analytics | length) == ($st | length) and ($analytics | all(.ok == true)) and ($workflow | length) == ($st | length) and ($workflow | all(.ok == true)))
 	}' >"$OUT" || { echo "FAIL  the receipt could not be written"; fail=1; }
 jq -r '.partitions[] | "partition \(.storage)/\(.window)h/\(.logger) trials_ms=\(.trials_ms | map(tostring) | join(",")) max=\(.max_ms // "none") pass=\(.pass)"' "$OUT" 2>/dev/null
 jq -r '.forced_failure_checks[] | "forced \(.force)-reader failure \(.storage) \(.logger): probes \(.probes), detected \(.detected)"' "$OUT" 2>/dev/null
 jq -r '.bound_checks[] | "bound \(.case) \(.k) \(.storage): runs \(.runs), ok \(.ok)"' "$OUT" 2>/dev/null
+jq -r '.analytics_ready[] | "analytics \(.storage): ready \(.ok), reason \(.reason // "none"), \(.period) with compare, gap cache cleared \(.cache_cleared), imported \(.imported) of \(.eligible)"' "$OUT" 2>/dev/null
+jq -r '.workflow_cost[] | "workflow \(.storage): ok \(.ok), steps \([(.steps // [])[] | "\(.ability)\(if .success == true then "" else " FAILED" end)"] | join(", ")), total \(.total_ms // "none") ms"' "$OUT" 2>/dev/null
 echo "cleanup: $(jq -r '"\(if .cleanup_ok then "complete" else "INCOMPLETE" end): \([.cleanup[] | select(.phase == "after") | "\(.storage) removed \(.orders_removed)/\(.expected_removed // "n/a"), \(.tagged_remaining) tagged left"] | join("; ")); order storage restored to \(.storage_restored.storage) sync=\(.storage_restored.sync): \(.storage_restored.ok)"' "$OUT" 2>/dev/null)"
 [ "$smoke" == true ] && echo "SMOKE  this receipt is a smoke run ($smoke_reasons): it can never pass the gate"
 # The gate's own validator decides too (fail closed on its refusal).

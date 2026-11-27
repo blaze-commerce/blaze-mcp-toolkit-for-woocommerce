@@ -627,27 +627,69 @@ $snapshot = static function () use ( $wpdb ): array {
 };
 
 // ---------------------------------------------------------------- admin: cold, then warm (C2, C5, C8).
-// Other lanes may write orders (posts, in legacy storage) or audit rows in the shared store while this
-// runs. The ability never writes either, so a store-wide difference that does not reproduce is another
-// process: the cold/warm pair is retried (up to 3 times) and the last attempt is the one asserted. A
-// real write by the ability reproduces on every attempt and still fails.
-$rw_attempts = 0;
-do {
-	++$rw_attempts;
+// One cold/warm pair, taken once (wave 3, REVIEW-pass4a R2: no retry). The HTTP and mail counters are
+// never reset: the pair is judged on how far they moved across both calls, and the audit table must
+// grow by exactly the 2 rows of the 2 calls. Every difference is returned as a violation with its
+// evidence, so a failure shows what changed. Freeze and receipt runs are serial (one process in the
+// environment); a run that overlaps another process's writes is a failed run to repeat, never retried
+// into a pass here.
+$readonly_pair = static function ( ?callable $arm = null ) use ( $ability, $clear_cache, $snapshot, $wpdb, $audit_table, &$http_calls, &$mail_calls ): array {
 	$clear_cache();
-	$http_calls = 0;
-	$mail_calls = 0;
-	$audit_0    = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $audit_table ) );
-	$before     = $snapshot();
-	$t0         = microtime( true );
-	$cold       = $ability->execute( array( 'since_hours' => 48 ) );
-	$cold_ms    = (int) round( ( microtime( true ) - $t0 ) * 1000 );
-	$warm       = $ability->execute();
-	$after      = $snapshot();
-	$audit_1    = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $audit_table ) );
-} while ( $rw_attempts < 3 && ( $before !== $after || $audit_0 + 2 !== $audit_1 ) );
-if ( $rw_attempts > 1 ) {
-	echo "NOTE  read-only snapshot taken {$rw_attempts} times: another process changed the shared store during an earlier attempt\n";
+	$http_0  = $http_calls;
+	$mail_0  = $mail_calls;
+	$audit_0 = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $audit_table ) );
+	$before  = $snapshot();
+	// An injection for the self-checks below is armed for the cold call only.
+	$disarm  = null === $arm ? null : $arm();
+	$t0      = microtime( true );
+	$cold    = $ability->execute( array( 'since_hours' => 48 ) );
+	$cold_ms = (int) round( ( microtime( true ) - $t0 ) * 1000 );
+	if ( is_callable( $disarm ) ) {
+		$disarm();
+	}
+	$warm    = $ability->execute();
+	$after   = $snapshot();
+	$audit_1 = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $audit_table ) );
+	$out     = array();
+	foreach ( array_unique( array_merge( array_keys( $before['options'] ), array_keys( $after['options'] ) ) ) as $name ) {
+		$was = $before['options'][ $name ] ?? null;
+		$now = $after['options'][ $name ] ?? null;
+		if ( $was !== $now ) {
+			$out[] = 'option ' . $name . ': ' . ( null === $was ? 'added' : ( null === $now ? 'removed' : 'changed' ) );
+		}
+	}
+	foreach ( array_unique( array_merge( array_keys( $before['tables'] ), array_keys( $after['tables'] ) ) ) as $t ) {
+		if ( ( $before['tables'][ $t ] ?? null ) !== ( $after['tables'][ $t ] ?? null ) ) {
+			$out[] = 'table ' . $t . ': checksum ' . ( $before['tables'][ $t ] ?? 'none' ) . ' -> ' . ( $after['tables'][ $t ] ?? 'none' );
+		}
+	}
+	foreach ( array( 'schema', 'posts', 'postmeta', 'comments', 'autoload' ) as $k ) {
+		if ( $before[ $k ] !== $after[ $k ] ) {
+			$out[] = $k . ': ' . $before[ $k ] . ' -> ' . $after[ $k ];
+		}
+	}
+	if ( $http_calls !== $http_0 ) {
+		$out[] = 'http: ' . ( $http_calls - $http_0 ) . ' request(s) during the pair';
+	}
+	if ( $mail_calls !== $mail_0 ) {
+		$out[] = 'mail: ' . ( $mail_calls - $mail_0 ) . ' message(s) during the pair';
+	}
+	if ( $audit_0 + 2 !== $audit_1 ) {
+		$out[] = 'audit: ' . ( $audit_1 - $audit_0 ) . ' row(s) for 2 calls';
+	}
+	return array(
+		'cold'       => $cold,
+		'warm'       => $warm,
+		'cold_ms'    => $cold_ms,
+		'violations' => $out,
+	);
+};
+$pair    = $readonly_pair();
+$cold    = $pair['cold'];
+$warm    = $pair['warm'];
+$cold_ms = $pair['cold_ms'];
+foreach ( $pair['violations'] as $violation ) {
+	echo "EVIDENCE  read-only pair: {$violation}\n";
 }
 echo "TIMING  cold card-testing call {$cold_ms} ms (" . count( blzmcp_ct_ids() ) . " fixture orders)\n";
 $v = $valid( $cold );
@@ -661,9 +703,90 @@ if ( '1' === getenv( 'BLZMCP_CT_SAMPLE' ) ) {
 	echo "SAMPLE  " . wp_json_encode( $cold, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n";
 }
 blzmcp_it_equals( wp_json_encode( $cold ), wp_json_encode( $warm ), 'warm call: identical bytes, checked_at kept (C2)' );
-blzmcp_it_equals( array( 0, 0 ), array( $http_calls, $mail_calls ), 'cold and warm calls: no HTTP, loopback or mail' );
-blzmcp_it_equals( $before, $after, 'cold and warm calls: no option, order, schema, schedule, log or post change (transients excepted)' );
-blzmcp_it_equals( $audit_0 + 2, $audit_1, 'one audit row per call, nothing else' );
+blzmcp_it_equals( array(), array_values( array_filter( $pair['violations'], static fn( $v ) => str_starts_with( $v, 'http' ) || str_starts_with( $v, 'mail' ) ) ), 'cold and warm calls: no HTTP, loopback or mail (counted across both calls, never reset)' );
+blzmcp_it_equals( array(), array_values( array_filter( $pair['violations'], static fn( $v ) => ! str_starts_with( $v, 'http' ) && ! str_starts_with( $v, 'mail' ) && ! str_starts_with( $v, 'audit' ) ) ), 'cold and warm calls: no option, order, schema, schedule, log or post change (transients excepted), taken once' );
+blzmcp_it_equals( array(), array_values( array_filter( $pair['violations'], static fn( $v ) => str_starts_with( $v, 'audit' ) ) ), 'one audit row per call, nothing else' );
+
+// Self-check of the read-only check itself (permanent): a one-time write, armed for the first (cold)
+// call of a pair only, must be reported; HTTP and mail made during the cold call must still count after
+// the warm call; and the same check over the same calls with nothing injected must pass.
+$inj_tag   = 'blzct_injected_' . blzmcp_ct_tag();
+$one_shot  = static function ( callable $write ): callable {
+	return static function () use ( $write ): callable {
+		$fired = false;
+		$hook  = static function ( $map ) use ( &$fired, $write ) {
+			if ( ! $fired ) {
+				$fired = true;
+				$write();
+			}
+			return $map;
+		};
+		// The token map is read inside every uncached call (cache context and run), so the write lands
+		// in the middle of the cold call.
+		add_filter( 'blaze_mcp_toolkit_payment_gateway_tokens', $hook, 99 );
+		return static function () use ( $hook ): void {
+			remove_filter( 'blaze_mcp_toolkit_payment_gateway_tokens', $hook, 99 );
+		};
+	};
+};
+$meta_order = (int) ( blzmcp_ct_ids()[0] ?? 0 );
+$injections = array(
+	'option write'     => array(
+		$one_shot( static fn() => update_option( $inj_tag, 'one-time write', false ) ),
+		'option ' . $inj_tag,
+		static fn() => delete_option( $inj_tag ),
+	),
+	'order meta write' => array(
+		$one_shot(
+			static function () use ( $meta_order ): void {
+				$o = wc_get_order( $meta_order );
+				if ( $o ) {
+					$o->update_meta_data( '_blzct_injected', 'one-time write' );
+					$o->save_meta_data();
+				}
+			}
+		),
+		$hpos ? 'table wc_orders_meta' : 'postmeta',
+		static function () use ( $meta_order ): void {
+			$o = wc_get_order( $meta_order );
+			if ( $o ) {
+				$o->delete_meta_data( '_blzct_injected' );
+				$o->save_meta_data();
+			}
+		},
+	),
+	'schedule write'   => array(
+		$one_shot( static fn() => wp_schedule_single_event( time() + HOUR_IN_SECONDS, $inj_tag ) ),
+		'option cron',
+		static fn() => wp_clear_scheduled_hook( $inj_tag ),
+	),
+	'HTTP and mail'    => array(
+		$one_shot(
+			static function (): void {
+				wp_remote_get( 'https://example.invalid/blzct-injected' );
+				wp_mail( 'blzct-injected@example.invalid', 'injected', 'injected' );
+			}
+		),
+		'http',
+		static fn() => null,
+	),
+	'audit row'        => array(
+		$one_shot( static fn() => \Blaze\McpToolkit\Audit\AuditLog::record( 0, 'blaze-mcp-toolkit/injected', array(), 0, 0, 'ok' ) ),
+		'audit',
+		static fn() => null,
+	),
+);
+foreach ( $injections as $what => [ $arm, $expect, $undo ] ) {
+	$injected = $readonly_pair( $arm );
+	$undo();
+	$hits = array_values( array_filter( $injected['violations'], static fn( $v ) => str_starts_with( $v, $expect ) ) );
+	blzmcp_it_assert( array() !== $hits, "self-check, injected one-time {$what} during the cold call: the read-only check reports it" . ( array() === $hits ? ' (reported: ' . implode( '; ', $injected['violations'] ) . ')' : ' (' . implode( '; ', $hits ) . ')' ) );
+	if ( 'HTTP and mail' === $what ) {
+		blzmcp_it_assert( array() !== array_filter( $injected['violations'], static fn( $v ) => str_starts_with( $v, 'mail' ) ), 'self-check, mail sent during the cold call is still counted after the warm call (no counter reset)' );
+	}
+}
+$clean = $readonly_pair();
+blzmcp_it_equals( array(), $clean['violations'], 'self-check, the same check with the injection removed passes' );
 blzmcp_it_equals( array( 1, 1, 48 ), array( $cold['schema_version'], $cold['rule_version'], $cold['since_hours'] ), 'schema 1, rule 1, 48 hours' );
 blzmcp_it_equals( wp_timezone()->getName(), $cold['timezone'], 'store timezone' );
 $checked = strtotime( $cold['checked_at'] );
@@ -749,32 +872,20 @@ foreach ( $prose( $cold ) as $text ) {
 }
 blzmcp_it_equals( array(), array_values( array_unique( $jargon ) ), 'owner prose: no storage jargon, status slug, table or tool name, em dash or safety claim' );
 
-// Identical inputs give identical bytes (apart from checked_at, which is the same second here).
-// The order-ID fingerprint brackets each pair: a pair during which another process wrote orders is
-// not a comparison of identical inputs, so it is retried; a same-second pair over an unchanged store
-// must match byte for byte.
+// Identical inputs give identical bytes (wave 3, REVIEW-pass4a R2: one pair, no retry or skip). The
+// pair starts just after a second boundary, so both cold calls share checked_at, and the order-ID
+// fingerprint brackets it: a store that changed during the pair fails the check with its evidence.
 $order_print = static fn(): string => md5( (string) wp_json_encode( blzmcp_it_order_store_ids() ) );
-$same        = null;
-$skipped     = 0;
-for ( $try = 0; $try < 8 && null === $same; $try++ ) {
-	$print = $order_print();
-	$clear_cache();
-	$x = $ability->execute();
-	$clear_cache();
-	$y = $ability->execute();
-	if ( $order_print() !== $print ) {
-		++$skipped;
-		continue;
-	}
-	if ( is_array( $x ) && is_array( $y ) && $x['checked_at'] === $y['checked_at'] ) {
-		$same = array( $x, $y );
-	}
-}
-if ( $skipped > 0 ) {
-	echo "NOTE  identical-bytes check: {$skipped} pair(s) skipped because another process wrote orders meanwhile\n";
-}
-blzmcp_it_assert( null !== $same, 'a same-second pair of cold calls over an unchanged store was obtained' );
-blzmcp_it_assert( null !== $same && wp_json_encode( $same[0] ) === wp_json_encode( $same[1] ), 'two cold calls in the same second give identical bytes' );
+time_sleep_until( floor( microtime( true ) ) + 1.01 );
+$print_0 = $order_print();
+$clear_cache();
+$x = $ability->execute();
+$clear_cache();
+$y       = $ability->execute();
+$print_1 = $order_print();
+blzmcp_it_equals( $print_0, $print_1, 'the identical-bytes pair ran over an unchanged store (order-ID fingerprint before and after)' );
+blzmcp_it_equals( is_array( $x ) ? $x['checked_at'] : null, is_array( $y ) ? $y['checked_at'] : 'no result', 'the identical-bytes pair ran within one second' );
+blzmcp_it_assert( is_array( $x ) && is_array( $y ) && wp_json_encode( $x ) === wp_json_encode( $y ), 'two cold calls in the same second give identical bytes' );
 
 // ---------------------------------------------------------------- roles, diagnostics and warm downgrade (C2).
 $clear_cache();

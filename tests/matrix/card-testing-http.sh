@@ -197,11 +197,40 @@ card_seed() { # label
 	else
 		no "card fixture seeded [$1] ($(head -c 200 <<<"$out"))"
 	fi
+	card_analytics_checks "$1" "$out"
+}
+# R3 (REVIEW-pass4a): the fixture's orders are in WooCommerce Analytics (imported synchronously, one
+# stats row per seeded order) and the guard, probed fresh with its gap cache cleared, finds nothing
+# missing over the fixture's 28 days or the workflows' own windows, before any case expects the
+# order-totals step. Prints one check per line on the fixture's KEY=value output.
+card_analytics_lines() { # fixture-output -> label<TAB>true|false
+	local seeded imported hist wf ready
+	seeded=$(sed -n 's/^SEEDED=//p' <<<"$1")
+	imported=$(sed -n 's/^IMPORTED=//p' <<<"$1")
+	hist=$(sed -n 's/^ANALYTICS_GAP_HISTORY=//p' <<<"$1")
+	wf=$(sed -n 's/^ANALYTICS_GAP_WORKFLOW=//p' <<<"$1")
+	ready=$(sed -n 's/^ANALYTICS_READY=//p' <<<"$1")
+	if [ -n "$seeded" ]; then
+		printf '%s\t%s\n' "every seeded order has its Analytics row (imported ${imported:-none} of $seeded)" "$([ -n "$imported" ] && [ "$imported" == "$seeded" ] && echo true || echo false)"
+	fi
+	printf '%s\t%s\n' "Analytics guard, gap cache cleared: nothing missing over the fixture's 28 days (${hist:-not probed})" "$([ "$hist" == none ] && echo true || echo false)"
+	printf '%s\t%s\n' "Analytics guard, gap cache cleared: nothing missing for the workflows' windows (${wf:-not probed})" "$([ "$wf" == none ] && echo true || echo false)"
+	printf '%s\t%s\n' 'Analytics ready before any case expects the order-totals step' "$([ "$ready" == 1 ] && [ "$hist" == none ] && [ "$wf" == none ] && echo true || echo false)"
+}
+card_analytics_checks() { # label fixture-output
+	local lbl okv n=0
+	while IFS=$'\t' read -r lbl okv; do
+		[ -n "$lbl" ] || continue
+		n=$((n + 1))
+		if [ "$okv" == true ]; then ok "card fixture [$1]: $lbl"; else no "card fixture [$1]: $lbl"; fi
+	done < <(card_analytics_lines "$2")
+	[ "$n" -gt 0 ] || no "card fixture [$1]: Analytics readiness could not be evaluated"
 }
 card_unseed() { # label
 	local out
 	out=$(helper card-testing-fixture.php cleanup)
-	if [ "$(sed -n 's/^REMOVED=//p' <<<"$out")" -gt 0 ] 2>/dev/null && [ "$(sed -n 's/^SETTINGS_RESTORED=//p' <<<"$out")" == 1 ]; then
+	if [ "$(sed -n 's/^REMOVED=//p' <<<"$out")" -gt 0 ] 2>/dev/null && [ "$(sed -n 's/^SETTINGS_RESTORED=//p' <<<"$out")" == 1 ] \
+		&& [ "$(sed -n 's/^IMPORT_JOBS_LEFT=//p' <<<"$out")" == 0 ] && [ "$(sed -n 's/^STATS_LEFT=//p' <<<"$out")" == 0 ]; then
 		eq "card fixture removed [$1]: nothing of it left (orders, log files, saved settings)" 'ORDERS_LEFT=0 LOGS_LEFT=0 SAVED_LEFT=0' "$(helper card-testing-fixture.php status | grep -E '^(ORDERS|LOGS|SAVED)_LEFT=' | tr '\n' ' ' | sed 's/ $//')"
 	else
 		no "card fixture removed [$1] ($(head -c 200 <<<"$out"))"
@@ -375,6 +404,8 @@ card_any_cases() {
 	# Workflows: the 3 payment workflows put card testing second and its step runs; refund triage has none.
 	for s in "${TRANSPORTS[@]}"; do
 		row_begin
+		# Analytics readiness rechecked fresh inside the row (R3): order totals are expected only then.
+		card_analytics_checks "$s, before the workflow cases" "$(helper card-testing-fixture.php analytics-ready)"
 		ct=$(tool_of "$s" "$CARD")
 		pt=$(tool_of "$s" "$PAY")
 		for w in weekly-store-review revenue-drop-triage failed-order-triage; do

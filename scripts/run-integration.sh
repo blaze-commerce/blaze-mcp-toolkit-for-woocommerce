@@ -110,6 +110,23 @@ for combo in hpos:no hpos:yes legacy:yes legacy:no; do
 			echo "PASS  $f [$label] ($summary)"
 		fi
 	done
+	# The card fixture's Analytics readiness (1.3 wave 3, REVIEW-pass4a R3), in each authoritative
+	# storage (sync off): the cold-guard / pending-asynchronous-import case, then the synchronously
+	# imported fixture with the order-totals step back in the plan.
+	if [ "$pf_sync" == no ]; then
+		f=tests/matrix/test-card-fixture-analytics.php
+		out=$(npx wp-env run cli env BLZMCP_SKIP_HTTP=1 BLZMCP_EXPECT_AUTHORITY="$pf_set" wp eval-file "wp-content/plugins/blaze-mcp-toolkit-for-woocommerce/$f" 2>&1)
+		status=$?
+		summary=$(printf '%s\n' "$out" | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1)
+		seen=$(printf '%s\n' "$out" | grep -E '^STORAGE ' | tail -1)
+		if [ "$status" -ne 0 ] || ! printf '%s' "$summary" | grep -q ', 0 failed' || ! printf '%s' "$seen" | grep -q "authority=$pf_set sync=$pf_sync"; then
+			echo "FAIL  $f [$label] (${summary:-no summary}; ${seen:-no STORAGE line})"
+			printf '%s\n' "$out" | awk '/^FAIL/ && n++ < 20'
+			fail=1
+		else
+			echo "PASS  $f [$label] ($summary)"
+		fi
+	fi
 	# Gateway registry genuinely unbuilt: seed, check (no rest_api_init, so nothing builds it), clean.
 	for entry in "tests/Integration/test-payment-methods.php|BLZMCP_PM_STEP" "tests/Integration/test-payment-health.php|BLZMCP_PH_STEP"; do
 		IFS='|' read -r f step_var <<<"$entry"

@@ -421,6 +421,28 @@ reply 200 "$(err_result 'Error: Permission denied for ability: blaze-mcp-toolkit
 t_eq 'card denial: the clean Easy MCP AI refusal for card testing is a permission refusal without facts' 'perm clean' "$(call_refusal easy "$CARD") $(blzmcp_leak_state "$RPC_BODY")"
 reply 200 "$(err_result "Ability 'blaze-mcp-toolkit/card-testing' not found on this WordPress site.")"
 t_eq 'card off: the recommended not-found answer for card testing is tool_off' tool_off "$(call_refusal rec "$CARD")"
+# R3 (REVIEW-pass4a, wave 3): Analytics readiness of the card fixture, checked on its own output.
+ca_count() { # fixture-output -> "<true> <false>"
+	local out
+	out=$(card_analytics_lines "$1" | cut -f2)
+	echo "$(grep -c '^true$' <<<"$out") $(grep -c '^false$' <<<"$out")"
+}
+CA_READY=$'SEEDED=433\nIMPORTED=433\nANALYTICS_GAP_HISTORY=none\nANALYTICS_GAP_WORKFLOW=none\nANALYTICS_READY=1'
+t_eq 'card analytics: an imported, ready fixture passes every readiness check' '4 0' "$(ca_count "$CA_READY")"
+t_eq 'card analytics: the recheck (no seed count) passes when ready' '3 0' "$(ca_count $'ANALYTICS_GAP_HISTORY=none\nANALYTICS_GAP_WORKFLOW=none\nANALYTICS_READY=1')"
+for m in 'IMPORTED=0' 'IMPORTED=432' 'ANALYTICS_GAP_HISTORY=orders_not_imported' 'ANALYTICS_GAP_HISTORY=import_not_run' 'ANALYTICS_GAP_WORKFLOW=import_in_progress' 'ANALYTICS_READY=0'; do
+	k=${m%%=*}
+	r=$(ca_count "$(sed "s/^$k=.*/$m/" <<<"$CA_READY")")
+	[ "${r#* }" -gt 0 ] && t_ok "card analytics: a fixture with $m fails ($r)" || t_no "card analytics: a fixture with $m passed ($r)"
+done
+r=$(ca_count "$(grep -v '^ANALYTICS_READY=' <<<"$CA_READY")")
+[ "${r#* }" -gt 0 ] && t_ok "card analytics: no readiness line fails ($r)" || t_no "card analytics: no readiness line passed ($r)"
+r=$(ca_count '')
+[ "${r#* }" -gt 0 ] && t_ok "card analytics: no fixture output fails, never vacuously passes ($r)" || t_no "card analytics: no fixture output passed ($r)"
+t_eq 'card analytics: card_seed checks readiness on the seed output' 1 "$(sed -n '/^card_seed() {/,/^}/p' "$CARD_HTTP" | grep -cE '^[[:space:]]*card_analytics_checks "\$1" "\$out"$')"
+t_eq 'card analytics: the workflow rows recheck readiness fresh before expecting the order-totals step' 1 "$(sed -n '/^card_any_cases() {/,/^}/p' "$CARD_HTTP" | awk '/row_begin/ {r = 1} r && /card_analytics_checks .*analytics-ready/ {a = 1} a && /card_plan_checks/ {print "ok"; exit}' | grep -c ok)"
+t_eq 'card analytics: the cleanup must leave no pending import job and no Analytics row' 2 "$(sed -n '/^card_unseed() {/,/^}/p' "$CARD_HTTP" | grep -oE '(IMPORT_JOBS|STATS)_LEFT=//p' | wc -l | tr -d ' ')"
+t_eq 'card analytics: the fixture imports every order synchronously and probes with the gap cache cleared' '1 3' "$(grep -c 'OrdersScheduler::import( \$order->get_id() );' "$(dirname "$CARD_HTTP")/card-testing-fixture.php") $(sed -n '/^function blzmcp_cardfx_analytics()/,/^}/p' "$(dirname "$CARD_HTTP")/card-testing-fixture.php" | grep -c 'AnalyticsGuard::clear_cache();')"
 reply 200 "$(err_result "Ability 'blaze-mcp-toolkit/payment-health' not found on this WordPress site.")"
 c_cls=$(call_refusal rec "$CARD")
 [ "${c_cls#bad:}" != "$c_cls" ] && t_ok "card off: another ability's not-found answer is not card testing's ($c_cls)" || t_no "card off: another ability's not-found answer counted for card testing ($c_cls)"
